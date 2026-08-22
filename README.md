@@ -1,408 +1,388 @@
-# SAM 3: Segment Anything with Concepts
+# sam3 × CrispEdit 打标说明
 
-Meta Superintelligence Labs
+这个仓库当前主要用于 **CrispEdit-2M 的两阶段打标**：
 
-[Nicolas Carion](https://www.nicolascarion.com/)\*,
-[Laura Gustafson](https://scholar.google.com/citations?user=c8IpF9gAAAAJ&hl=en)\*,
-[Yuan-Ting Hu](https://scholar.google.com/citations?user=E8DVVYQAAAAJ&hl=en)\*,
-[Shoubhik Debnath](https://scholar.google.com/citations?user=fb6FOfsAAAAJ&hl=en)\*,
-[Ronghang Hu](https://ronghanghu.com/)\*,
-[Didac Suris](https://www.didacsuris.com/)\*,
-[Chaitanya Ryali](https://scholar.google.com/citations?user=4LWx24UAAAAJ&hl=en)\*,
-[Kalyan Vasudev Alwala](https://scholar.google.co.in/citations?user=m34oaWEAAAAJ&hl=en)\*,
-[Haitham Khedr](https://hkhedr.com/)\*, Andrew Huang,
-[Jie Lei](https://jayleicn.github.io/),
-[Tengyu Ma](https://scholar.google.com/citations?user=VeTSl0wAAAAJ&hl=en),
-[Baishan Guo](https://scholar.google.com/citations?user=BC5wDu8AAAAJ&hl=en),
-Arpit Kalla, [Markus Marks](https://damaggu.github.io/),
-[Joseph Greer](https://scholar.google.com/citations?user=guL96CkAAAAJ&hl=en),
-Meng Wang, [Peize Sun](https://peizesun.github.io/),
-[Roman Rädle](https://scholar.google.com/citations?user=Tpt57v0AAAAJ&hl=en),
-[Triantafyllos Afouras](https://www.robots.ox.ac.uk/~afourast/),
-[Effrosyni Mavroudi](https://scholar.google.com/citations?user=vYRzGGEAAAAJ&hl=en),
-[Katherine Xu](https://k8xu.github.io/)°,
-[Tsung-Han Wu](https://patrickthwu.com/)°,
-[Yu Zhou](https://yu-bryan-zhou.github.io/)°,
-[Liliane Momeni](https://scholar.google.com/citations?user=Lb-KgVYAAAAJ&hl=en)°,
-[Rishi Hazra](https://rishihazra.github.io/)°,
-[Shuangrui Ding](https://mark12ding.github.io/)°,
-[Sagar Vaze](https://sgvaze.github.io/)°,
-[Francois Porcher](https://scholar.google.com/citations?user=LgHZ8hUAAAAJ&hl=en)°,
-[Feng Li](https://fengli-ust.github.io/)°,
-[Siyuan Li](https://siyuanliii.github.io/)°,
-[Aishwarya Kamath](https://ashkamath.github.io/)°,
-[Ho Kei Cheng](https://hkchengrex.com/)°,
-[Piotr Dollar](https://pdollar.github.io/)†,
-[Nikhila Ravi](https://nikhilaravi.com/)†,
-[Kate Saenko](https://ai.bu.edu/ksaenko.html)†,
-[Pengchuan Zhang](https://pzzhang.github.io/pzzhang/)†,
-[Christoph Feichtenhofer](https://feichtenhofer.github.io/)†
+1. **prefilter**：本地 Qwen3-VL 先判断编辑是否真正达成，并对 `add` 使用更严格的新内容判定
+2. **mask**：对 keep 样本使用当前 production/base SAM3 流程生成编辑区域 mask
 
-\* core contributor, ° intern, † project lead, order is random within groups
+当前生产路径对应文件：
 
-[[`Paper`](https://ai.meta.com/research/publications/sam-3-segment-anything-with-concepts/)]
-[[`Project`](https://ai.meta.com/sam3)]
-[[`Demo`](https://segment-anything.com/)]
-[[`Blog`](https://ai.meta.com/blog/segment-anything-model-3/)]
-[[`BibTeX`](#citing-sam-3)]
+- `scripts/setup_env.sh`：环境搭建脚本
+- `crispedit_mllm_prefilter.py`：第一阶段语义预筛选
+- `crispedit_mask_dataset_runner.py`：第二阶段并行 mask runner
+- `crispedit_mask_pipeline.py`：单样本 base SAM3 mask 逻辑
+- `CRISPEDIT_FILTER_THEN_MASK_PIPELINE.md`：更详细的生产说明与统计
 
-![SAM 3 architecture](assets/model_diagram.png?raw=true) SAM 3 is a unified foundation model for promptable segmentation in images and videos. It can detect, segment, and track objects using text or visual prompts such as points, boxes, and masks. Compared to its predecessor [SAM 2](https://github.com/facebookresearch/sam2), SAM 3 introduces the ability to exhaustively segment all instances of an open-vocabulary concept specified by a short text phrase or exemplars. Unlike prior work, SAM 3 can handle a vastly larger set of open-vocabulary prompts. It achieves 75-80% of human performance on our new [SA-CO benchmark](https://github.com/facebookresearch/sam3?tab=readme-ov-file#sa-co-dataset) which contains 270K unique concepts, over 50 times more than existing benchmarks.
+---
 
-This breakthrough is driven by an innovative data engine that has automatically annotated over 4 million unique concepts, creating the largest high-quality open-vocabulary segmentation dataset to date. In addition, SAM 3 introduces a new model architecture featuring a presence token that improves discrimination between closely related text prompts (e.g., “a player in white” vs. “a player in red”), as well as a decoupled detector–tracker design that minimizes task interference and scales efficiently with data.
+## 1. 环境要求
 
-<p align="center">
-  <img src="assets/dog.gif" width=380 />
-  <img src="assets/player.gif" width=380 />
-</p>
+推荐环境：
 
-## Latest updates
+- Linux
+- Python 3.11
+- NVIDIA GPU（prefilter / mask 都默认按多卡运行）
+- 本地 Qwen3-VL-8B 模型目录
+- 可选：本地 SAM3 checkpoint；如果不提供，则默认尝试使用 Hugging Face 缓存/下载
 
-**03/27/2026 -- SAM 3.1 Object Multiplex is released. It introduces a shared-memory approach for joint multi-object tracking that is significantly faster without sacrificing accuracy.**
+当前脚本默认的 Qwen 模型路径：
 
-- A new suite of improved model checkpoints (denoted as **SAM 3.1**) are released on [Hugging Face](https://huggingface.co/facebook/sam3.1). See [`RELEASE_SAM3p1.md`](RELEASE_SAM3p1.md) for full details.
-  * To use the new SAM 3.1 checkpoints, you need the latest model code from this repo. If you have installed an earlier version of this repo, pull the latest code from this repo (with `git pull`), and then reinstall the repo following [Installation](#installation) below.
-
-## Installation
-
-### Prerequisites
-
-- Python 3.12 or higher
-- PyTorch 2.7 or higher
-- CUDA-compatible GPU with CUDA 12.6 or higher
-
-1. **Create a new Conda environment:**
-
-```bash
-conda create -n sam3 python=3.12
-conda deactivate
-conda activate sam3
+```text
+/mnt/bn/strategy-mllm-train/common/models/Qwen3-VL-8B-Instruct
 ```
 
-2. **Install PyTorch with CUDA support:**
+可选环境变量：
 
 ```bash
-pip install torch==2.10.0 torchvision --index-url https://download.pytorch.org/whl/cu128
+export CRISPEDIT_QWEN_MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct
+export CRISPEDIT_SAM3_CHECKPOINT_PATH=/path/to/sam3_checkpoint.pt
 ```
 
-3. **Clone the repository and install the package:**
+如果不提供 `CRISPEDIT_SAM3_CHECKPOINT_PATH`，则需要本机具备 Hugging Face 访问能力；必要时先执行：
 
 ```bash
-git clone https://github.com/facebookresearch/sam3.git
-cd sam3
-pip install -e .
+huggingface-cli login
 ```
 
-4. **Install additional dependencies for example notebooks or development:**
+---
+
+## 2. 一键搭建环境
+
+在仓库根目录执行：
 
 ```bash
-# For running example notebooks
-pip install -e ".[notebooks]"
-
-# For development
-pip install -e ".[train,dev]"
+cd /opt/tiger/tanyue/sam3
+bash scripts/setup_env.sh --python-bin python3.11
 ```
 
-5. **Optional dependencies for faster inference**
+这个脚本会完成：
+
+- 创建或复用 `.venv-sam3-crispedit`
+- 安装 CUDA 版 `torch` / `torchvision`
+- 安装本仓库的 `.[crispedit]` 依赖
+- 校验以下模块能否导入：
+  - `torch`
+  - `torchvision`
+  - `transformers`
+  - `pyarrow`
+  - `cv2`
+  - `PIL`
+  - `einops`
+  - `pycocotools`
+  - `crispedit_mllm_prefilter`
+  - `crispedit_mask_dataset_runner`
+  - `crispedit_mask_pipeline`
+  - `sam3`
+
+搭建完成后，推荐进入虚拟环境：
+
 ```bash
-pip install einops ninja && pip install flash-attn-3 --no-deps --index-url https://download.pytorch.org/whl/cu128
-pip install git+https://github.com/ronghanghu/cc_torch.git
+source /opt/tiger/tanyue/sam3/.venv-sam3-crispedit/bin/activate
 ```
 
-## Getting Started
+也可以直接用解释器：
 
-⚠️ Before using SAM 3, please request access to the checkpoints on the SAM 3
-Hugging Face [repo](https://huggingface.co/facebook/sam3). Once accepted, you
-need to be authenticated to download the checkpoints. You can do this by running
-the following [steps](https://huggingface.co/docs/huggingface_hub/en/quick-start#authentication)
-(e.g. `hf auth login` after generating an access token.)
+```bash
+/opt/tiger/tanyue/sam3/.venv-sam3-crispedit/bin/python
+```
 
-### Basic Usage
+快速检查脚本参数：
+
+```bash
+python crispedit_mllm_prefilter.py --help
+python crispedit_mask_dataset_runner.py --help
+```
+
+---
+
+## 3. 数据组织方式
+
+当前 CrispEdit 原始数据读取方式是：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
+```
+
+注意：
+
+- parquet shard **直接放在根目录下**
+- **不是** `.../data/`
+
+例如：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M/add_00000.parquet
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M/remove_00012.parquet
+```
+
+runner 会按文件名中的前缀自动识别原始类型，例如：
+
+- `add_00057.parquet`
+- `background change_00083.parquet`
+- `style_00085.parquet`
+
+---
+
+## 4. 当前打标流程
+
+整体流程：
+
+```text
+raw parquet shards
+    ↓
+Qwen3-VL 本地 prefilter
+    ↓
+audit parquet + keep manifest parquet
+    ↓
+SAM3 manifest-aware mask runner
+    ↓
+keep 样本生成 mask
+非 keep 样本写 PREFILTER_SKIP 占位行
+    ↓
+得到与原始 shard 逐行对齐的最终输出 parquet
+```
+
+关键点：
+
+- **prefilter** 负责判断编辑结果是否真的符合 instruction
+- **mask 阶段** 不再重新做语义判定，而是直接读取 prefilter manifest
+- 最终输出与原始输入 **逐行对齐**，方便后续用 `row_idx` 回查
+
+---
+
+## 5. 第一阶段：prefilter 用法
+
+### 5.1 作用
+
+`crispedit_mllm_prefilter.py` 会读取：
+
+- `input_img`
+- `output_img`
+- `instruction`
+- `type`
+
+输出两类 parquet：
+
+1. **audit parquet**：保存逐行 MLLM 判定结果
+2. **keep manifest parquet**：保存 keep / drop 决策，供下一阶段使用
+
+默认决策规则：
+
+- `PASS -> keep`
+- `FAIL -> drop`
+- `UNSURE -> drop`
+- parse/runtime error -> drop
+
+### 5.2 小规模 smoke test
+
+```bash
+cd /opt/tiger/tanyue/sam3
+source .venv-sam3-crispedit/bin/activate
+
+python crispedit_mllm_prefilter.py \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
+  --audit-dir /tmp/crispedit_prefilter_smoke/audit \
+  --keep-manifest-dir /tmp/crispedit_prefilter_smoke/manifest \
+  --devices 0 \
+  --max-shards-per-type 1 \
+  --limit-rows-per-shard 2 \
+  --batch-size 1 \
+  --max-new-tokens 220
+```
+
+### 5.3 生产用法（8 卡，后台，带 tqdm）
+
+```bash
+cd /opt/tiger/tanyue/sam3
+source .venv-sam3-crispedit/bin/activate
+
+mkdir -p /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-audit
+mkdir -p /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-manifest
+
+nohup python -u crispedit_mllm_prefilter.py \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
+  --audit-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-audit \
+  --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-manifest \
+  --devices 0,1,2,3,4,5,6,7 \
+  --batch-size 4 \
+  --max-new-tokens 220 \
+  --progress-mininterval 5 \
+  > /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-audit/run.log 2>&1 < /dev/null &
+
+echo $! > /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-audit/run.pid
+```
+
+---
+
+## 6. 第二阶段：mask 用法
+
+### 6.1 作用
+
+`crispedit_mask_dataset_runner.py` 会：
+
+- 读取 raw shard
+- 读取对应的 keep manifest
+- 对 `filter_decision == keep` 的样本运行当前 production/base SAM3 mask 逻辑
+- 对非 keep 样本写 `PREFILTER_SKIP` 占位行
+
+### 6.2 小规模 smoke test
+
+```bash
+cd /opt/tiger/tanyue/sam3
+source .venv-sam3-crispedit/bin/activate
+
+python crispedit_mask_dataset_runner.py \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
+  --keep-manifest-dir /tmp/crispedit_prefilter_smoke/manifest \
+  --output-dir /tmp/crispedit_mask_smoke \
+  --devices 0 \
+  --max-shards-per-type 1 \
+  --limit-rows-per-shard 2 \
+  --batch-size 2 \
+  --preview-dir /tmp/crispedit_mask_smoke/previews \
+  --preview-rows-per-shard 2
+```
+
+### 6.3 生产用法（8 卡，后台，带 tqdm）
+
+```bash
+cd /opt/tiger/tanyue/sam3
+source .venv-sam3-crispedit/bin/activate
+
+mkdir -p /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-parquet-101697
+
+nohup python -u crispedit_mask_dataset_runner.py \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
+  --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-manifest \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-parquet-101697 \
+  --devices 0,1,2,3,4,5,6,7 \
+  --batch-size 8 \
+  --progress-mininterval 5 \
+  > /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-parquet-101697/run.log 2>&1 < /dev/null &
+
+echo $! > /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-parquet-101697/run.pid
+```
+
+---
+
+## 7. resume / overwrite 规则
+
+生产续跑时，**默认不要加 `--overwrite`**。
+
+效果是：
+
+- 已完成 shard：直接跳过
+- `.tmp` 文件不会被当作最终完成结果
+- 可以从断点继续，而不是把所有 shard 重刷一遍
+
+具体规则：
+
+### prefilter
+只有当以下两个文件都存在，并且你**没有加 `--overwrite`** 时，才会跳过该 shard：
+
+- audit shard
+- manifest shard
+
+### mask
+只有当以下文件存在，并且你**没有加 `--overwrite`** 时，才会跳过该 shard：
+
+- final output shard
+
+因此推荐的正式续跑方式就是：
+
+> **保持原命令不变继续运行，不要加 `--overwrite`。**
+
+---
+
+## 8. 常用监控命令
+
+### 8.1 查看 prefilter 日志
+
+```bash
+tail -f /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-audit/run.log
+```
+
+### 8.2 查看 mask 日志
+
+```bash
+tail -f /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-parquet-101697/run.log
+```
+
+### 8.3 查看后台进程
+
+```bash
+ps -fp $(cat /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-audit/run.pid)
+ps -fp $(cat /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-parquet-101697/run.pid)
+```
+
+### 8.4 停止后台进程
+
+```bash
+kill $(cat /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-prefilter-audit/run.pid)
+kill $(cat /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-parquet-101697/run.pid)
+```
+
+---
+
+## 9. 最终输出里有什么
+
+最终 mask parquet 是与原始输入逐行对齐的。常见字段包括：
+
+- `row_idx`
+- `raw_type`
+- `canonical_type`
+- `instruction`
+- `phrases_json`
+- `qc_flag`
+- `qc_status`
+- `diff_iou`
+- `diff_precision`
+- `diff_recall`
+- `area_frac`
+- `mask_height`
+- `mask_width`
+- `mask_sum`
+- `mask_png`
+- `prefilter_verdict`
+- `prefilter_confidence`
+- `prefilter_prompt_version`
+- `prefilter_model_name`
+- `prefilter_run_id`
+- `prefilter_reason`
+- `filter_decision`
+- `filter_reason_codes`
+- `filter_mismatch_score`
+- `filter_version`
+
+其中 `mask_png` 可以直接解码：
 
 ```python
-import torch
-#################################### For Image ####################################
 from PIL import Image
-from sam3.model_builder import build_sam3_image_model
-from sam3.model.sam3_image_processor import Sam3Processor
-# Load the model
-model = build_sam3_image_model()
-processor = Sam3Processor(model)
-# Load an image
-image = Image.open("<YOUR_IMAGE_PATH.jpg>")
-inference_state = processor.set_image(image)
-# Prompt the model with text
-output = processor.set_text_prompt(state=inference_state, prompt="<YOUR_TEXT_PROMPT>")
+import io
 
-# Get the masks, bounding boxes, and scores
-masks, boxes, scores = output["masks"], output["boxes"], output["scores"]
-
-#################################### For Video ####################################
-
-from sam3.model_builder import build_sam3_video_predictor
-
-video_predictor = build_sam3_video_predictor()
-video_path = "<YOUR_VIDEO_PATH>" # a JPEG folder or an MP4 video file
-# Start a session
-response = video_predictor.handle_request(
-    request=dict(
-        type="start_session",
-        resource_path=video_path,
-    )
-)
-response = video_predictor.handle_request(
-    request=dict(
-        type="add_prompt",
-        session_id=response["session_id"],
-        frame_index=0, # Arbitrary frame index
-        text="<YOUR_TEXT_PROMPT>",
-    )
-)
-output = response["outputs"]
+mask = Image.open(io.BytesIO(row['mask_png'])).convert('L')
 ```
 
-## Examples
+对于被 prefilter 拦下来的样本，最终输出仍然保留一条对齐记录，但会写成：
 
-The `examples` directory contains notebooks demonstrating how to use SAM3 with
-various types of prompts:
+- `canonical_type = PREFILTER_SKIP`
+- `qc_flag = PREFILTER_SKIP`
 
-- [`sam3_image_predictor_example.ipynb`](examples/sam3_image_predictor_example.ipynb)
-  : Demonstrates how to prompt SAM 3 with text and visual box prompts on images.
-- [`sam3_video_predictor_example.ipynb`](examples/sam3_video_predictor_example.ipynb)
-  : Demonstrates how to prompt SAM 3 with text prompts on videos, and doing
-  further interactive refinements with points.
-- [`sam3_image_batched_inference.ipynb`](examples/sam3_image_batched_inference.ipynb)
-  : Demonstrates how to run batched inference with SAM 3 on images.
-- [`sam3_agent.ipynb`](examples/sam3_agent.ipynb): Demonsterates the use of SAM
-  3 Agent to segment complex text prompt on images.
-- [`saco_gold_silver_vis_example.ipynb`](examples/saco_gold_silver_vis_example.ipynb)
-  : Shows a few examples from SA-Co image evaluation set.
-- [`saco_veval_vis_example.ipynb`](examples/saco_veval_vis_example.ipynb) :
-  Shows a few examples from SA-Co video evaluation set.
+这样后续回查时不会丢失 `row_idx` 对应关系。
 
-There are additional notebooks in the examples directory that demonstrate how to
-use SAM 3 for interactive instance segmentation in images and videos (SAM 1/2
-tasks), or as a tool for an MLLM, and how to run evaluations on the SA-Co
-dataset.
+---
 
-To run the Jupyter notebook examples:
+## 10. 相关文档
 
-```bash
-# Make sure you have the notebooks dependencies installed
-pip install -e ".[notebooks]"
+如果需要更详细的实现说明、生产统计和可视化示例，请继续看：
 
-# Start Jupyter notebook
-jupyter notebook examples/sam3_image_predictor_example.ipynb
-```
+- `CRISPEDIT_FILTER_THEN_MASK_PIPELINE.md`
 
-## Model
+当前仓库 README 只覆盖主线生产流程：
 
-SAM 3 consists of a detector and a tracker that share a vision encoder. It has 848M parameters. The
-detector is a DETR-based model conditioned on text, geometry, and image
-exemplars. The tracker inherits the SAM 2 transformer encoder-decoder
-architecture, supporting video segmentation and interactive refinement.
+- `crispedit_mllm_prefilter.py`
+- `crispedit_mask_dataset_runner.py`
+- `crispedit_mask_pipeline.py`
+- `CRISPEDIT_FILTER_THEN_MASK_PIPELINE.md`
 
-## Image Results
-
-<div align="center">
-<table style="min-width: 80%; border: 2px solid #ddd; border-collapse: collapse">
-  <thead>
-    <tr>
-      <th rowspan="3" style="border-right: 2px solid #ddd; padding: 12px 20px">Model</th>
-      <th colspan="3" style="text-align: center; border-right: 2px solid #ddd; padding: 12px 20px">Instance Segmentation</th>
-      <th colspan="5" style="text-align: center; padding: 12px 20px">Box Detection</th>
-    </tr>
-    <tr>
-      <th colspan="2" style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">LVIS</th>
-      <th style="text-align: center; border-right: 2px solid #ddd; padding: 12px 20px">SA-Co/Gold</th>
-      <th colspan="2" style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">LVIS</th>
-      <th colspan="2" style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">COCO</th>
-      <th style="text-align: center; padding: 12px 20px">SA-Co/Gold</th>
-    </tr>
-    <tr>
-      <th style="text-align: center; padding: 12px 20px">cgF1</th>
-      <th style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">AP</th>
-      <th style="text-align: center; border-right: 2px solid #ddd; padding: 12px 20px">cgF1</th>
-      <th style="text-align: center; padding: 12px 20px">cgF1</th>
-      <th style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">AP</th>
-      <th style="text-align: center; padding: 12px 20px">AP</th>
-      <th style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">AP<sub>o</sub>
-</th>
-      <th style="text-align: center; padding: 12px 20px">cgF1</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td style="border-right: 2px solid #ddd; padding: 10px 20px">Human</td>
-      <td style="text-align: center; padding: 10px 20px">-</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">-</td>
-      <td style="text-align: center; border-right: 2px solid #ddd; padding: 10px 20px">72.8</td>
-      <td style="text-align: center; padding: 10px 20px">-</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">-</td>
-      <td style="text-align: center; padding: 10px 20px">-</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">-</td>
-      <td style="text-align: center; padding: 10px 20px">74.0</td>
-    </tr>
-    <tr>
-      <td style="border-right: 2px solid #ddd; padding: 10px 20px">OWLv2*</td>
-      <td style="text-align: center; padding: 10px 20px; color: #999">29.3</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px; color: #999">43.4</td>
-      <td style="text-align: center; border-right: 2px solid #ddd; padding: 10px 20px">24.6</td>
-      <td style="text-align: center; padding: 10px 20px; color: #999">30.2</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px; color: #999">45.5</td>
-      <td style="text-align: center; padding: 10px 20px">46.1</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">23.9</td>
-      <td style="text-align: center; padding: 10px 20px">24.5</td>
-    </tr>
-    <tr>
-      <td style="border-right: 2px solid #ddd; padding: 10px 20px">DINO-X</td>
-      <td style="text-align: center; padding: 10px 20px">-</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">38.5</td>
-      <td style="text-align: center; border-right: 2px solid #ddd; padding: 10px 20px">21.3</td>
-      <td style="text-align: center; padding: 10px 20px">-</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">52.4</td>
-      <td style="text-align: center; padding: 10px 20px">56.0</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">-</td>
-      <td style="text-align: center; padding: 10px 20px">22.5</td>
-    </tr>
-    <tr>
-      <td style="border-right: 2px solid #ddd; padding: 10px 20px">Gemini 2.5</td>
-      <td style="text-align: center; padding: 10px 20px">13.4</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">-</td>
-      <td style="text-align: center; border-right: 2px solid #ddd; padding: 10px 20px">13.0</td>
-      <td style="text-align: center; padding: 10px 20px">16.1</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">-</td>
-      <td style="text-align: center; padding: 10px 20px">-</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">-</td>
-      <td style="text-align: center; padding: 10px 20px">14.4</td>
-    </tr>
-    <tr style="border-top: 2px solid #b19c9cff">
-      <td style="border-right: 2px solid #ddd; padding: 10px 20px">SAM 3</td>
-      <td style="text-align: center; padding: 10px 20px">37.2</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">48.5</td>
-      <td style="text-align: center; border-right: 2px solid #ddd; padding: 10px 20px">54.1</td>
-      <td style="text-align: center; padding: 10px 20px">40.6</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">53.6</td>
-      <td style="text-align: center; padding: 10px 20px">56.4</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">55.7</td>
-      <td style="text-align: center; padding: 10px 20px">55.7</td>
-    </tr>
-  </tbody>
-</table>
-
-<p style="text-align: center; margin-top: 10px; font-size: 0.9em; color: #ddd;">* Partially trained on LVIS, AP<sub>o</sub> refers to COCO-O accuracy</p>
-
-</div>
-
-## Video Results
-
-<div align="center">
-<table style="min-width: 80%; border: 2px solid #ddd; border-collapse: collapse">
-  <thead>
-    <tr>
-      <th rowspan="2" style="border-right: 2px solid #ddd; padding: 12px 20px">Model</th>
-      <th colspan="2" style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">SA-V test</th>
-      <th colspan="2" style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">YT-Temporal-1B test</th>
-      <th colspan="2" style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">SmartGlasses test</th>
-      <th style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">LVVIS test</th>
-      <th style="text-align: center; padding: 12px 20px">BURST test</th>
-    </tr>
-    <tr>
-      <th style="text-align: center; padding: 12px 20px">cgF1</th>
-      <th style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">pHOTA</th>
-      <th style="text-align: center; padding: 12px 20px">cgF1</th>
-      <th style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">pHOTA</th>
-      <th style="text-align: center; padding: 12px 20px">cgF1</th>
-      <th style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">pHOTA</th>
-      <th style="text-align: center; border-right: 1px solid #eee; padding: 12px 20px">mAP</th>
-      <th style="text-align: center; padding: 12px 20px">HOTA</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td style="border-right: 2px solid #ddd; padding: 10px 20px">Human</td>
-      <td style="text-align: center; padding: 10px 20px">53.1</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">70.5</td>
-      <td style="text-align: center; padding: 10px 20px">71.2</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">78.4</td>
-      <td style="text-align: center; padding: 10px 20px">58.5</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">72.3</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">-</td>
-      <td style="text-align: center; padding: 10px 20px">-</td>
-    </tr>
-    <tr style="border-top: 2px solid #b19c9cff">
-      <td style="border-right: 2px solid #ddd; padding: 10px 20px">SAM 3</td>
-      <td style="text-align: center; padding: 10px 20px">30.3</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">58.0</td>
-      <td style="text-align: center; padding: 10px 20px">50.8</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">69.9</td>
-      <td style="text-align: center; padding: 10px 20px">36.4</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">63.6</td>
-      <td style="text-align: center; border-right: 1px solid #eee; padding: 10px 20px">36.3</td>
-      <td style="text-align: center; padding: 10px 20px">44.5</td>
-    </tr>
-  </tbody>
-</table>
-</div>
-
-## SA-Co Dataset
-
-We release 2 image benchmarks, [SA-Co/Gold](scripts/eval/gold/README.md) and
-[SA-Co/Silver](scripts/eval/silver/README.md), and a video benchmark
-[SA-Co/VEval](scripts/eval/veval/README.md). The datasets contain images (or videos) with annotated noun phrases. Each image/video and noun phrase pair is annotated with instance masks and unique IDs of each object matching the phrase. Phrases that have no matching objects (negative prompts) have no masks, shown in red font in the figure. See the linked READMEs for more details on how to download and run evaluations on the datasets.
-
-* HuggingFace host: [SA-Co/Gold](https://huggingface.co/datasets/facebook/SACo-Gold), [SA-Co/Silver](https://huggingface.co/datasets/facebook/SACo-Silver) and [SA-Co/VEval](https://huggingface.co/datasets/facebook/SACo-VEval)
-* Roboflow host: [SA-Co/Gold](https://universe.roboflow.com/sa-co-gold), [SA-Co/Silver](https://universe.roboflow.com/sa-co-silver) and [SA-Co/VEval](https://universe.roboflow.com/sa-co-veval)
-
-![SA-Co dataset](assets/sa_co_dataset.jpg?raw=true)
-
-## Development
-
-To set up the development environment:
-
-```bash
-pip install -e ".[dev,train]"
-```
-
-To format the code:
-
-```bash
-ufmt format .
-```
-
-## Contributing
-
-See [contributing](CONTRIBUTING.md) and the
-[code of conduct](CODE_OF_CONDUCT.md).
-
-## License
-
-This project is licensed under the SAM License - see the [LICENSE](LICENSE) file
-for details.
-
-## Acknowledgements
-
-We would like to thank the following people for their contributions to the SAM 3 project: Alex He, Alexander Kirillov,
-Alyssa Newcomb, Ana Paula Kirschner Mofarrej, Andrea Madotto, Andrew Westbury, Ashley Gabriel, Azita Shokpour,
-Ben Samples, Bernie Huang, Carleigh Wood, Ching-Feng Yeh, Christian Puhrsch, Claudette Ward, Daniel Bolya,
-Daniel Li, Facundo Figueroa, Fazila Vhora, George Orlin, Hanzi Mao, Helen Klein, Hu Xu, Ida Cheng, Jake Kinney,
-Jiale Zhi, Jo Sampaio, Joel Schlosser, Justin Johnson, Kai Brown, Karen Bergan, Karla Martucci, Kenny Lehmann,
-Maddie Mintz, Mallika Malhotra, Matt Ward, Michelle Chan, Michelle Restrepo, Miranda Hartley, Muhammad Maaz,
-Nisha Deo, Peter Park, Phillip Thomas, Raghu Nayani, Rene Martinez Doehner, Robbie Adkins, Ross Girshik, Sasha
-Mitts, Shashank Jain, Spencer Whitehead, Ty Toledano, Valentin Gabeur, Vincent Cho, Vivian Lee, William Ngan,
-Xuehai He, Yael Yungster, Ziqi Pang, Ziyi Dou, Zoe Quake.
-
-## Citing SAM 3
-
-If you use SAM 3 or the SA-Co dataset in your research, please use the following BibTeX entry.
-
-```bibtex
-@misc{carion2025sam3segmentconcepts,
-      title={SAM 3: Segment Anything with Concepts},
-      author={Nicolas Carion and Laura Gustafson and Yuan-Ting Hu and Shoubhik Debnath and Ronghang Hu and Didac Suris and Chaitanya Ryali and Kalyan Vasudev Alwala and Haitham Khedr and Andrew Huang and Jie Lei and Tengyu Ma and Baishan Guo and Arpit Kalla and Markus Marks and Joseph Greer and Meng Wang and Peize Sun and Roman Rädle and Triantafyllos Afouras and Effrosyni Mavroudi and Katherine Xu and Tsung-Han Wu and Yu Zhou and Liliane Momeni and Rishi Hazra and Shuangrui Ding and Sagar Vaze and Francois Porcher and Feng Li and Siyuan Li and Aishwarya Kamath and Ho Kei Cheng and Piotr Dollár and Nikhila Ravi and Kate Saenko and Pengchuan Zhang and Christoph Feichtenhofer},
-      year={2025},
-      eprint={2511.16719},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2511.16719},
-}
-```
+如果后续再做 add-mask 实验，建议放到单独分支维护，而不是混入当前主线说明。

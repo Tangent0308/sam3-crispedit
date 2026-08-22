@@ -36,6 +36,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+crispedit = [
+    "transformers",
+    "accelerate",
+    "pyarrow",
+    "Pillow",
+    "opencv-python",
+    "einops",
+    "pycocotools",
+]
 dev = [
     "pytest",
     "pytest-cov",
