@@ -609,7 +609,120 @@ kill $(cat /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-pa
 
 ---
 
-## 11. 一句话总结
+## 11. 后续回查里补充记录的两类 v3 keep 问题
+
+在后续逐条回查 `prefilter-audit` 目录里保存的历史 shard 时，又看到一类值得单独记录的问题：
+
+- 这些问题都来自 **`qwen3vl_edit_prefilter_v3` 的历史 audit 产物**
+- 它们用于解释 **v3 产物里出现过什么问题模式**
+- **不覆盖** 上面 3.5 节以完整 manifest 为准的当前权威统计
+- 也**不等同于**当前仓库代码里已经切到的 `qwen3vl_edit_prefilter_v4_add_strict` 仍然存在同样问题
+
+为了避免把不同性质的问题混在一起，后续回查里把这批样本拆成两类：
+
+1. **Issue class A：false keep on effectively no-op rows**
+   - source 本来就已经满足 instruction，或者 instruction 指向的对象根本不存在
+   - `raw_text` / `reason` / `change_presence` 明明都在说“没有相关变化”
+   - 但最终仍然被写成 `PASS -> keep`
+
+2. **Issue class B：keep is plausible, but the explanation fields are off**
+   - 图像本身看起来**大体是改对了**，keep 未必错
+   - 但 `reason`、`instruction_achievement`、`failure_mode` 写得过于保守，或者内部并不完全一致
+   - 这类更像是 **字段质量问题**，不应与真正的 false keep 混为一谈
+
+一次高召回回查里，从 `PASS + keep` 结果中先抓出了 `3,220` 条“值得复查”的行；进一步人工复核后，最核心的 no-op / false-keep 模式可以概括成：
+
+- `PASS + keep + change_presence=NONE + instruction_achievement=YES + failure_mode=NO_RELEVANT_CHANGE`
+
+这类最典型模式在当时的 v3 回查集合中一共看到了 `3,028` 条。
+
+### 11.1 Issue class A：false keep on effectively no-op rows
+
+下面这张图板收集了几条最典型的 **false keep / 实质 no-op** 样本：
+
+![Issue class A examples](docs_assets/crispedit_pipeline_workflow/prefilter_issue_class_false_keep_noop_examples.png)
+
+这些样本的共同点是：
+
+- source 已经满足 instruction，或者 instruction 指向对象在 source / target 里都不存在
+- `reason` 明确写“no change needed / no object to remove / instruction irrelevant”
+- `change_presence = NONE`
+- `failure_mode = NO_RELEVANT_CHANGE`
+- 但最终仍然被写成 `PASS -> keep`
+
+图中几个代表例子：
+
+- `remove_00009.parquet` row `148`
+  - instruction：`remove the modern canvas print`
+  - stored reason：`No canvas print to remove; instruction irrelevant to visual content.`
+  - 这是最直接的 disputed row：按字段语义看更像应该被 filter 掉，但 v3 产物把它留成了 keep
+
+- `remove_00000.parquet` row `55`
+  - instruction：`remove the white great dane`
+  - stored reason：`No great dane present in either image to remove.`
+  - 典型“要删的对象根本不存在”，却仍然 keep
+
+- `add_00002.parquet` row `70`
+  - instruction：`Add back the entire family sitting closely on the rock ...`
+  - stored reason：`No change needed; family already positioned centrally in both images.`
+  - 本质上是“source 已经满足 add 指令”，但仍然 PASS
+
+- `background change_00002.parquet` row `101`
+  - instruction：`change the background to a misty forest`
+  - stored reason：`Background unchanged; instruction was to change it, but it was already misty forest.`
+  - source / target 几乎不变，但仍然 keep
+
+- `motion change_00000.parquet` row `46`
+  - instruction：`The woman tilts her head slightly to the side.`
+  - stored reason：`Head tilt is identical in both images, no change needed.`
+  - 也是标准 no-op keep
+
+- `replace_00008.parquet` row `34`
+  - instruction：`replace the artificial intelligence with a robot`
+  - stored reason：`Image already depicts a robot; no change needed per instruction.`
+  - 说明 v3 在“source 已经是 target target-state”这类 replace 上也会留下 false keep
+
+这类样本一旦被写进 manifest，第二阶段 mask runner 并不会重新判断语义，只会按 `keep` 继续打 mask，所以最终 parquet 里会出现一条**形式上完整、但语义上本不该进入 mask** 的结果行。
+
+### 11.2 Issue class B：keep is plausible, but the explanation fields are off
+
+下面这张图板保留的是**复查后仍然适合归到 B 类**的样本：
+
+![Issue class B examples](docs_assets/crispedit_pipeline_workflow/prefilter_issue_class_reason_field_mismatch_examples.png)
+
+这一类的共同点，重新收敛后更准确地说是：
+
+- 图像本身看起来**仍然大体改对了**，因此 keep 不是主要问题
+- 但 `stored reason` 把**已经发生的肤色变深**写成了 `unchanged`
+- 因而它们更像是 **reason 字段写错/写弱**，而不是纯粹的错误 keep
+
+当前保留下来的代表例子只有两条：
+
+- `color_00000.parquet` row `17`
+  - instruction：`Turn girl positioned in the central-left area into darker skin tone with blue attire`
+  - stored reason：`Girl's attire changed to blue as instructed, skin tone unchanged.`
+  - 复查后可见**衣服明确变蓝，肤色也确实比 source 更深**；因此 keep 仍然合理，但 stored reason 对 skin-tone 的描述是错的
+
+- `color_00001.parquet` row `118`
+  - instruction：`Change person positioned in the central-left area into having a darker skin tone and a red outfit`
+  - stored reason：`Skin tone unchanged, but outfit changed to red as requested.`
+  - 复查后可见**服装明确变红，肤色也确实更深**；因此 keep 仍可接受，但 stored reason 同样把 skin-tone 变化写错了
+
+重新校对后，原先图板中的另外几条都不再归入 B 类：
+
+- `replace_00016.parquet` row `128`、`color_00001.parquet` row `86` 更接近**应 drop 的失败编辑**，而不是 explanation mismatch
+- `add_00020.parquet` row `251`、`color_00060.parquet` row `51` 则属于**keep 与 reason 基本一致**，不应再算作 issue
+
+因此，后续如果再做 audit backcheck，建议明确分开：
+
+- **Class A：真 false keep / 真 no-op**
+- **Class B：keep 仍合理，但 stored reason 明显低估了已发生的可见变化**
+
+只有这样，回查结论才不会把“模型真的把坏样本放进 keep 了”和“图像本身还行，但解释字段写偏了”混成同一类问题。
+
+---
+
+## 12. 一句话总结
 
 当前 repo 已完成的正式生产流程是：
 
