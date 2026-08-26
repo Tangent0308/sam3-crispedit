@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
-"""
-CrispEdit-2M 本地 MLLM 预筛选 Runner
-=================================
+"""Fact-first Qwen3-VL prefilter for CrispEdit-2M.
 
-在 SAM3 打标前，先用本地 Qwen3-VL 对 raw `(source, target, instruction, type)`
-样本做语义有效性判断，输出：
+This runner implements the staged SOP in ``PREFILTER_FALSE_KEEP_OPTIMIZATION.md``:
 
-1) audit parquet: 每行一个 MLLM verdict / reason / confidence
-2) keep manifest parquet: 供后续 SAM3 runner 按 row_idx 决定 keep / skip
+0. text-only instruction slot extraction;
+1. source-only factual questionnaire;
+2. target-only factual questionnaire, optionally with a localized crop;
+3. instruction-blind paired comparison;
+4. text-only matching followed by deterministic code predicates;
+5. a budgeted, independent source/target state review for unresolved rows.
 
-默认决策策略:
-- PASS -> keep
-- FAIL -> drop
-- UNSURE -> drop
-- ERROR -> drop
-
-适合后台跑: `nohup python ... > run.log 2>&1 &`
+The model never emits the final PASS/FAIL/UNSURE verdict.  All intermediate
+evidence and predicate truth values are written to the audit parquet.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import math
@@ -29,7 +26,7 @@ import os
 import queue
 import re
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -38,138 +35,24 @@ import pyarrow.parquet as pq
 from PIL import Image, ImageOps
 from tqdm import tqdm
 
-from crispedit_mask_pipeline import canonicalize_type, parse_instruction
+from crispedit_mask_pipeline import parse_instruction
+from crispedit_prefilter_policy import (
+    EVIDENCE_SCHEMA,
+    PREFILTER_METHOD,
+    adjudicate_evidence,
+    canonical_edit_type,
+    deterministic_slot_conflict,
+    json_dumps,
+    normalize_pair_evidence,
+    normalize_single_image_evidence,
+    normalize_slots,
+    normalize_text_match,
+)
 
 
-PROMPT_VERSION = "qwen3vl_edit_prefilter_v4_add_strict"
 DEFAULT_MODEL = os.environ.get(
     "CRISPEDIT_QWEN_MODEL_PATH",
     "/mnt/bn/strategy-mllm-train/common/models/Qwen3-VL-8B-Instruct",
-)
-
-PROMPT_TEMPLATE = """You are verifying whether an image editing request was successfully achieved.
-
-You will receive:
-- Image 1: source image BEFORE editing
-- Image 2: target image AFTER editing
-- One editing instruction
-- One raw edit type label
-
-Main task:
-Judge whether Image 2 achieves the requested target state RELATIVE TO Image 1.
-
-Follow this checklist carefully:
-1. Identify the object, region, attribute, or style named in the instruction.
-2. Compare that relevant part between Image 1 and Image 2.
-3. First decide whether there is any relevant visible change there:
-   - NONE = no meaningful relevant difference
-   - SUBTLE = some relevant difference, but weak / partial / hard to verify
-   - CLEAR = obvious relevant difference
-4. Then decide whether the requested end state is achieved:
-   - YES = clearly achieved
-   - MOSTLY = almost achieved, minor residual issues
-   - PARTIAL = some relevant progress, but not enough to confirm success
-   - NO = clearly not achieved
-   - UNCLEAR = evidence is mixed or hard to judge
-
-Verdict mapping:
-- PASS if the requested end state is clearly achieved (YES or MOSTLY) and there is no major contradiction.
-- UNSURE if there is any relevant visible change (SUBTLE or CLEAR) but the requested end state is only PARTIAL or UNCLEAR.
-- FAIL only if there is truly no meaningful relevant change, or the result clearly changes the wrong thing / wrong target.
-
-Important rules:
-1. The raw edit type is only a coarse hint for most types. For ADD, the stricter ADD-specific rules below override this.
-2. Do NOT say "unchanged" unless change_presence is NONE.
-3. If you notice some relevant change but it does not fully satisfy the instruction, explicitly acknowledge that change in the reason and prefer UNSURE over FAIL.
-4. Judge final-state achievement, not whether the raw type label is perfectly pure, except that ADD must still show truly new target content.
-5. Do NOT give PASS just because the image looks different. The visible change must match the instruction specifically.
-6. For remove edits, deleting the whole image or wiping unrelated content is not a correct PASS unless the instruction truly asked for that.
-7. Keep each observation short (max 12 words) and keep the reason short (max 28 words).
-8. Before finalizing, check that your verdict, structured fields, and written reason all agree.
-
-Return JSON only with exactly these keys:
-{{
-  "verdict": "PASS" | "FAIL" | "UNSURE",
-  "confidence": <float 0-1>,
-  "source_observation": "<one sentence, max 12 words>",
-  "target_observation": "<one sentence, max 12 words>",
-  "reason": "<max 28 words>",
-  "change_presence": "NONE" | "SUBTLE" | "CLEAR",
-  "instruction_achievement": "NO" | "PARTIAL" | "MOSTLY" | "YES" | "UNCLEAR",
-  "failure_mode": "NO_RELEVANT_CHANGE" | "PARTIAL_RELEVANT_CHANGE" | "WRONG_TARGET" | "AMBIGUOUS" | "OTHER"
-}}
-
-Raw edit type (coarse hint only): {raw_type}
-Instruction: {instruction}
-"""
-
-ADD_PROMPT_APPEND = """ADD-specific strict rules:
-1. PASS only if the requested target content is newly added in Image 2 relative to Image 1.
-2. If Image 1 already contains the requested target and Image 2 mainly makes that same existing instance larger, closer, more centered, more prominent, cleaner, sharper, or redrawn, do NOT PASS.
-3. If Image 1 already contains a similar object, PASS only when Image 2 clearly adds an extra matching instance or an extra requested detail that was absent before.
-4. For detail additions attached to an existing object (for example beads, rhinestones, decorations, accessories, or text), PASS only if that detail is visibly absent in Image 1 and present in Image 2.
-5. Reframing, zooming, recentering, cropping, or style cleanup alone is not a valid ADD success.
-6. If the evidence of newly added target content is weak, ambiguous, or only partial, prefer UNSURE or FAIL over PASS.
-
-Deterministic ADD parsing hints:
-- Parsed target phrase: {target_phrase}
-- Parsed location hint: {location_hint}
-- Parsed multiplicity hint: {multiplicity_hint}
-"""
-
-ADD_DETAIL_TOKENS = {
-    "accessory",
-    "accessories",
-    "badge",
-    "badges",
-    "bead",
-    "beads",
-    "bow",
-    "bows",
-    "caption",
-    "captions",
-    "chain",
-    "chains",
-    "decal",
-    "decals",
-    "decoration",
-    "decorations",
-    "detail",
-    "details",
-    "jewelry",
-    "label",
-    "labels",
-    "logo",
-    "logos",
-    "necklace",
-    "necklaces",
-    "pattern",
-    "patterns",
-    "print",
-    "prints",
-    "ribbon",
-    "ribbons",
-    "rhinestone",
-    "rhinestones",
-    "sticker",
-    "stickers",
-    "stripe",
-    "stripes",
-    "text",
-    "trim",
-}
-ADD_EXISTING_TARGET_PATTERNS = (
-    r"\balready(?:\s+\w+){0,3}\s+(?:present|there|visible|exists?)\b",
-    r"\bexisting\b",
-    r"\bsource already\b",
-    r"\balready in (?:image 1|the source)\b",
-    r"\bpresent before\b",
-)
-ADD_REFRAME_ONLY_PATTERNS = (
-    r"\b(?:centered|recentered|recentred|larger|bigger|zoomed|zoom in|close up|close-up|cropped|reframed|more prominent|redrawn|restyled|cleaner|sharper|spans most of the image)\b",
-)
-ADD_POSITIVE_NOVELTY_PATTERNS = (
-    r"\b(?:new|newly added|added|extra|another|appears|inserted|placed|put|restored|now has)\b",
 )
 
 
@@ -183,26 +66,6 @@ class ShardJob:
     limit_rows: Optional[int]
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run local MLLM prefilter over CrispEdit parquet shards")
-    parser.add_argument("--input-dir", type=Path, required=True, help="Directory containing raw CrispEdit parquet shards")
-    parser.add_argument("--audit-dir", type=Path, required=True, help="Directory to write per-row MLLM audit parquet shards")
-    parser.add_argument("--keep-manifest-dir", type=Path, required=True, help="Directory to write row-selection manifest parquet shards")
-    parser.add_argument("--model-path", type=str, default=DEFAULT_MODEL, help="Local Qwen3-VL model path")
-    parser.add_argument("--devices", type=str, default="auto", help="Comma-separated CUDA device ids, or 'auto', or 'cpu'")
-    parser.add_argument("--include-types", type=str, default=None, help="Comma-separated raw types to include")
-    parser.add_argument("--max-shards-per-type", type=int, default=None, help="For testing: cap number of shards per type")
-    parser.add_argument("--limit-rows-per-shard", type=int, default=None, help="For testing: only process first N rows of each shard")
-    parser.add_argument("--batch-size", type=int, default=1, help="Rows per parquet/model inference batch")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output shard files")
-    parser.add_argument("--fail-fast", action="store_true", help="Abort worker on first row/shard failure")
-    parser.add_argument("--compression", type=str, default="zstd", help="Parquet compression codec")
-    parser.add_argument("--progress-mininterval", type=float, default=2.0, help="tqdm mininterval")
-    parser.add_argument("--max-new-tokens", type=int, default=220, help="Generation cap per row")
-    parser.add_argument("--keep-verdicts", type=str, default="PASS", help="Comma-separated verdicts to keep, e.g. 'PASS' or 'PASS,UNSURE'")
-    return parser.parse_args()
-
-
 def parse_devices(spec: str) -> List[str]:
     spec = (spec or "auto").strip().lower()
     if spec == "cpu":
@@ -210,27 +73,25 @@ def parse_devices(spec: str) -> List[str]:
     if spec == "auto":
         import torch
 
-        n = torch.cuda.device_count()
-        return [f"cuda:{i}" for i in range(n)] if n > 0 else ["cpu"]
-    ids = [part.strip() for part in spec.split(",") if part.strip()]
+        count = torch.cuda.device_count()
+        return [f"cuda:{index}" for index in range(count)] if count else ["cpu"]
     devices = []
-    for part in ids:
-        if part.startswith("cuda:"):
-            devices.append(part)
-        else:
-            devices.append(f"cuda:{int(part)}")
+    for item in (part.strip() for part in spec.split(",")):
+        if not item:
+            continue
+        devices.append(item if item.startswith("cuda:") else f"cuda:{int(item)}")
     return devices or ["cpu"]
 
 
 def raw_type_from_filename(path: Path) -> str:
-    m = re.match(r"(.+)_\d+\.parquet$", path.name)
-    return m.group(1) if m else path.stem
+    match = re.match(r"(.+)_\d+\.parquet$", path.name)
+    return match.group(1) if match else path.stem
 
 
-def iter_input_shards(input_dir: Path, include_types: Optional[Sequence[str]]) -> Dict[str, List[Path]]:
-    include = None
-    if include_types:
-        include = {t.strip() for t in include_types if t.strip()}
+def iter_input_shards(
+    input_dir: Path, include_types: Optional[Sequence[str]]
+) -> Dict[str, List[Path]]:
+    include = {item.strip() for item in include_types if item.strip()} if include_types else None
     grouped: Dict[str, List[Path]] = {}
     for path in sorted(input_dir.glob("*.parquet")):
         raw_type = raw_type_from_filename(path)
@@ -241,39 +102,38 @@ def iter_input_shards(input_dir: Path, include_types: Optional[Sequence[str]]) -
 
 
 def count_rows(path: Path, limit_rows: Optional[int]) -> int:
-    pf = pq.ParquetFile(path)
-    total = pf.metadata.num_rows
+    total = pq.ParquetFile(path).metadata.num_rows
     return min(total, limit_rows) if limit_rows is not None else total
 
 
 def build_jobs(args: argparse.Namespace) -> List[ShardJob]:
-    grouped = iter_input_shards(args.input_dir, args.include_types.split(",") if args.include_types else None)
-    jobs: List[ShardJob] = []
+    include_types = args.include_types.split(",") if args.include_types else None
+    grouped = iter_input_shards(args.input_dir, include_types)
     args.audit_dir.mkdir(parents=True, exist_ok=True)
     args.keep_manifest_dir.mkdir(parents=True, exist_ok=True)
+    jobs: List[ShardJob] = []
     for raw_type, paths in sorted(grouped.items()):
         selected = paths[: args.max_shards_per_type] if args.max_shards_per_type is not None else paths
         for input_path in selected:
             rows = count_rows(input_path, args.limit_rows_per_shard)
-            if rows <= 0:
-                continue
-            jobs.append(
-                ShardJob(
-                    raw_type=raw_type,
-                    input_path=str(input_path),
-                    audit_path=str(args.audit_dir / input_path.name),
-                    manifest_path=str(args.keep_manifest_dir / input_path.name),
-                    num_rows=rows,
-                    limit_rows=args.limit_rows_per_shard,
+            if rows:
+                jobs.append(
+                    ShardJob(
+                        raw_type=raw_type,
+                        input_path=str(input_path),
+                        audit_path=str(args.audit_dir / input_path.name),
+                        manifest_path=str(args.keep_manifest_dir / input_path.name),
+                        num_rows=rows,
+                        limit_rows=args.limit_rows_per_shard,
+                    )
                 )
-            )
     return jobs
 
 
 def assign_jobs(jobs: List[ShardJob], devices: List[str]) -> List[Tuple[str, List[ShardJob]]]:
-    buckets = [{"device": dev, "rows": 0, "jobs": []} for dev in devices]
-    for job in sorted(jobs, key=lambda j: j.num_rows, reverse=True):
-        bucket = min(buckets, key=lambda b: b["rows"])
+    buckets = [{"device": device, "rows": 0, "jobs": []} for device in devices]
+    for job in sorted(jobs, key=lambda item: item.num_rows, reverse=True):
+        bucket = min(buckets, key=lambda item: item["rows"])
         bucket["jobs"].append(job)
         bucket["rows"] += job.num_rows
     return [(bucket["device"], bucket["jobs"]) for bucket in buckets if bucket["jobs"]]
@@ -287,391 +147,508 @@ def decode_image(cell: Dict) -> Image.Image:
     return ImageOps.exif_transpose(Image.open(io.BytesIO(cell["bytes"]))).convert("RGB")
 
 
-def _safe_canonical_type(raw_type: str) -> Optional[str]:
-    try:
-        return canonicalize_type(raw_type)
-    except Exception:
-        return None
-
-
-def _build_prefilter_context(raw_type: str, instruction: str) -> Dict:
-    raw_type = str(raw_type or "")
-    instruction = str(instruction or "")
-    canonical_type = _safe_canonical_type(raw_type)
-    phrases = None
-    if canonical_type is not None:
-        try:
-            phrases = parse_instruction(instruction, canonical_type)
-        except Exception:
-            phrases = None
-    return {
-        "raw_type": raw_type,
-        "instruction": instruction,
-        "canonical_type": canonical_type,
-        "phrases": phrases or {},
-    }
-
-
-def _format_add_location_hint(location_hint: Optional[Dict]) -> str:
-    if not location_hint:
-        return "none"
-    fields = []
-    if "x" in location_hint:
-        fields.append(f"x={float(location_hint['x']):.2f}")
-    if "y" in location_hint:
-        fields.append(f"y={float(location_hint['y']):.2f}")
-    if "radius" in location_hint:
-        fields.append(f"radius={float(location_hint['radius']):.2f}")
-    if location_hint.get("region"):
-        fields.append(f"region={location_hint['region']}")
-    return ", ".join(fields) if fields else "none"
-
-
-def build_prompt(raw_type: str, instruction: str) -> str:
-    context = _build_prefilter_context(raw_type, instruction)
-    prompt = PROMPT_TEMPLATE.format(raw_type=raw_type, instruction=instruction)
-    if context.get("canonical_type") != "add":
-        return prompt
-    phrases = context.get("phrases") or {}
-    target_phrase = str(phrases.get("target") or "").strip() or "<none parsed>"
-    location_hint = _format_add_location_hint(phrases.get("location_hint"))
-    multiplicity_hint = "multiple-or-counted target likely" if phrases.get("allow_multiple") else "single-or-unspecified target"
-    return prompt + "\n\n" + ADD_PROMPT_APPEND.format(
-        target_phrase=target_phrase,
-        location_hint=location_hint,
-        multiplicity_hint=multiplicity_hint,
-    )
-
-
 def extract_json(text: str) -> Dict:
     text = (text or "").strip()
     try:
         return json.loads(text)
     except Exception:
-        pass
-    m = re.search(r"\{.*\}", text, flags=re.S)
-    if not m:
-        raise ValueError(f"No JSON found in model output: {text[:200]!r}")
-    return json.loads(m.group(0))
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if not match:
+            raise ValueError(f"No JSON found in model output: {text[:200]!r}")
+        return json.loads(match.group(0))
 
 
-def normalize_model_output(parsed: Dict) -> Dict:
-    verdict = str(parsed.get("verdict", "UNSURE")).strip().upper()
-    if verdict not in {"PASS", "FAIL", "UNSURE"}:
-        verdict = "UNSURE"
-    try:
-        confidence = float(parsed.get("confidence", 0.0))
-    except Exception:
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
+SLOT_PROMPT = """You extract factual slots from one image-editing instruction.
+Do not inspect or imagine any image. Split compound requests into atomic subgoals;
+for example, changing skin tone and clothing color must be two subgoals.
 
-    change_presence = str(parsed.get("change_presence", "SUBTLE")).strip().upper()
-    if change_presence not in {"NONE", "SUBTLE", "CLEAR"}:
-        change_presence = "SUBTLE"
+Use the raw type only as a coarse hint. Mark NO_OP only when the instruction itself
+explicitly requests no change. Mark UNJUDGEABLE when no visible fact can verify it.
+For add requests, `object_b` must name the most concrete newly introduced visual
+entity rather than a broad scene category. For example, "add a garden with raised
+beds" should use "raised garden bed" rather than only "garden".
 
-    instruction_achievement = str(parsed.get("instruction_achievement", "UNCLEAR")).strip().upper()
-    if instruction_achievement not in {"NO", "PARTIAL", "MOSTLY", "YES", "UNCLEAR"}:
-        instruction_achievement = "UNCLEAR"
-
-    failure_mode = str(parsed.get("failure_mode", "OTHER")).strip().upper()
-    if failure_mode not in {
-        "NO_RELEVANT_CHANGE",
-        "PARTIAL_RELEVANT_CHANGE",
-        "WRONG_TARGET",
-        "AMBIGUOUS",
-        "OTHER",
-    }:
-        failure_mode = "OTHER"
-
-    return {
-        "verdict": verdict,
-        "confidence": confidence,
-        "source_observation": str(parsed.get("source_observation", "")).strip(),
-        "target_observation": str(parsed.get("target_observation", "")).strip(),
-        "reason": str(parsed.get("reason", "")).strip(),
-        "change_presence": change_presence,
-        "instruction_achievement": instruction_achievement,
-        "failure_mode": failure_mode,
+Return JSON only with this schema (do not add a verdict):
+{
+  "instruction_status": "NORMAL" | "NO_OP" | "UNJUDGEABLE",
+  "subgoals": [
+    {
+      "edit_type": "add" | "remove" | "replace" | "color" | "motion" | "background" | "style",
+      "object_a": "object removed/replaced/modified, or empty",
+      "object_b": "object added/replacement result, or empty",
+      "attribute": "requested TARGET value with direction/color/style/scene (for example 'darker skin tone', not generic 'skin tone'), or empty",
+      "part": "body part/component for motion, or empty",
+      "count": null or a positive integer,
+      "location": "short location clue, or empty"
     }
+  ],
+  "confidence": 0.0,
+  "notes": "short parsing note"
+}
 
+Raw type: __RAW_TYPE__
+Instruction: __INSTRUCTION__
+"""
 
-def verdict_to_decision(verdict: str, keep_verdicts: Sequence[str]) -> str:
-    return "keep" if verdict in keep_verdicts else "drop"
+SINGLE_IMAGE_PROMPT = """You are recording facts visible in ONE image. You cannot
+see the other image. Do not infer an edit, a before/after relationship, success, or
+failure. The original editing instruction is intentionally hidden.
 
+Answer every requested slot independently. Use normalized [x1,y1,x2,y2] boxes.
+For attributes and poses, report the CURRENT visible value/pose, not the requested
+value. A second image, when provided, is only a magnified crop from the same image.
 
-def filter_score(decision: str, verdict: str, confidence: float) -> float:
-    if decision == "keep":
-        return 0.0
-    if verdict == "UNSURE":
-        return max(0.5, confidence)
-    return confidence
-
-
-def _is_add_detail_phrase(target_phrase: Optional[str], instruction: str) -> bool:
-    text = f"{target_phrase or ''} {instruction or ''}".lower()
-    return any(tok in text for tok in ADD_DETAIL_TOKENS)
-
-
-def _text_matches_any_pattern(text: str, patterns: Sequence[str]) -> bool:
-    s = str(text or "")
-    return any(re.search(pattern, s, flags=re.I) for pattern in patterns)
-
-
-def apply_add_post_policy(parsed: Dict, context: Dict) -> Dict:
-    canonical_type = context.get("canonical_type")
-    if canonical_type != "add":
-        return parsed
-
-    out = dict(parsed)
-    phrases = context.get("phrases") or {}
-    target_phrase = str(phrases.get("target") or "")
-    reason = str(out.get("reason", "")).strip()
-    source_obs = str(out.get("source_observation", "")).strip()
-    target_obs = str(out.get("target_observation", "")).strip()
-    joined = " ".join(part for part in [reason, source_obs, target_obs] if part).lower()
-
-    is_detail = _is_add_detail_phrase(target_phrase, context.get("instruction", ""))
-    mentions_existing = _text_matches_any_pattern(joined, ADD_EXISTING_TARGET_PATTERNS)
-    mentions_reframe = _text_matches_any_pattern(joined, ADD_REFRAME_ONLY_PATTERNS)
-    mentions_novelty = _text_matches_any_pattern(joined, ADD_POSITIVE_NOVELTY_PATTERNS)
-
-    if out.get("verdict") == "PASS":
-        if mentions_existing and not mentions_novelty:
-            out["verdict"] = "FAIL"
-            out["instruction_achievement"] = "NO"
-            out["failure_mode"] = "NO_RELEVANT_CHANGE" if mentions_reframe else "WRONG_TARGET"
-            out["change_presence"] = "SUBTLE" if out.get("change_presence") == "NONE" else out.get("change_presence", "SUBTLE")
-            detail_text = "detail already present before" if is_detail else "target already present before"
-            out["reason"] = f"ADD invalid: {detail_text}; no clearly new added content."
-        elif mentions_reframe and not mentions_novelty:
-            out["verdict"] = "FAIL"
-            out["instruction_achievement"] = "NO"
-            out["failure_mode"] = "NO_RELEVANT_CHANGE"
-            out["change_presence"] = "SUBTLE" if out.get("change_presence") == "NONE" else out.get("change_presence", "SUBTLE")
-            out["reason"] = "ADD invalid: change is reframing/enlargement, not new target content."
-
-    if out.get("verdict") in {"FAIL", "UNSURE"}:
-        if out.get("failure_mode") == "OTHER":
-            out["failure_mode"] = "PARTIAL_RELEVANT_CHANGE" if out.get("change_presence") in {"SUBTLE", "CLEAR"} else "NO_RELEVANT_CHANGE"
-        if not out.get("reason"):
-            out["reason"] = "ADD not clearly supported by visible newly added target content."
-
-    return normalize_model_output(out)
-
-
-def write_table(rows: List[Dict], path: Path, compression: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    table = rows_to_table(rows)
-    pq.write_table(table, path, compression=compression)
-
-
-def process_shard(job: ShardJob, runner, args: argparse.Namespace, progress_queue, worker_idx: int, run_id: str) -> Dict:
-    input_path = Path(job.input_path)
-    audit_path = Path(job.audit_path)
-    manifest_path = Path(job.manifest_path)
-    tmp_audit_path = audit_path.with_suffix(audit_path.suffix + ".tmp")
-    tmp_manifest_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-    summary = {
-        "rows": 0,
-        "errors": 0,
-        "kept": 0,
-        "dropped": 0,
-        "verdicts": {},
-        "decisions": {},
+Always describe the scene, style, and main subject. Then return one fact for every
+question in the supplied questionnaire. Return JSON only, with no verdict:
+{
+  "scene_description": "one short sentence",
+  "scene_label": "one short scene category",
+  "style_label": "one short style label",
+  "subject_identity": "one short identity",
+  "subject_bbox": [0.0,0.0,1.0,1.0] or null,
+  "facts": [
+    {
+      "subgoal_index": 0,
+      "role": "OBJECT_A" | "OBJECT_B" | "PART",
+      "query": "copied slot query",
+      "present": "YES" | "NO" | "UNCLEAR",
+      "count": null or a nonnegative integer,
+      "bboxes": [[0.0,0.0,1.0,1.0]],
+      "attribute_value": "current visible value, or empty",
+      "pose": "specific current pose, or empty",
+      "confidence": 0.0
     }
+  ],
+  "crop_observation": "what the optional crop shows, or empty",
+  "confidence": 0.0
+}
 
-    pf = pq.ParquetFile(input_path)
-    audit_writer = None
-    manifest_writer = None
-    row_idx = 0
-    pending_rows = 0
-    model_name = Path(args.model_path).name
+Questionnaire (slot words only, not an instruction):
+__QUESTIONNAIRE__
+"""
 
+PAIR_PROMPT = """Compare Image A and Image B without knowing any editing request.
+List only visible differences, most significant first. Judge whether the main
+subject is the same, whether composition/viewpoint is preserved, whether unrelated
+regions are preserved, and whether B looks like a controlled edit of A or a global
+regeneration. For composition, compare camera/viewpoint and fixed layout anchors;
+an added/removed/replaced item itself does not make composition unpreserved. For
+unrelated regions, judge only areas OUTSIDE the listed differences; a large edited
+region itself is not an unrelated change. A whole-image style/color transform that preserves content and
+geometry is CONTROLLED_EDIT; reserve GLOBAL_REGEN for changed identity, content,
+composition, or viewpoint. Do not guess the intended edit or emit a verdict.
+
+Return JSON only:
+{
+  "visible_differences": [
+    {"description": "one visible difference", "significance": "LOW" | "MEDIUM" | "HIGH"}
+  ],
+  "same_subject": "YES" | "NO" | "UNCLEAR",
+  "composition_preserved": "YES" | "NO" | "UNCLEAR",
+  "unrelated_regions_preserved": "YES" | "NO" | "UNCLEAR",
+  "edit_scope": "CONTROLLED_EDIT" | "GLOBAL_REGEN" | "UNCLEAR",
+  "confidence": 0.0
+}
+"""
+
+MATCH_PROMPT = """This is a text-only matching task. Match each atomic subgoal in
+an editing instruction against an instruction-blind list of visible image
+differences. Do not add visual facts that are absent from the list.
+
+MATCH means clearly supported; PARTIAL means some requested progress is explicitly
+mentioned; MISMATCH means a contradictory/wrong change; NOT_MENTIONED means no
+listed difference supports it. Return JSON only and do not emit a keep/drop verdict:
+{
+  "subgoal_matches": [
+    {"subgoal_index": 0, "match": "MATCH" | "PARTIAL" | "MISMATCH" | "NOT_MENTIONED", "reason": "short textual reason", "confidence": 0.0}
+  ],
+  "overall_match": "MATCH" | "PARTIAL" | "MISMATCH" | "NOT_MENTIONED",
+  "confidence": 0.0
+}
+
+Instruction: __INSTRUCTION__
+Atomic slots: __SLOTS__
+Blind visible differences: __DIFFERENCES__
+"""
+
+REVIEW_STATE_PROMPT = """Record focused facts visible in this ONE image. You
+cannot see the other image. Do not infer a before/after relationship and do not
+decide whether an edit, request, or subgoal succeeded. Never output a support,
+match, keep/drop, or verdict field.
+
+Answer every question independently. Report only the CURRENT state in this image.
+For color/background/style report literal visible attributes. For motion report a
+specific pose, orientation, angle, or relative position rather than words such as
+normal or changed. If `present` is YES, the requested attribute or pose field must
+not be empty. If it cannot be seen reliably, use UNCLEAR and confidence 0.0 rather
+than copying words from the questionnaire. A second image, when present, is only a
+magnified crop from this same image.
+
+Return JSON only:
+{
+  "scene_description": "one short factual sentence",
+  "scene_label": "one short scene category",
+  "style_label": "one short current style",
+  "subject_identity": "one short identity",
+  "facts": [
+    {
+      "subgoal_index": 0,
+      "role": "OBJECT_A" | "OBJECT_B" | "PART",
+      "query": "copied slot query",
+      "present": "YES" | "NO" | "UNCLEAR",
+      "count": null or a nonnegative integer,
+      "attribute_value": "literal current attribute, or empty",
+      "pose": "literal current pose/orientation/position, or empty",
+      "confidence": 0.0
+    }
+  ],
+  "crop_observation": "literal current facts visible in the optional crop, or empty",
+  "confidence": 0.0
+}
+
+Questionnaire (neutral slot words, not an instruction):
+__QUESTIONNAIRE__
+"""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the fact-first local MLLM prefilter over CrispEdit parquet shards"
+    )
+    parser.add_argument("--input-dir", type=Path, required=True)
+    parser.add_argument("--audit-dir", type=Path, required=True)
+    parser.add_argument("--keep-manifest-dir", type=Path, required=True)
+    parser.add_argument("--model-path", type=str, default=DEFAULT_MODEL)
+    parser.add_argument("--devices", type=str, default="auto")
+    parser.add_argument("--include-types", type=str, default=None)
+    parser.add_argument("--max-shards-per-type", type=int, default=None)
+    parser.add_argument("--limit-rows-per-shard", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--fail-fast", action="store_true")
+    parser.add_argument("--compression", type=str, default="zstd")
+    parser.add_argument("--progress-mininterval", type=float, default=2.0)
+    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--confidence-threshold", type=float, default=0.6)
+    parser.add_argument(
+        "--boundary-review-fraction",
+        type=float,
+        default=0.05,
+        help="Deterministic fraction of unresolved rows allowed to use Step 5",
+    )
+    return parser.parse_args()
+
+
+def build_slot_prompt(raw_type: object, instruction: object) -> str:
+    return SLOT_PROMPT.replace("__RAW_TYPE__", str(raw_type or "")).replace(
+        "__INSTRUCTION__", str(instruction or "")
+    )
+
+
+def build_questionnaire(slots: Dict) -> List[Dict]:
+    questions: List[Dict] = []
+    for subgoal in slots.get("subgoals") or []:
+        index = int(subgoal.get("subgoal_index", 0))
+        edit_type = canonical_edit_type(subgoal.get("edit_type"))
+
+        def add_question(role: str, query: str) -> None:
+            query = str(query or "").strip()
+            if query:
+                questions.append(
+                    {
+                        "subgoal_index": index,
+                        "edit_type": edit_type,
+                        "role": role,
+                        "query": query,
+                        "location": subgoal.get("location", ""),
+                        "requested_attribute_slot": subgoal.get("attribute", ""),
+                    }
+                )
+
+        if edit_type == "add":
+            add_question("OBJECT_B", subgoal.get("object_b"))
+        elif edit_type == "remove":
+            add_question("OBJECT_A", subgoal.get("object_a"))
+        elif edit_type == "replace":
+            add_question("OBJECT_A", subgoal.get("object_a"))
+            add_question("OBJECT_B", subgoal.get("object_b"))
+        elif edit_type == "color":
+            add_question("OBJECT_A", subgoal.get("object_a") or "main subject")
+        elif edit_type == "motion":
+            add_question("PART", subgoal.get("part") or subgoal.get("object_a"))
+        elif edit_type == "background":
+            add_question("OBJECT_A", subgoal.get("attribute") or "background")
+    return questions
+
+
+def build_single_image_prompt(slots: Dict) -> str:
+    questionnaire = {
+        "subgoals": slots.get("subgoals") or [],
+        "questions": build_questionnaire(slots),
+    }
+    return SINGLE_IMAGE_PROMPT.replace("__QUESTIONNAIRE__", json_dumps(questionnaire))
+
+
+def _review_observation_focus(subgoal: Dict) -> str:
+    edit_type = canonical_edit_type(subgoal.get("edit_type"))
+    attribute = str(subgoal.get("attribute") or "").lower()
+    if edit_type == "color":
+        if "skin" in attribute:
+            return (
+                "current apparent lightness of untattooed facial/exposed skin on exactly "
+                "one seven-level scale: level 1 very dark, 2 dark, 3 medium-dark, "
+                "4 medium, 5 medium-light, 6 light, 7 very light; judge visible appearance "
+                "under the image lighting and do not infer ethnicity or intrinsic identity"
+            )
+        if any(word in attribute for word in ("attire", "clothing", "outfit", "shirt", "dress")):
+            return "current visible color of the queried attire/clothing"
+        return "current literal visible color of the queried object"
+    if edit_type == "motion":
+        return "current pose, orientation, angle, and relative position of the queried part"
+    if edit_type == "background":
+        return "current background elements, lighting, weather, and time-of-day appearance"
+    if edit_type == "style":
+        return "current visual medium and rendering style"
+    if edit_type in {"add", "remove", "replace"}:
+        return "current presence and exact visible instance count of the queried object"
+    return "current literal visible state"
+
+
+def build_review_questionnaire(slots: Dict) -> List[Dict]:
+    """Build a fact-only questionnaire with no requested target value."""
+
+    subgoals = {
+        int(item.get("subgoal_index", 0)): item for item in slots.get("subgoals") or []
+    }
+    questions = []
+    for question in build_questionnaire(slots):
+        index = int(question.get("subgoal_index", 0))
+        subgoal = subgoals.get(index, {})
+        questions.append(
+            {
+                "subgoal_index": index,
+                "role": question.get("role"),
+                "query": question.get("query"),
+                "location": question.get("location", ""),
+                "observation_focus": _review_observation_focus(subgoal),
+            }
+        )
+    return questions
+
+
+def build_match_prompt(instruction: object, slots: Dict, paired: Dict) -> str:
+    return (
+        MATCH_PROMPT.replace("__INSTRUCTION__", str(instruction or ""))
+        .replace("__SLOTS__", json_dumps(slots.get("subgoals") or []))
+        .replace("__DIFFERENCES__", json_dumps(paired.get("visible_differences") or []))
+    )
+
+
+def build_review_state_prompt(slots: Dict) -> str:
+    questionnaire = {"questions": build_review_questionnaire(slots)}
+    return REVIEW_STATE_PROMPT.replace("__QUESTIONNAIRE__", json_dumps(questionnaire))
+
+
+def crop_normalized_bbox(
+    image: Image.Image, bbox: Optional[Sequence[float]], expansion: float = 0.2
+) -> Optional[Image.Image]:
+    if not bbox or len(bbox) != 4:
+        return None
     try:
-        for batch in pf.iter_batches(batch_size=args.batch_size):
-            records = batch.to_pylist()
-            if job.limit_rows is not None and row_idx >= job.limit_rows:
-                break
-            if job.limit_rows is not None:
-                remaining = job.limit_rows - row_idx
-                if remaining <= 0:
-                    break
-                records = records[:remaining]
-            if not records:
-                continue
-
-            batch_results = runner.infer_batch(records, input_path.name, row_idx)
-            audit_rows: List[Dict] = []
-            manifest_rows: List[Dict] = []
-            for batch_offset, (record, result) in enumerate(zip(records, batch_results)):
-                current_row_idx = row_idx + batch_offset
-                raw_text = result.get("raw_text", "")
-                parsed = result["model_output"]
-                parse_ok = bool(result.get("parse_ok", False))
-                context = _build_prefilter_context(record.get("type", job.raw_type), record.get("instruction", ""))
-                if parse_ok:
-                    parsed = apply_add_post_policy(parsed, context)
-                if not parse_ok:
-                    summary["errors"] += 1
-                    if args.fail_fast:
-                        raise RuntimeError(f"prefilter parse/runtime error at {input_path.name}:{current_row_idx}: {parsed.get('reason', '')}")
-
-                verdict = parsed["verdict"]
-                decision = verdict_to_decision(verdict, runner.keep_verdicts) if verdict in {"PASS", "FAIL", "UNSURE"} else "drop"
-                confidence = float(parsed["confidence"])
-                reason = parsed.get("reason", "")
-                summary["verdicts"][verdict] = summary["verdicts"].get(verdict, 0) + 1
-                summary["decisions"][decision] = summary["decisions"].get(decision, 0) + 1
-                if decision == "keep":
-                    summary["kept"] += 1
-                else:
-                    summary["dropped"] += 1
-
-                audit_row = {
-                    "row_idx": current_row_idx,
-                    "raw_type": record.get("type", job.raw_type),
-                    "instruction": record.get("instruction", ""),
-                    "prefilter_verdict": verdict,
-                    "prefilter_decision": decision,
-                    "prefilter_confidence": confidence,
-                    "prefilter_source_observation": parsed.get("source_observation", ""),
-                    "prefilter_target_observation": parsed.get("target_observation", ""),
-                    "prefilter_reason": reason,
-                    "prefilter_change_presence": parsed.get("change_presence", "SUBTLE"),
-                    "prefilter_instruction_achievement": parsed.get("instruction_achievement", "UNCLEAR"),
-                    "prefilter_failure_mode": parsed.get("failure_mode", "OTHER"),
-                    "prefilter_parse_ok": parse_ok,
-                    "prefilter_model_name": model_name,
-                    "prefilter_prompt_version": PROMPT_VERSION,
-                    "prefilter_run_id": run_id,
-                    "filter_decision": decision,
-                    "filter_reason_codes": "" if decision == "keep" else f"PREFILTER_{verdict}",
-                    "filter_mismatch_score": float(filter_score(decision, verdict, confidence)),
-                    "filter_version": PROMPT_VERSION,
-                    "raw_text": raw_text,
-                }
-                manifest_row = {
-                    "row_idx": current_row_idx,
-                    "prefilter_verdict": verdict,
-                    "prefilter_decision": decision,
-                    "prefilter_confidence": confidence,
-                    "prefilter_reason": reason,
-                    "prefilter_change_presence": audit_row["prefilter_change_presence"],
-                    "prefilter_instruction_achievement": audit_row["prefilter_instruction_achievement"],
-                    "prefilter_failure_mode": audit_row["prefilter_failure_mode"],
-                    "prefilter_parse_ok": parse_ok,
-                    "prefilter_model_name": model_name,
-                    "prefilter_prompt_version": PROMPT_VERSION,
-                    "prefilter_run_id": run_id,
-                    "filter_decision": decision,
-                    "filter_reason_codes": audit_row["filter_reason_codes"],
-                    "filter_mismatch_score": audit_row["filter_mismatch_score"],
-                    "filter_version": PROMPT_VERSION,
-                }
-                audit_rows.append(audit_row)
-                manifest_rows.append(manifest_row)
-
-            row_idx += len(records)
-            summary["rows"] += len(records)
-            pending_rows += len(records)
-
-            if audit_rows:
-                audit_table = rows_to_table(audit_rows)
-                manifest_table = rows_to_table(manifest_rows)
-                if audit_writer is None:
-                    tmp_audit_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-                    audit_writer = pq.ParquetWriter(tmp_audit_path, audit_table.schema, compression=args.compression)
-                    manifest_writer = pq.ParquetWriter(tmp_manifest_path, manifest_table.schema, compression=args.compression)
-                audit_writer.write_table(audit_table)
-                manifest_writer.write_table(manifest_table)
-                progress_queue.put({
-                    "kind": "rows",
-                    "count": pending_rows,
-                    "worker": worker_idx,
-                    "shard": input_path.name,
-                    "done_rows": summary["rows"],
-                    "total_rows": job.num_rows,
-                })
-                pending_rows = 0
-            if job.limit_rows is not None and row_idx >= job.limit_rows:
-                break
-    finally:
-        if audit_writer is not None:
-            audit_writer.close()
-        if manifest_writer is not None:
-            manifest_writer.close()
-        if tmp_audit_path.exists():
-            tmp_audit_path.replace(audit_path)
-        if tmp_manifest_path.exists():
-            tmp_manifest_path.replace(manifest_path)
-    return summary
+        x1, y1, x2, y2 = [float(value) for value in bbox]
+    except (TypeError, ValueError):
+        return None
+    width, height = image.size
+    dx, dy = (x2 - x1) * expansion, (y2 - y1) * expansion
+    left = max(0, min(width - 1, int((x1 - dx) * width)))
+    top = max(0, min(height - 1, int((y1 - dy) * height)))
+    right = max(left + 1, min(width, int(math.ceil((x2 + dx) * width))))
+    bottom = max(top + 1, min(height, int(math.ceil((y2 + dy) * height))))
+    if right - left < 2 or bottom - top < 2:
+        return None
+    return image.crop((left, top, right, bottom))
 
 
-class QwenPrefilterRunner:
-    def __init__(self, model_path: str, device: str, max_new_tokens: int, keep_verdicts: Sequence[str]):
+def _bbox_from_location(location: object) -> Optional[List[float]]:
+    text = str(location or "").lower().replace("_", "-")
+    if not text:
+        return None
+    x1, x2 = 0.15, 0.85
+    y1, y2 = 0.1, 0.9
+    if "left" in text:
+        x1, x2 = 0.0, 0.62
+    elif "right" in text:
+        x1, x2 = 0.38, 1.0
+    elif "center" in text or "central" in text or "middle" in text:
+        x1, x2 = 0.18, 0.82
+    if any(word in text for word in ("top", "upper", "above")):
+        y1, y2 = 0.0, 0.62
+    elif any(word in text for word in ("bottom", "lower", "below")):
+        y1, y2 = 0.38, 1.0
+    elif any(word in text for word in ("center", "central", "middle")):
+        y1, y2 = 0.12, 0.88
+    return [x1, y1, x2, y2]
+
+
+def select_focus_bbox(slots: Dict, source_evidence: Dict) -> Optional[List[float]]:
+    for subgoal in slots.get("subgoals") or []:
+        if canonical_edit_type(subgoal.get("edit_type")) not in {"remove", "color", "motion"}:
+            continue
+        index = subgoal.get("subgoal_index")
+        location_bbox = _bbox_from_location(subgoal.get("location"))
+        preferred_roles = ("PART", "OBJECT_A") if subgoal.get("edit_type") == "motion" else ("OBJECT_A",)
+        for role in preferred_roles:
+            for fact in source_evidence.get("facts") or []:
+                if fact.get("subgoal_index") != index or fact.get("role") != role:
+                    continue
+                boxes = fact.get("bboxes") or []
+                if boxes:
+                    box = boxes[0]
+                    area = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+                    # A whole-image/group box does not localize a request such
+                    # as "people on the right".  The explicit location is more
+                    # useful for the focused factual review in that case.
+                    if location_bbox and area >= 0.65:
+                        return location_bbox
+                    return box
+        if location_bbox:
+            return location_bbox
+    return None
+
+
+def select_focus_crop(
+    slots: Dict, source_evidence: Dict, image: Image.Image
+) -> Optional[Image.Image]:
+    return crop_normalized_bbox(image, select_focus_bbox(slots, source_evidence))
+
+
+def select_target_crop(slots: Dict, source_evidence: Dict, target: Image.Image) -> Optional[Image.Image]:
+    crop = select_focus_crop(slots, source_evidence, target)
+    if crop is not None:
+        return crop
+    return None
+
+
+def deterministic_parse(instruction: object, raw_type: object) -> Dict:
+    edit_type = canonical_edit_type(raw_type)
+    if edit_type == "unknown":
+        return {"parse_ok": False}
+    try:
+        result = dict(parse_instruction(str(instruction or ""), edit_type))
+    except Exception as exc:
+        return {"parse_ok": False, "error": repr(exc)}
+    return result
+
+
+def _state_evidence_confidence(evidence: Dict) -> float:
+    values = [float(evidence.get("confidence") or 0.0)]
+    values.extend(float(item.get("confidence") or 0.0) for item in evidence.get("facts") or [])
+    nonzero = [value for value in values if value > 0]
+    return min(nonzero) if nonzero else 0.0
+
+
+def _review_selected(shard_name: str, row_idx: int, fraction: float) -> bool:
+    fraction = max(0.0, min(1.0, float(fraction)))
+    if fraction <= 0:
+        return False
+    digest = hashlib.sha1(f"{shard_name}:{row_idx}".encode("utf-8")).digest()
+    value = int.from_bytes(digest[:8], "big") / float(2**64 - 1)
+    return value < fraction
+
+
+class QwenFactPrefilterRunner:
+    def __init__(
+        self,
+        model_path: str,
+        device: str,
+        max_new_tokens: int,
+        confidence_threshold: float,
+        boundary_review_fraction: float,
+    ):
         import torch
         from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
         self.model_path = model_path
         self.device = device
         self.max_new_tokens = max_new_tokens
-        self.keep_verdicts = tuple(v.strip().upper() for v in keep_verdicts if v.strip())
+        self.confidence_threshold = max(0.0, min(1.0, confidence_threshold))
+        self.boundary_review_fraction = max(0.0, min(1.0, boundary_review_fraction))
         self._torch = torch
-        model_kwargs = {
-            "trust_remote_code": True,
-        }
+        model_kwargs = {"trust_remote_code": True}
         if device == "cpu":
-            model_kwargs["torch_dtype"] = torch.float32
-            self.model = Qwen3VLForConditionalGeneration.from_pretrained(model_path, **model_kwargs).to("cpu").eval()
+            model_kwargs["dtype"] = torch.float32
+            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                model_path, **model_kwargs
+            ).to("cpu").eval()
         else:
-            model_kwargs["torch_dtype"] = torch.bfloat16
+            model_kwargs["dtype"] = torch.bfloat16
             model_kwargs["device_map"] = {"": device}
-            self.model = Qwen3VLForConditionalGeneration.from_pretrained(model_path, **model_kwargs).eval()
+            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                model_path, **model_kwargs
+            ).eval()
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-        if hasattr(self.processor, "tokenizer") and hasattr(self.processor.tokenizer, "padding_side"):
+        if hasattr(self.processor, "tokenizer"):
             self.processor.tokenizer.padding_side = "left"
 
-    def _build_messages(self, record: Dict) -> List[Dict]:
-        src = decode_image(record["input_img"])
-        tgt = decode_image(record["output_img"])
-        prompt = build_prompt(str(record.get("type", "")), str(record.get("instruction", "")))
-        return [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Image 1 is the source before editing."},
-                {"type": "image", "image": src},
-                {"type": "text", "text": "Image 2 is the target after editing."},
-                {"type": "image", "image": tgt},
-                {"type": "text", "text": prompt},
-            ],
-        }]
+    @staticmethod
+    def _text_messages(prompts: Sequence[str]) -> List[List[Dict]]:
+        return [
+            [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+            for prompt in prompts
+        ]
 
-    def _error_result(self, reason: str) -> Dict:
-        return {
-            "model_output": {
-                "verdict": "ERROR",
-                "confidence": 1.0,
-                "source_observation": "",
-                "target_observation": "",
-                "reason": reason,
-                "change_presence": "SUBTLE",
-                "instruction_achievement": "UNCLEAR",
-                "failure_mode": "OTHER",
-            },
-            "raw_text": "",
-            "parse_ok": False,
-        }
+    @staticmethod
+    def _single_image_messages(
+        images: Sequence[Image.Image], prompts: Sequence[str], crops: Optional[Sequence[Optional[Image.Image]]] = None
+    ) -> List[List[Dict]]:
+        if crops is None:
+            crops = [None] * len(images)
+        conversations = []
+        for image, crop, prompt in zip(images, crops, prompts):
+            content: List[Dict] = [
+                {"type": "text", "text": "Full single image:"},
+                {"type": "image", "image": image},
+            ]
+            if crop is not None:
+                content.extend(
+                    [
+                        {"type": "text", "text": "Magnified crop from the same image:"},
+                        {"type": "image", "image": crop},
+                    ]
+                )
+            content.append({"type": "text", "text": prompt})
+            conversations.append([{"role": "user", "content": content}])
+        return conversations
 
-    def infer_batch(self, records: Sequence[Dict], shard_name: str, row_idx_start: int) -> List[Dict]:
-        if not records:
+    @staticmethod
+    def _pair_messages(
+        first_images: Sequence[Image.Image],
+        second_images: Sequence[Image.Image],
+        prompts: Sequence[str],
+        first_label: str = "Image A (source):",
+        second_label: str = "Image B (target):",
+    ) -> List[List[Dict]]:
+        conversations = []
+        for first, second, prompt in zip(first_images, second_images, prompts):
+            conversations.append(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": first_label},
+                            {"type": "image", "image": first},
+                            {"type": "text", "text": second_label},
+                            {"type": "image", "image": second},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ]
+            )
+        return conversations
+
+    def _generate_json(self, conversations: Sequence[List[Dict]]) -> List[Dict]:
+        if not conversations:
             return []
-
-        try:
-            conversations = [self._build_messages(record) for record in records]
-        except Exception as exc:
-            return [self._error_result(repr(exc)) for _ in records]
-
         try:
             inputs = self.processor.apply_chat_template(
                 conversations,
@@ -690,50 +667,600 @@ class QwenPrefilterRunner:
                     do_sample=False,
                 )
             trimmed = generated_ids[:, prompt_length:]
-            texts = self.processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            texts = self.processor.batch_decode(
+                trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )
         except Exception as exc:
-            reason = repr(exc)
-            return [self._error_result(reason) for _ in records]
+            return [
+                {"parse_ok": False, "parsed": {}, "raw_text": "", "error": repr(exc)}
+                for _ in conversations
+            ]
 
-        results: List[Dict] = []
-        for batch_offset, text in enumerate(texts):
+        results = []
+        for text in texts:
             try:
-                parsed = normalize_model_output(extract_json(text))
-                results.append({
-                    "model_output": parsed,
-                    "raw_text": text,
-                    "parse_ok": True,
-                })
+                parsed = extract_json(text)
+                if not isinstance(parsed, dict):
+                    raise ValueError("model JSON is not an object")
+                results.append({"parse_ok": True, "parsed": parsed, "raw_text": text, "error": ""})
             except Exception as exc:
-                results.append(self._error_result(repr(exc)))
-
-        if len(results) != len(records):
-            reason = f"batch size mismatch for {Path(shard_name).stem} starting at row {row_idx_start}"
-            return [self._error_result(reason) for _ in records]
+                results.append(
+                    {"parse_ok": False, "parsed": {}, "raw_text": text, "error": repr(exc)}
+                )
+        if len(results) != len(conversations):
+            return [
+                {
+                    "parse_ok": False,
+                    "parsed": {},
+                    "raw_text": "",
+                    "error": "generation batch-size mismatch",
+                }
+                for _ in conversations
+            ]
         return results
 
-    def infer(self, record: Dict, shard_name: str, row_idx: int) -> Dict:
-        return self.infer_batch([record], shard_name, row_idx)[0]
+    @staticmethod
+    def _empty_evidence() -> Tuple[Dict, Dict, Dict]:
+        single = normalize_single_image_evidence({})
+        paired = normalize_pair_evidence({})
+        return single, dict(single), paired
 
+    def _error_result(self, error: str, stage_raw: Optional[Dict] = None) -> Dict:
+        return {
+            "model_output": {
+                "verdict": "ERROR",
+                "confidence": 1.0,
+                "source_observation": "",
+                "target_observation": "",
+                "reason": error,
+                "change_presence": "UNKNOWN",
+                "instruction_achievement": "UNCLEAR",
+                "failure_mode": "OTHER",
+            },
+            "decision": "drop",
+            "parse_ok": False,
+            "raw_text": json_dumps(stage_raw or {}),
+            "evidence": {},
+        }
 
-def worker_main(worker_idx: int, device: str, jobs: List[ShardJob], args_dict: Dict, progress_queue, run_id: str):
-    args = argparse.Namespace(**args_dict)
-    keep_verdicts = [v.strip().upper() for v in args.keep_verdicts.split(",") if v.strip()]
-    try:
-        progress_queue.put({"kind": "log", "message": f"worker-{worker_idx} starting on {device} with {len(jobs)} shards"})
-        runner = QwenPrefilterRunner(args.model_path, device, args.max_new_tokens, keep_verdicts)
-        for job in jobs:
-            audit_path = Path(job.audit_path)
-            manifest_path = Path(job.manifest_path)
-            if audit_path.exists() and manifest_path.exists() and not args.overwrite:
-                progress_queue.put({"kind": "log", "message": f"worker-{worker_idx} skip existing {audit_path.name}"})
-                progress_queue.put({"kind": "rows", "count": job.num_rows})
-                progress_queue.put({"kind": "shard_done", "worker": worker_idx, "shard": job.input_path, "summary": {"skipped": True, "rows": job.num_rows}})
+    def infer_batch(self, records: Sequence[Dict], shard_name: str, row_idx_start: int) -> List[Dict]:
+        if not records:
+            return []
+        count = len(records)
+        outputs: List[Optional[Dict]] = [None] * count
+        sources: List[Optional[Image.Image]] = [None] * count
+        targets: List[Optional[Image.Image]] = [None] * count
+        raw_stages: List[Dict] = [{} for _ in records]
+
+        valid_indices = []
+        for index, record in enumerate(records):
+            try:
+                sources[index] = decode_image(record["input_img"])
+                targets[index] = decode_image(record["output_img"])
+                valid_indices.append(index)
+            except Exception as exc:
+                outputs[index] = self._error_result(f"image_decode: {exc!r}")
+
+        slot_results = self._generate_json(
+            self._text_messages(
+                [
+                    build_slot_prompt(records[index].get("type", ""), records[index].get("instruction", ""))
+                    for index in valid_indices
+                ]
+            )
+        )
+        slots_by_index: Dict[int, Dict] = {}
+        deterministic_by_index: Dict[int, Dict] = {}
+        active_indices = []
+        for index, stage in zip(valid_indices, slot_results):
+            raw_stages[index]["step0_slots"] = stage.get("raw_text", "")
+            if not stage.get("parse_ok"):
+                outputs[index] = self._error_result(
+                    f"step0_slots: {stage.get('error', 'parse error')}", raw_stages[index]
+                )
                 continue
-            summary = process_shard(job, runner, args, progress_queue, worker_idx, run_id)
-            progress_queue.put({"kind": "shard_done", "worker": worker_idx, "shard": job.input_path, "summary": summary})
+            slots = normalize_slots(stage["parsed"], records[index].get("type", ""))
+            deterministic = deterministic_parse(
+                records[index].get("instruction", ""), records[index].get("type", "")
+            )
+            slots_by_index[index] = slots
+            deterministic_by_index[index] = deterministic
+            if slots.get("instruction_status") == "NORMAL":
+                active_indices.append(index)
+
+        source_by_index: Dict[int, Dict] = {}
+        target_by_index: Dict[int, Dict] = {}
+        paired_by_index: Dict[int, Dict] = {}
+        match_by_index: Dict[int, Dict] = {}
+
+        source_results = self._generate_json(
+            self._single_image_messages(
+                [sources[index] for index in active_indices],
+                [build_single_image_prompt(slots_by_index[index]) for index in active_indices],
+            )
+        )
+        next_indices = []
+        for index, stage in zip(active_indices, source_results):
+            raw_stages[index]["step1_source"] = stage.get("raw_text", "")
+            if not stage.get("parse_ok"):
+                outputs[index] = self._error_result(
+                    f"step1_source: {stage.get('error', 'parse error')}", raw_stages[index]
+                )
+                continue
+            source_by_index[index] = normalize_single_image_evidence(stage["parsed"])
+            next_indices.append(index)
+        active_indices = next_indices
+
+        crops = [
+            select_target_crop(slots_by_index[index], source_by_index[index], targets[index])
+            for index in active_indices
+        ]
+        target_results = self._generate_json(
+            self._single_image_messages(
+                [targets[index] for index in active_indices],
+                [build_single_image_prompt(slots_by_index[index]) for index in active_indices],
+                crops,
+            )
+        )
+        next_indices = []
+        for index, stage in zip(active_indices, target_results):
+            raw_stages[index]["step2_target"] = stage.get("raw_text", "")
+            if not stage.get("parse_ok"):
+                outputs[index] = self._error_result(
+                    f"step2_target: {stage.get('error', 'parse error')}", raw_stages[index]
+                )
+                continue
+            target_by_index[index] = normalize_single_image_evidence(stage["parsed"])
+            next_indices.append(index)
+        active_indices = next_indices
+
+        pair_results = self._generate_json(
+            self._pair_messages(
+                [sources[index] for index in active_indices],
+                [targets[index] for index in active_indices],
+                [PAIR_PROMPT for _ in active_indices],
+            )
+        )
+        next_indices = []
+        for index, stage in zip(active_indices, pair_results):
+            raw_stages[index]["step3_pair"] = stage.get("raw_text", "")
+            if not stage.get("parse_ok"):
+                outputs[index] = self._error_result(
+                    f"step3_pair: {stage.get('error', 'parse error')}", raw_stages[index]
+                )
+                continue
+            paired_by_index[index] = normalize_pair_evidence(stage["parsed"])
+            next_indices.append(index)
+        active_indices = next_indices
+
+        match_results = self._generate_json(
+            self._text_messages(
+                [
+                    build_match_prompt(
+                        records[index].get("instruction", ""),
+                        slots_by_index[index],
+                        paired_by_index[index],
+                    )
+                    for index in active_indices
+                ]
+            )
+        )
+        next_indices = []
+        initial_decisions: Dict[int, Dict] = {}
+        for index, stage in zip(active_indices, match_results):
+            raw_stages[index]["step4_text_match"] = stage.get("raw_text", "")
+            if not stage.get("parse_ok"):
+                outputs[index] = self._error_result(
+                    f"step4_text_match: {stage.get('error', 'parse error')}", raw_stages[index]
+                )
+                continue
+            match_by_index[index] = normalize_text_match(
+                stage["parsed"], len(slots_by_index[index].get("subgoals") or [])
+            )
+            initial_decisions[index] = adjudicate_evidence(
+                slots_by_index[index],
+                source_by_index[index],
+                target_by_index[index],
+                paired_by_index[index],
+                match_by_index[index],
+                self.confidence_threshold,
+            )
+            next_indices.append(index)
+        active_indices = next_indices
+
+        review_indices = [
+            index
+            for index in active_indices
+            if initial_decisions[index].get("review_needed")
+            and _review_selected(
+                shard_name, row_idx_start + index, self.boundary_review_fraction
+            )
+        ]
+        review_by_index: Dict[int, Dict] = {}
+        review_prompts = [build_review_state_prompt(slots_by_index[index]) for index in review_indices]
+        review_crops = [
+            select_focus_crop(slots_by_index[index], source_by_index[index], sources[index])
+            for index in review_indices
+        ]
+        review_target_crops = [
+            select_focus_crop(slots_by_index[index], source_by_index[index], targets[index])
+            for index in review_indices
+        ]
+        # Target and source are deliberately processed in separate single-image
+        # conversations.  The model cannot emit a pairwise success judgment or
+        # let one image bias its factual description of the other.
+        review_target_results = self._generate_json(
+            self._single_image_messages(
+                [targets[index] for index in review_indices],
+                review_prompts,
+                review_target_crops,
+            )
+        )
+        review_source_results = self._generate_json(
+            self._single_image_messages(
+                [sources[index] for index in review_indices],
+                review_prompts,
+                review_crops,
+            )
+        )
+        for index, target_stage, source_stage in zip(
+            review_indices, review_target_results, review_source_results
+        ):
+            raw_stages[index]["step5_target_state"] = target_stage.get("raw_text", "")
+            raw_stages[index]["step5_source_state"] = source_stage.get("raw_text", "")
+            if target_stage.get("parse_ok") and source_stage.get("parse_ok"):
+                review_target = normalize_single_image_evidence(target_stage["parsed"])
+                review_source = normalize_single_image_evidence(source_stage["parsed"])
+                review_by_index[index] = {
+                    "method": "FOCUSED_INDEPENDENT_SINGLE_IMAGE_STATES",
+                    "source": review_source,
+                    "target": review_target,
+                    "confidence": min(
+                        _state_evidence_confidence(review_source),
+                        _state_evidence_confidence(review_target),
+                    ),
+                }
+
+        for index in active_indices:
+            review = review_by_index.get(index)
+            decision = (
+                adjudicate_evidence(
+                    slots_by_index[index],
+                    source_by_index[index],
+                    target_by_index[index],
+                    paired_by_index[index],
+                    match_by_index[index],
+                    self.confidence_threshold,
+                    review=review,
+                )
+                if review is not None
+                else initial_decisions[index]
+            )
+            outputs[index] = self._success_result(
+                slots_by_index[index],
+                deterministic_by_index[index],
+                source_by_index[index],
+                target_by_index[index],
+                paired_by_index[index],
+                match_by_index[index],
+                decision,
+                review,
+                raw_stages[index],
+                review_selected=index in review_indices,
+            )
+
+        for index in valid_indices:
+            if outputs[index] is not None:
+                continue
+            slots = slots_by_index[index]
+            source, target, paired = self._empty_evidence()
+            match = normalize_text_match({}, len(slots.get("subgoals") or []))
+            decision = adjudicate_evidence(
+                slots, source, target, paired, match, self.confidence_threshold
+            )
+            outputs[index] = self._success_result(
+                slots,
+                deterministic_by_index[index],
+                source,
+                target,
+                paired,
+                match,
+                decision,
+                None,
+                raw_stages[index],
+                review_selected=False,
+            )
+        return [output or self._error_result("internal missing result") for output in outputs]
+
+    @staticmethod
+    def _success_result(
+        slots: Dict,
+        deterministic: Dict,
+        source: Dict,
+        target: Dict,
+        paired: Dict,
+        match: Dict,
+        decision: Dict,
+        review: Optional[Dict],
+        raw_stages: Dict,
+        review_selected: bool,
+    ) -> Dict:
+        change = decision.get("change_presence", "UNKNOWN")
+        model_output = {
+            "verdict": decision["verdict"],
+            "confidence": decision.get("confidence", 0.0),
+            "source_observation": source.get("scene_description", ""),
+            "target_observation": target.get("scene_description", ""),
+            "reason": decision.get("reason", ""),
+            "change_presence": "CLEAR" if change == "TRUE" else "NONE" if change == "FALSE" else "SUBTLE",
+            "instruction_achievement": decision.get("instruction_achievement", "UNCLEAR"),
+            "failure_mode": decision.get("failure_mode", "OTHER"),
+        }
+        return {
+            "model_output": model_output,
+            "decision": decision["decision"],
+            "parse_ok": True,
+            "raw_text": json_dumps(raw_stages),
+            "evidence": {
+                "slots": slots,
+                "deterministic_slots": deterministic,
+                "slot_conflict": deterministic_slot_conflict(slots, deterministic),
+                "source": source,
+                "target": target,
+                "paired": paired,
+                "text_match": match,
+                "predicates": decision.get("predicates", {}),
+                "reason_codes": decision.get("reason_codes", []),
+                "review_needed": bool(decision.get("review_needed", False)),
+                "review_reasons": decision.get("review_reasons", []),
+                "review_selected": review_selected,
+                "review": review,
+            },
+        }
+
+
+def _filter_score(decision: str, verdict: str, confidence: float) -> float:
+    if decision == "keep":
+        return 0.0
+    if verdict == "UNSURE":
+        return max(0.5, confidence)
+    return confidence
+
+
+def _make_audit_and_manifest_rows(
+    record: Dict,
+    result: Dict,
+    row_idx: int,
+    raw_type: str,
+    model_name: str,
+    run_id: str,
+) -> Tuple[Dict, Dict]:
+    parsed = result["model_output"]
+    evidence = result.get("evidence") or {}
+    verdict = parsed["verdict"]
+    decision = result.get("decision", "drop")
+    confidence = float(parsed.get("confidence", 0.0))
+    reason_codes = evidence.get("reason_codes") or []
+    filter_reason_codes = "" if decision == "keep" else "|".join(reason_codes or [f"PREFILTER_{verdict}"])
+    review_triggered = evidence.get("review") is not None
+    if review_triggered:
+        review_resolution = f"REVIEWED_{decision.upper()}"
+    elif evidence.get("review_needed"):
+        review_resolution = "NOT_SELECTED_BUDGET"
+    else:
+        review_resolution = "NOT_NEEDED"
+
+    audit_row = {
+        "row_idx": row_idx,
+        "raw_type": record.get("type", raw_type),
+        "instruction": record.get("instruction", ""),
+        "prefilter_verdict": verdict,
+        "prefilter_decision": decision,
+        "prefilter_confidence": confidence,
+        "prefilter_source_observation": parsed.get("source_observation", ""),
+        "prefilter_target_observation": parsed.get("target_observation", ""),
+        "prefilter_reason": parsed.get("reason", ""),
+        "prefilter_change_presence": parsed.get("change_presence", "SUBTLE"),
+        "prefilter_instruction_achievement": parsed.get("instruction_achievement", "UNCLEAR"),
+        "prefilter_failure_mode": parsed.get("failure_mode", "OTHER"),
+        "prefilter_parse_ok": bool(result.get("parse_ok", False)),
+        "prefilter_model_name": model_name,
+        "prefilter_method": PREFILTER_METHOD,
+        "prefilter_evidence_schema": EVIDENCE_SCHEMA,
+        "prefilter_run_id": run_id,
+        "prefilter_slots_json": json_dumps(evidence.get("slots") or {}),
+        "prefilter_instruction_status": (evidence.get("slots") or {}).get(
+            "instruction_status", "UNJUDGEABLE"
+        ),
+        "prefilter_subgoals_json": json_dumps(
+            (evidence.get("slots") or {}).get("subgoals") or []
+        ),
+        "prefilter_deterministic_slots_json": json_dumps(evidence.get("deterministic_slots") or {}),
+        "prefilter_slot_conflict": bool(evidence.get("slot_conflict", False)),
+        "prefilter_source_evidence_json": json_dumps(evidence.get("source") or {}),
+        "prefilter_target_evidence_json": json_dumps(evidence.get("target") or {}),
+        "prefilter_paired_evidence_json": json_dumps(evidence.get("paired") or {}),
+        "prefilter_text_match_json": json_dumps(evidence.get("text_match") or {}),
+        "prefilter_predicates_json": json_dumps(evidence.get("predicates") or {}),
+        "prefilter_decision_reason_codes_json": json_dumps(reason_codes),
+        "prefilter_review_triggered": review_triggered,
+        "prefilter_review_reasons_json": json_dumps(evidence.get("review_reasons") or []),
+        "prefilter_review_method": (
+            str((evidence.get("review") or {}).get("method") or "FACT_ONLY_REVIEW")
+            if review_triggered
+            else ""
+        ),
+        "prefilter_review_evidence_json": json_dumps(evidence.get("review") or {}),
+        "prefilter_review_resolution": review_resolution,
+        "filter_decision": decision,
+        "filter_reason_codes": filter_reason_codes,
+        "filter_mismatch_score": float(_filter_score(decision, verdict, confidence)),
+        "raw_text": result.get("raw_text", ""),
+    }
+    manifest_columns = (
+        "row_idx",
+        "prefilter_verdict",
+        "prefilter_decision",
+        "prefilter_confidence",
+        "prefilter_reason",
+        "prefilter_change_presence",
+        "prefilter_instruction_achievement",
+        "prefilter_failure_mode",
+        "prefilter_parse_ok",
+        "prefilter_model_name",
+        "prefilter_method",
+        "prefilter_evidence_schema",
+        "prefilter_run_id",
+        "prefilter_slot_conflict",
+        "prefilter_predicates_json",
+        "prefilter_review_triggered",
+        "prefilter_review_resolution",
+        "filter_decision",
+        "filter_reason_codes",
+        "filter_mismatch_score",
+    )
+    manifest_row = {key: audit_row[key] for key in manifest_columns}
+    return audit_row, manifest_row
+
+
+def process_shard(
+    job: ShardJob,
+    runner: QwenFactPrefilterRunner,
+    args: argparse.Namespace,
+    progress_queue,
+    worker_idx: int,
+    run_id: str,
+) -> Dict:
+    input_path = Path(job.input_path)
+    audit_path = Path(job.audit_path)
+    manifest_path = Path(job.manifest_path)
+    tmp_audit_path = audit_path.with_suffix(audit_path.suffix + ".tmp")
+    tmp_manifest_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    summary = {"rows": 0, "errors": 0, "kept": 0, "dropped": 0, "verdicts": {}, "decisions": {}}
+    pf = pq.ParquetFile(input_path)
+    audit_writer = None
+    manifest_writer = None
+    row_idx = 0
+    model_name = Path(args.model_path).name
+    completed = False
+    try:
+        for batch in pf.iter_batches(batch_size=args.batch_size):
+            records = batch.to_pylist()
+            if job.limit_rows is not None:
+                records = records[: max(0, job.limit_rows - row_idx)]
+            if not records:
+                break
+            results = runner.infer_batch(records, input_path.name, row_idx)
+            audit_rows, manifest_rows = [], []
+            for offset, (record, result) in enumerate(zip(records, results)):
+                current_idx = row_idx + offset
+                if not result.get("parse_ok"):
+                    summary["errors"] += 1
+                    if args.fail_fast:
+                        raise RuntimeError(
+                            f"prefilter error at {input_path.name}:{current_idx}: "
+                            f"{result['model_output'].get('reason', '')}"
+                        )
+                audit_row, manifest_row = _make_audit_and_manifest_rows(
+                    record, result, current_idx, job.raw_type, model_name, run_id
+                )
+                verdict, decision = audit_row["prefilter_verdict"], audit_row["filter_decision"]
+                summary["verdicts"][verdict] = summary["verdicts"].get(verdict, 0) + 1
+                summary["decisions"][decision] = summary["decisions"].get(decision, 0) + 1
+                if decision == "keep":
+                    summary["kept"] += 1
+                else:
+                    summary["dropped"] += 1
+                audit_rows.append(audit_row)
+                manifest_rows.append(manifest_row)
+
+            row_idx += len(records)
+            summary["rows"] += len(records)
+            audit_table, manifest_table = rows_to_table(audit_rows), rows_to_table(manifest_rows)
+            if audit_writer is None:
+                tmp_audit_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                audit_writer = pq.ParquetWriter(tmp_audit_path, audit_table.schema, compression=args.compression)
+                manifest_writer = pq.ParquetWriter(tmp_manifest_path, manifest_table.schema, compression=args.compression)
+            audit_writer.write_table(audit_table)
+            manifest_writer.write_table(manifest_table)
+            progress_queue.put(
+                {
+                    "kind": "rows",
+                    "count": len(records),
+                    "worker": worker_idx,
+                    "shard": input_path.name,
+                    "done_rows": summary["rows"],
+                    "total_rows": job.num_rows,
+                }
+            )
+            if job.limit_rows is not None and row_idx >= job.limit_rows:
+                break
+        completed = True
+    finally:
+        if audit_writer is not None:
+            audit_writer.close()
+        if manifest_writer is not None:
+            manifest_writer.close()
+        if completed:
+            if tmp_audit_path.exists():
+                tmp_audit_path.replace(audit_path)
+            if tmp_manifest_path.exists():
+                tmp_manifest_path.replace(manifest_path)
+    return summary
+
+
+def _existing_summary(manifest_path: Path) -> Dict:
+    summary = {"rows": 0, "errors": 0, "kept": 0, "dropped": 0, "verdicts": {}, "decisions": {}}
+    table = pq.read_table(
+        manifest_path, columns=["prefilter_verdict", "filter_decision", "prefilter_parse_ok"]
+    )
+    for row in table.to_pylist():
+        verdict = str(row.get("prefilter_verdict") or "ERROR")
+        decision = str(row.get("filter_decision") or "drop")
+        summary["rows"] += 1
+        summary["errors"] += 0 if row.get("prefilter_parse_ok") else 1
+        summary["kept"] += int(decision == "keep")
+        summary["dropped"] += int(decision != "keep")
+        summary["verdicts"][verdict] = summary["verdicts"].get(verdict, 0) + 1
+        summary["decisions"][decision] = summary["decisions"].get(decision, 0) + 1
+    return summary
+
+
+def worker_main(
+    worker_idx: int,
+    device: str,
+    jobs: List[ShardJob],
+    args_dict: Dict,
+    progress_queue,
+    run_id: str,
+) -> None:
+    args = argparse.Namespace(**args_dict)
+    try:
+        progress_queue.put(
+            {"kind": "log", "message": f"worker-{worker_idx} starting on {device} with {len(jobs)} shards"}
+        )
+        runner = QwenFactPrefilterRunner(
+            args.model_path,
+            device,
+            args.max_new_tokens,
+            args.confidence_threshold,
+            args.boundary_review_fraction,
+        )
+        for job in jobs:
+            audit_path, manifest_path = Path(job.audit_path), Path(job.manifest_path)
+            if audit_path.exists() and manifest_path.exists() and not args.overwrite:
+                summary = _existing_summary(manifest_path)
+                progress_queue.put({"kind": "rows", "count": summary["rows"]})
+            else:
+                summary = process_shard(job, runner, args, progress_queue, worker_idx, run_id)
+            progress_queue.put(
+                {"kind": "shard_done", "worker": worker_idx, "shard": job.input_path, "summary": summary}
+            )
     except Exception as exc:
-        progress_queue.put({"kind": "worker_error", "worker": worker_idx, "device": device, "error": repr(exc)})
+        progress_queue.put(
+            {"kind": "worker_error", "worker": worker_idx, "device": device, "error": repr(exc)}
+        )
         if args.fail_fast:
             raise
     finally:
@@ -743,19 +1270,16 @@ def worker_main(worker_idx: int, device: str, jobs: List[ShardJob], args_dict: D
 def aggregate_run_summary(shard_summaries: List[Dict]) -> Dict:
     verdicts: Dict[str, int] = {}
     decisions: Dict[str, int] = {}
-    rows = 0
-    errors = 0
-    kept = 0
-    dropped = 0
+    rows = errors = kept = dropped = 0
     for item in shard_summaries:
-        summary = item.get("summary", {})
+        summary = item.get("summary") or {}
         rows += int(summary.get("rows", 0))
         errors += int(summary.get("errors", 0))
         kept += int(summary.get("kept", 0))
         dropped += int(summary.get("dropped", 0))
-        for key, value in summary.get("verdicts", {}).items():
+        for key, value in (summary.get("verdicts") or {}).items():
             verdicts[key] = verdicts.get(key, 0) + int(value)
-        for key, value in summary.get("decisions", {}).items():
+        for key, value in (summary.get("decisions") or {}).items():
             decisions[key] = decisions.get(key, 0) + int(value)
     return {
         "rows": rows,
@@ -765,7 +1289,8 @@ def aggregate_run_summary(shard_summaries: List[Dict]) -> Dict:
         "drop_rate": round(dropped / max(rows, 1), 6),
         "verdict_counts": verdicts,
         "decision_counts": decisions,
-        "prompt_version": PROMPT_VERSION,
+        "prefilter_method": PREFILTER_METHOD,
+        "evidence_schema": EVIDENCE_SCHEMA,
     }
 
 
@@ -774,22 +1299,18 @@ def main() -> None:
     args.input_dir = args.input_dir.resolve()
     args.audit_dir = args.audit_dir.resolve()
     args.keep_manifest_dir = args.keep_manifest_dir.resolve()
-
     jobs = build_jobs(args)
     if not jobs:
         print("No shards matched the requested filters.")
         return
-
     devices = parse_devices(args.devices)
     assignments = assign_jobs(jobs, devices)
     total_rows = sum(job.num_rows for job in jobs)
     run_id = time.strftime("prefilter_%Y%m%d_%H%M%S")
-
-    ctx = mp.get_context("spawn")
-    progress_queue = ctx.Queue()
-    processes = []
-
-    run_manifest = {
+    args_dict = {
+        key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()
+    }
+    run_config = {
         "input_dir": str(args.input_dir),
         "audit_dir": str(args.audit_dir),
         "keep_manifest_dir": str(args.keep_manifest_dir),
@@ -797,64 +1318,77 @@ def main() -> None:
         "job_count": len(jobs),
         "total_rows": total_rows,
         "run_id": run_id,
-        "prompt_version": PROMPT_VERSION,
-        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "prefilter_method": PREFILTER_METHOD,
+        "evidence_schema": EVIDENCE_SCHEMA,
+        "args": args_dict,
         "jobs": [asdict(job) for job in jobs],
     }
-    (args.audit_dir / "run_config.json").write_text(json.dumps(run_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    args.audit_dir.mkdir(parents=True, exist_ok=True)
+    (args.audit_dir / "run_config.json").write_text(
+        json.dumps(run_config, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
+    ctx = mp.get_context("spawn")
+    progress_queue = ctx.Queue()
+    processes = []
     for worker_idx, (device, worker_jobs) in enumerate(assignments):
-        proc = ctx.Process(
+        process = ctx.Process(
             target=worker_main,
-            args=(worker_idx, device, worker_jobs, {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}, progress_queue, run_id),
+            args=(worker_idx, device, worker_jobs, args_dict, progress_queue, run_id),
             daemon=False,
         )
-        proc.start()
-        processes.append(proc)
+        process.start()
+        processes.append(process)
 
     active_workers = len(processes)
-    shard_summaries = []
-    pbar = tqdm(total=total_rows, dynamic_ncols=True, mininterval=args.progress_mininterval, desc="prefilter rows")
+    shard_summaries: List[Dict] = []
+    pbar = tqdm(
+        total=total_rows,
+        dynamic_ncols=True,
+        mininterval=args.progress_mininterval,
+        desc="fact prefilter rows",
+    )
     try:
         while active_workers > 0:
             try:
-                msg = progress_queue.get(timeout=0.2)
+                message = progress_queue.get(timeout=0.2)
             except queue.Empty:
-                for proc in processes:
-                    if not proc.is_alive() and proc.exitcode not in (None, 0):
-                        tqdm.write(f"worker process failed with exit code {proc.exitcode}")
                 continue
-
-            kind = msg.get("kind")
+            kind = message.get("kind")
             if kind == "rows":
-                pbar.update(int(msg.get("count", 0)))
-                done_rows = msg.get("done_rows")
-                total_for_shard = msg.get("total_rows")
-                shard_name = msg.get("shard")
-                if shard_name is not None and done_rows is not None and total_for_shard is not None:
-                    pbar.set_postfix_str(f"{shard_name} {done_rows}/{total_for_shard}")
+                pbar.update(int(message.get("count", 0)))
+                if message.get("shard"):
+                    pbar.set_postfix_str(
+                        f"{message['shard']} {message.get('done_rows')}/{message.get('total_rows')}"
+                    )
             elif kind == "log":
-                tqdm.write(msg.get("message", ""))
+                tqdm.write(message.get("message", ""))
             elif kind == "shard_done":
-                shard_summaries.append(msg)
-                summary = msg.get("summary", {})
+                shard_summaries.append(message)
+                summary = message.get("summary") or {}
                 tqdm.write(
-                    f"done {Path(msg['shard']).name}: rows={summary.get('rows', 0)} keep={summary.get('kept', 0)} drop={summary.get('dropped', 0)} errors={summary.get('errors', 0)}"
+                    f"done {Path(message['shard']).name}: rows={summary.get('rows', 0)} "
+                    f"keep={summary.get('kept', 0)} drop={summary.get('dropped', 0)} "
+                    f"errors={summary.get('errors', 0)}"
                 )
             elif kind == "worker_error":
-                tqdm.write(f"worker-{msg.get('worker')} on {msg.get('device')} error: {msg.get('error')}")
+                tqdm.write(
+                    f"worker-{message.get('worker')} on {message.get('device')} error: "
+                    f"{message.get('error')}"
+                )
                 if args.fail_fast:
-                    raise RuntimeError(msg.get("error"))
+                    raise RuntimeError(message.get("error"))
             elif kind == "worker_done":
                 active_workers -= 1
     finally:
         pbar.close()
-        for proc in processes:
-            proc.join()
+        for process in processes:
+            process.join()
 
     summary = aggregate_run_summary(shard_summaries)
-    (args.audit_dir / "run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Run summary: {args.audit_dir / 'run_summary.json'}")
+    (args.audit_dir / "run_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

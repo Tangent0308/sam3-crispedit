@@ -265,26 +265,26 @@ def base_prefilter_fields(manifest_row: Optional[Dict]) -> Dict:
         return {
             "prefilter_verdict": "NOT_RUN",
             "prefilter_confidence": math.nan,
-            "prefilter_prompt_version": "",
+            "prefilter_method": "",
+            "prefilter_evidence_schema": "",
             "prefilter_model_name": "",
             "prefilter_run_id": "",
             "prefilter_reason": "",
             "filter_decision": "keep",
             "filter_reason_codes": "",
             "filter_mismatch_score": 0.0,
-            "filter_version": "",
         }
     return {
         "prefilter_verdict": manifest_row.get("prefilter_verdict", "NOT_RUN"),
         "prefilter_confidence": float(manifest_row.get("prefilter_confidence", math.nan)),
-        "prefilter_prompt_version": manifest_row.get("prefilter_prompt_version", ""),
+        "prefilter_method": manifest_row.get("prefilter_method", ""),
+        "prefilter_evidence_schema": manifest_row.get("prefilter_evidence_schema", ""),
         "prefilter_model_name": manifest_row.get("prefilter_model_name", ""),
         "prefilter_run_id": manifest_row.get("prefilter_run_id", ""),
         "prefilter_reason": manifest_row.get("prefilter_reason", ""),
         "filter_decision": manifest_row.get("filter_decision", manifest_row.get("prefilter_decision", "keep")),
         "filter_reason_codes": manifest_row.get("filter_reason_codes", ""),
         "filter_mismatch_score": float(manifest_row.get("filter_mismatch_score", 0.0)),
-        "filter_version": manifest_row.get("filter_version", manifest_row.get("prefilter_prompt_version", "")),
     }
 
 
