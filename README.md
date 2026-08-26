@@ -1,5 +1,7 @@
 # sam3 × CrispEdit 打标说明
 
+本仓库用于为 [samtok_edit](https://github.com/Tangent0308/samtok_edit) 项目进行数据打标。
+
 这个仓库当前主要用于 **CrispEdit-2M 的两阶段打标**：
 
 1. **prefilter**：本地 Qwen3-VL 先判断编辑是否真正达成，并对 `add` 使用更严格的新内容判定
