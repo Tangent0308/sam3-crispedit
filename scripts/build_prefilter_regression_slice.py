@@ -38,6 +38,13 @@ POSITIVE_CONTROL_ROWS: List[Tuple[str, int, str]] = [
     ("style_00000.parquet", 0, "HIGH_CONFIDENCE_KEEP_CONTROL"),
 ]
 
+PREFILTER_BAD_CASE_ROWS: List[Tuple[str, int, str, str]] = [
+    ("motion change_00060.parquet", 183, "AMBIGUOUS_SUBTLE_CHANGE", "drop"),
+    ("remove_00011.parquet", 225, "A_FALSE_KEEP_NOOP", "drop"),
+    ("remove_00023.parquet", 208, "WRONG_THING_EDITED", "drop"),
+    ("remove_00071.parquet", 249, "A_FALSE_KEEP_NOOP", "drop"),
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -55,6 +62,11 @@ def parse_args() -> argparse.Namespace:
         "--include-positive-controls",
         action="store_true",
         help="Also include one expected-keep control row per edit type",
+    )
+    parser.add_argument(
+        "--include-prefilter-bad-cases",
+        action="store_true",
+        help="Also include the reviewed prefilter failures from BAD_CASE_REVIEW_20260826.md",
     )
     return parser.parse_args()
 
@@ -77,10 +89,15 @@ def main() -> None:
     grouped: Dict[str, List[Dict]] = defaultdict(list)
     manifest = []
     table_cache: Dict[str, pa.Table] = {}
-    selected_rows = list(REGRESSION_ROWS)
+    selected_rows = [
+        (*row, "drop" if row[2] == "A_FALSE_KEEP_NOOP" else "keep")
+        for row in REGRESSION_ROWS
+    ]
     if args.include_positive_controls:
-        selected_rows.extend(POSITIVE_CONTROL_ROWS)
-    for source_shard, source_row_idx, issue_class in selected_rows:
+        selected_rows.extend((*row, "keep") for row in POSITIVE_CONTROL_ROWS)
+    if args.include_prefilter_bad_cases:
+        selected_rows.extend(PREFILTER_BAD_CASE_ROWS)
+    for source_shard, source_row_idx, issue_class, expected_decision in selected_rows:
         source_path = args.input_dir / source_shard
         if source_shard not in table_cache:
             table_cache[source_shard] = pq.read_table(source_path)
@@ -88,6 +105,7 @@ def main() -> None:
         row["source_shard"] = source_shard
         row["source_row_idx"] = source_row_idx
         row["expected_issue_class"] = issue_class
+        row["expected_decision"] = expected_decision
         raw_type = str(row.get("type") or raw_type_from_name(source_shard))
         grouped[raw_type].append(row)
         manifest.append(
@@ -97,6 +115,7 @@ def main() -> None:
                 "raw_type": raw_type,
                 "instruction": row.get("instruction", ""),
                 "expected_issue_class": issue_class,
+                "expected_decision": expected_decision,
             }
         )
     for raw_type, rows in sorted(grouped.items()):
