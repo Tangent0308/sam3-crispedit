@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 CATEGORY_ORDER = ["add", "background change", "color", "motion change", "remove", "replace", "style"]
+CARD_HEADER = 172
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,8 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mask-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--selection-file", type=Path, default=None)
-    parser.add_argument("--panel-width", type=int, default=840)
-    parser.add_argument("--panel-height", type=int, default=520)
+    parser.add_argument("--panel-width", type=int, default=640)
+    parser.add_argument("--panel-height", type=int, default=400)
     parser.add_argument("--columns", type=int, default=1, help="Cards per category sheet row; 1 maximizes clarity")
     parser.add_argument("--jpeg-quality", type=int, default=95, help="Reserved for future JPEG export")
     return parser.parse_args()
@@ -137,9 +138,10 @@ def _draw_boxes(image: Image.Image, items: Sequence[Dict[str, Any]], color: str)
     for index, item in enumerate(items):
         box = _normalized_box(item.get("bbox_2d", [0, 0, 1, 1]), canvas.size)
         draw.rectangle(box, outline=color, width=line_width)
-        label = str(item.get("ref", "box"))
-        if len(label) > 48:
-            label = label[:45] + "..."
+        # Full semantic refs overlap badly for dense sets (flowers, petals,
+        # piercings, etc.).  The readable Markdown/JSON export contains the
+        # full refs; the image only needs a stable compact id per box.
+        label = f"#{index + 1}"
         left, top, right, bottom = draw.textbbox((0, 0), label, font=label_font)
         text_width, text_height = right - left, bottom - top
         tx, ty = int(box[0]) + line_width + 3, int(box[1]) + line_width + 3
@@ -194,7 +196,7 @@ def _card(
     binary_panel = Image.fromarray(mask * 255, mode="L").convert("RGB")
 
     gap = 12
-    header = 126
+    header = CARD_HEADER
     labels = ["source + MLLM boxes", "target + MLLM boxes", "final mask overlay (source)", "final mask (binary)"]
     images = [source_panel, target_panel, overlay_panel, binary_panel]
     card = Image.new("RGB", (panel_width * 4 + gap * 3, header + panel_height), "white")
@@ -209,14 +211,18 @@ def _card(
     source_name = str(mask_row.get("mask_source", ""))
     qc = str(mask_row.get("qc_flag", ""))
     instances = mask_row.get("instance_masks") or []
-    refs = [str(item.get("ref", "")) for item in instances if isinstance(item, dict) and item.get("ref")]
-    refs_text = ", ".join(refs[:5]) + (f" (+{len(refs) - 5})" if len(refs) > 5 else "")
     draw.text((12, 8), f"{category} | {shard} row={row_idx}", fill="black", font=title_font)
-    draw.text((12, 42), str(raw_row.get("instruction", ""))[:250], fill="#222222", font=body_font)
+    instruction_lines = textwrap.wrap(str(raw_row.get("instruction", "")), width=170)[:2]
+    for line_index, line in enumerate(instruction_lines):
+        draw.text((12, 42 + line_index * 24), line, fill="#222222", font=body_font)
     status = f"mask_source={source_name} | qc={qc} | area={area:.4f} | instances={len(instances)}"
-    draw.text((12, 70), status, fill="#222222", font=bold_font)
-    if refs_text:
-        draw.text((12, 96), f"refs: {refs_text[:210]}", fill="#444444", font=body_font)
+    draw.text((12, 94), status, fill="#222222", font=bold_font)
+    draw.text(
+        (12, 122),
+        f"MLLM boxes: source={len(source_boxes)} target={len(target_boxes)}  (labels #1, #2, ...)",
+        fill="#444444",
+        font=body_font,
+    )
     for index, (label, image) in enumerate(zip(labels, images)):
         x = index * (panel_width + gap)
         draw.text((x + 8, header - 28), label, fill="black", font=bold_font)
@@ -281,7 +287,7 @@ def main() -> None:
         gap = 24
         title_height = 74
         card_width = args.panel_width * 4 + 12 * 3
-        card_height = 126 + args.panel_height
+        card_height = CARD_HEADER + args.panel_height
         rows = math.ceil(len(cards) / columns)
         sheet = Image.new(
             "RGB",
