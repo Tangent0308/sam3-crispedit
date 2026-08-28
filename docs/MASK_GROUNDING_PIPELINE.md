@@ -125,11 +125,40 @@ python scripts/reparse_grounding_outputs.py \
   --grounding-dir /tmp/crispedit_mask_improved_eval/grounding_v2
 ```
 
+## 人工检查导出
+
+parquet 是训练/流水线的交换格式；人工检查时可将 Qwen 输出导出为 JSONL、CSV 和
+Markdown（`requests[].raw_text` 保留模型原始 response）：
+
+```bash
+python scripts/export_grounding_outputs.py \
+  --grounding-dir /path/to/grounding_v2 \
+  --output-dir /path/to/model_outputs \
+  --write-json-array
+```
+
+若需要按类别查看高清缩略图，脚本会重新读取原始图像 bytes，而不是放大旧 preview：
+
+```bash
+python scripts/build_category_previews.py \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
+  --mask-dir /path/to/masks_final \
+  --selection-file /path/to/selection.json \
+  --output-dir /path/to/previews_by_category \
+  --columns 1
+```
+
+输出目录中每个类别对应一张 PNG；默认每个面板宽 840px、每个类别一张纵向大图，便于
+放大检查 MLLM box 和最终 source-coordinate mask。
+
 本次 47 条回归已从临时运行目录复制到持久路径：
 
+- selection：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/selection.json`
 - grounding：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/grounding_v2`
 - mask：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/masks_final`
 - collage：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/masks_final/preview_collage.png`
+- 分类高清图：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/previews_by_category`
+- Qwen 可读输出：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/model_outputs`
 - report：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/evaluation_final.{json,md}`
 
 最终 47/47 有输出、0 runtime error、0 `GROUND_FAIL`；共恢复并保存 181 个 instance mask。

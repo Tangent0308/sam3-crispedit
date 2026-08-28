@@ -49,9 +49,12 @@ SAM3 语义 mask 取代；两个历史 motion over-mask（0.70、0.83）也收�
 
 ## 产物
 
+- selection：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/selection.json`
 - grounding：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/grounding_v2`
 - masks：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/masks_final`
 - previews：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/previews_final`
+- 分类高清 previews：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/previews_by_category`
+- Qwen 可读输出：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/model_outputs`
 - collage：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/masks_final/preview_collage.png`
 - machine-readable report：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/evaluation_final.json`
 - markdown report：`/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260827/evaluation_final.md`
