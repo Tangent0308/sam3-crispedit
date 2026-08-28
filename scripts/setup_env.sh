@@ -264,5 +264,5 @@ Next steps:
 
 Production docs:
   - README.md
-  - CRISPEDIT_FILTER_THEN_MASK_PIPELINE.md
+  - docs/CRISPEDIT_PREFILTER.md
 EOF

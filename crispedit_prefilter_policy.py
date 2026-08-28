@@ -4,7 +4,7 @@
 The vision-language model is deliberately not asked for a keep/drop verdict.  It
 only extracts instruction slots and reports factual observations.  This module
 normalizes those observations and applies the per-edit-type predicates described
-in ``PREFILTER_FALSE_KEEP_OPTIMIZATION.md``.
+in ``docs/CRISPEDIT_PREFILTER.md``.
 """
 
 from __future__ import annotations
@@ -130,8 +130,7 @@ def _normalize_bbox(value: object) -> Optional[List[float]]:
     except (TypeError, ValueError):
         return None
     # Qwen-VL commonly emits its documented 0..1000 coordinate convention
-    # even when a prompt asks for normalized values.  Preserve those boxes
-    # instead of clamping every upper coordinate to 1 and discarding the box.
+    # even when a prompt asks for normalized values.
     if max(coords) > 1.0:
         if min(coords) < 0.0 or max(coords) > 1000.0:
             return None
@@ -684,6 +683,147 @@ def _subgoal_change(subgoal: Dict, source: Dict, target: Dict) -> str:
     return UNKNOWN
 
 
+def _fact_confidence(evidence: Dict) -> float:
+    values = [_confidence(evidence.get("confidence"))]
+    values.extend(_confidence(item.get("confidence")) for item in evidence.get("facts") or [])
+    nonzero = [value for value in values if value > 0]
+    return min(nonzero) if nonzero else 0.0
+
+
+def derive_state_text_match(slots: Dict, source: Dict, target: Dict) -> Optional[Dict]:
+    """Return a code-derived positive match only when all factual states are decisive.
+
+    An unresolved or negative state deliberately returns ``None`` so the caller
+    can fall back to the original text-only MLLM matcher.  This keeps the fast
+    path high precision instead of turning uncertain observations into drops.
+    """
+
+    subgoals = slots.get("subgoals") or []
+    if slots.get("instruction_status") != "NORMAL" or not subgoals:
+        return None
+    # The established base questionnaire includes requested attribute values.
+    # Presence/count facts for discrete object operations remain safe, while
+    # color/motion/background/style state text can be target-biased.  Preserve
+    # the original matcher for those attribute edits.
+    if any(
+        canonical_edit_type(item.get("edit_type")) not in {"add", "remove", "replace"}
+        for item in subgoals
+    ):
+        return None
+    matches = []
+    for index, subgoal in enumerate(subgoals):
+        change = _subgoal_change(subgoal, source, target)
+        if change != TRUE:
+            return None
+        goal_match = _review_goal_match(subgoal, source, target, change)
+        if goal_match != TRUE:
+            return None
+        matches.append(
+            {
+                "subgoal_index": index,
+                "match": "MATCH",
+                "reason": "Code-derived from independent source/target states.",
+                "confidence": min(
+                    value
+                    for value in (_fact_confidence(source), _fact_confidence(target), 1.0)
+                    if value > 0
+                ),
+            }
+        )
+    confidence = min(item["confidence"] for item in matches)
+    return {
+        "subgoal_matches": matches,
+        "overall_match": "MATCH",
+        "confidence": confidence,
+        "method": "CODE_STATES",
+    }
+
+
+def _terminal_no_change_subgoal(subgoal: Dict, source: Dict, target: Dict) -> bool:
+    """Recognize only no-change patterns that do not need pairwise rescue."""
+
+    index = int(subgoal.get("subgoal_index", 0))
+    edit_type = canonical_edit_type(subgoal.get("edit_type"))
+    if _subgoal_change(subgoal, source, target) != FALSE:
+        return False
+
+    if edit_type == "add":
+        source_b, target_b = _fact(source, index, "OBJECT_B"), _fact(target, index, "OBJECT_B")
+        return bool(
+            _present(source_b) == TRUE
+            and _present(target_b) == TRUE
+            and source_b.get("count") is not None
+            and source_b.get("count") == target_b.get("count")
+        )
+
+    if edit_type == "replace":
+        source_a, target_a = _fact(source, index, "OBJECT_A"), _fact(target, index, "OBJECT_A")
+        source_b, target_b = _fact(source, index, "OBJECT_B"), _fact(target, index, "OBJECT_B")
+        return bool(
+            _present(source_a) == FALSE
+            and _present(target_a) == FALSE
+            and _present(source_b) == TRUE
+            and _present(target_b) == TRUE
+            and source_b.get("count") is not None
+            and source_b.get("count") == target_b.get("count")
+        )
+
+    # Missing-object remove facts are intentionally not terminal: a pairwise
+    # difference can still reveal a small object missed by both questionnaires.
+    # Attribute edits also stay on the established full path because the base
+    # questionnaire contains their requested target values.
+    return False
+
+
+def adjudicate_terminal_no_change(
+    slots: Dict, source: Dict, target: Dict
+) -> Optional[Dict]:
+    """Return a final drop for high-precision no-op states, otherwise None."""
+
+    subgoals = slots.get("subgoals") or []
+    if slots.get("instruction_status") != "NORMAL" or not subgoals:
+        return None
+    if not all(_terminal_no_change_subgoal(item, source, target) for item in subgoals):
+        return None
+    predicates = {
+        "instruction_actionable": TRUE,
+        "change_happened": FALSE,
+        "blind_description_matches": UNKNOWN,
+        "same_subject": UNKNOWN,
+        "composition_preserved": UNKNOWN,
+        "unrelated_regions_preserved": UNKNOWN,
+        "not_global_regeneration": UNKNOWN,
+        "confidence_sufficient": TRUE,
+        "review_consistent": TRUE,
+        "fast_terminal_no_change": TRUE,
+    }
+    for index in range(len(subgoals)):
+        predicates[f"subgoal_{index}_change"] = FALSE
+        predicates[f"subgoal_{index}_blind_match"] = UNKNOWN
+    confidence_values = [
+        value
+        for value in (
+            _confidence(slots.get("confidence")),
+            _fact_confidence(source),
+            _fact_confidence(target),
+        )
+        if value > 0
+    ]
+    return {
+        "verdict": "FAIL",
+        "decision": "drop",
+        "confidence": min(confidence_values) if confidence_values else 1.0,
+        "reason": "Independent source/target facts show no requested state transition.",
+        "reason_codes": ["change_happened"],
+        "predicates": predicates,
+        "change_presence": FALSE,
+        "instruction_achievement": "NO",
+        "failure_mode": "NO_RELEVANT_CHANGE",
+        "review_needed": False,
+        "review_reasons": [],
+    }
+
+
 def _yes_no_unknown(value: object) -> str:
     normalized = str(value or "").upper()
     if normalized == "YES":
@@ -768,8 +908,8 @@ def adjudicate_evidence(
             if change == UNKNOWN:
                 change = reviewed
             elif reviewed != change:
-                # Step 5 now consists of two independent, focused single-image
-                # observations.  Their code-computed transition can refine the
+                # Step 5 consists of two independent, focused single-image
+                # observations. Their code-computed transition can refine the
                 # noisier full-image states for every edit type.
                 change = reviewed
                 predicates[f"subgoal_{index}_review_refined_change"] = TRUE
@@ -787,7 +927,7 @@ def adjudicate_evidence(
             review_conflict = True
         if has_review_states and change == UNKNOWN and reviewed == UNKNOWN and match == TRUE:
             # A matched instruction-blind difference is itself positive change
-            # evidence.  Use it only when the focused single-image states do not
+            # evidence. Use it only when the focused single-image states do not
             # contradict it; this recovers cropped/occluded parts and uncountable
             # additions without reintroducing a model-authored support label.
             change = TRUE

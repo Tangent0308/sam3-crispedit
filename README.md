@@ -12,9 +12,9 @@ keep manifest
 SAM3 mask
 ```
 
-prefilter 的实现、运行命令、8 卡实验结果和边界说明统一见：
+prefilter 的方法、实现、运行命令、8 卡实验、全量结果和边界统一见：
 
-- [docs/PREFILTER.md](docs/PREFILTER.md)
+- [docs/CRISPEDIT_PREFILTER.md](docs/CRISPEDIT_PREFILTER.md)
 
 ## 主要入口
 
@@ -46,12 +46,12 @@ bash scripts/setup_env.sh --python-bin python3.11
 
 ## 全量运行
 
-先按 [docs/PREFILTER.md](docs/PREFILTER.md) 运行 8 卡 fact prefilter，再运行 mask：
+先按 [docs/CRISPEDIT_PREFILTER.md](docs/CRISPEDIT_PREFILTER.md) 运行 8 卡 fact prefilter，再运行 mask：
 
 ```bash
 python crispedit_mask_dataset_runner.py \
   --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
-  --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-manifest \
+  --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest \
   --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-mask \
   --devices 0,1,2,3,4,5,6,7 \
   --batch-size 8

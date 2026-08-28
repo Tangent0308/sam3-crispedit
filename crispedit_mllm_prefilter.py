@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Fact-first Qwen3-VL prefilter for CrispEdit-2M.
 
-This runner implements the staged SOP in ``PREFILTER_FALSE_KEEP_OPTIMIZATION.md``:
+The current method and production configuration are documented in
+``docs/CRISPEDIT_PREFILTER.md``:
 
 0. text-only instruction slot extraction;
 1. source-only factual questionnaire;
 2. target-only factual questionnaire, optionally with a localized crop;
 3. instruction-blind paired comparison;
 4. text-only matching followed by deterministic code predicates;
-5. a budgeted, independent source/target state review for unresolved rows.
+5. a budgeted, independent focused source/target state review for unresolved rows.
 
 The model never emits the final PASS/FAIL/UNSURE verdict.  All intermediate
 evidence and predicate truth values are written to the audit parquet.
@@ -26,6 +27,7 @@ import os
 import queue
 import re
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -37,10 +39,13 @@ from tqdm import tqdm
 
 from crispedit_mask_pipeline import parse_instruction
 from crispedit_prefilter_policy import (
+    COLOR_WORDS,
     EVIDENCE_SCHEMA,
     PREFILTER_METHOD,
     adjudicate_evidence,
+    adjudicate_terminal_no_change,
     canonical_edit_type,
+    derive_state_text_match,
     deterministic_slot_conflict,
     json_dumps,
     normalize_pair_evidence,
@@ -329,6 +334,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compression", type=str, default="zstd")
     parser.add_argument("--progress-mininterval", type=float, default=2.0)
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument(
+        "--slot-cache-size",
+        type=int,
+        default=20000,
+        help="Per-worker LRU entries for repeated MLLM slot parses; 0 disables caching",
+    )
     parser.add_argument("--confidence-threshold", type=float, default=0.6)
     parser.add_argument(
         "--boundary-review-fraction",
@@ -382,6 +393,9 @@ def build_questionnaire(slots: Dict) -> List[Dict]:
 
 
 def build_single_image_prompt(slots: Dict) -> str:
+    # Keep the established base questionnaire unchanged.  Fast paths below are
+    # restricted to discrete object presence/count transitions, where these
+    # answers can be used safely without changing color/motion/style behavior.
     questionnaire = {
         "subgoals": slots.get("subgoals") or [],
         "questions": build_questionnaire(slots),
@@ -496,7 +510,11 @@ def select_focus_bbox(slots: Dict, source_evidence: Dict) -> Optional[List[float
             continue
         index = subgoal.get("subgoal_index")
         location_bbox = _bbox_from_location(subgoal.get("location"))
-        preferred_roles = ("PART", "OBJECT_A") if subgoal.get("edit_type") == "motion" else ("OBJECT_A",)
+        preferred_roles = (
+            ("PART", "OBJECT_A")
+            if canonical_edit_type(subgoal.get("edit_type")) == "motion"
+            else ("OBJECT_A",)
+        )
         for role in preferred_roles:
             for fact in source_evidence.get("facts") or []:
                 if fact.get("subgoal_index") != index or fact.get("role") != role:
@@ -505,9 +523,6 @@ def select_focus_bbox(slots: Dict, source_evidence: Dict) -> Optional[List[float
                 if boxes:
                     box = boxes[0]
                     area = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
-                    # A whole-image/group box does not localize a request such
-                    # as "people on the right".  The explicit location is more
-                    # useful for the focused factual review in that case.
                     if location_bbox and area >= 0.65:
                         return location_bbox
                     return box
@@ -522,11 +537,17 @@ def select_focus_crop(
     return crop_normalized_bbox(image, select_focus_bbox(slots, source_evidence))
 
 
-def select_target_crop(slots: Dict, source_evidence: Dict, target: Image.Image) -> Optional[Image.Image]:
-    crop = select_focus_crop(slots, source_evidence, target)
-    if crop is not None:
-        return crop
-    return None
+def select_target_crop(
+    slots: Dict, source_evidence: Dict, target: Image.Image
+) -> Optional[Image.Image]:
+    return select_focus_crop(slots, source_evidence, target)
+
+
+def needs_source_guided_target_crop(slots: Dict) -> bool:
+    return any(
+        canonical_edit_type(subgoal.get("edit_type")) in {"remove", "color", "motion"}
+        for subgoal in slots.get("subgoals") or []
+    )
 
 
 def deterministic_parse(instruction: object, raw_type: object) -> Dict:
@@ -538,6 +559,173 @@ def deterministic_parse(instruction: object, raw_type: object) -> Dict:
     except Exception as exc:
         return {"parse_ok": False, "error": repr(exc)}
     return result
+
+
+def parse_simple_instruction_slots(instruction: object, raw_type: object) -> Optional[Dict]:
+    """Parse only high-precision instruction templates; return None to use MLLM."""
+
+    text = re.sub(r"\s+", " ", str(instruction or "")).strip()
+    edit_type = canonical_edit_type(raw_type)
+    subgoals: Optional[List[Dict]] = None
+    if re.search(
+        r"(?i)\b(?:no\s+changes?|without\s+changes?|unchanged|do\s+not|don't|"
+        r"cannot|can't|clarify|sorry)\b",
+        text,
+    ):
+        return None
+
+    if edit_type == "remove":
+        match = re.fullmatch(r"(?i)(?:please\s+)?(?:remove|erase|delete)\s+(.+?)[.!?]?", text)
+        if match:
+            object_a = re.sub(r"(?i)^(?:the|a|an)\s+", "", match.group(1)).strip()
+            subgoals = [{"edit_type": "remove", "object_a": object_a}]
+    elif edit_type == "replace":
+        match = re.fullmatch(
+            r"(?i)(?:please\s+)?replace\s+(?:the\s+)?(.+?)\s+with\s+(?:the\s+|a\s+|an\s+)?(.+?)[.!?]?",
+            text,
+        )
+        if match:
+            object_a = match.group(1).strip()
+            location = ""
+            packshot = re.fullmatch(r"(?i)(.+?)\s+(in\s+the\s+packshot)", object_a)
+            if packshot:
+                object_a, location = packshot.group(1).strip(), packshot.group(2).strip()
+            subgoals = [{
+                "edit_type": "replace",
+                "object_a": object_a,
+                "object_b": match.group(2).strip(),
+                "location": location,
+            }]
+    elif edit_type == "color":
+        match = re.fullmatch(
+            r"(?i)(?:turn|change)\s+(?:the\s+)?(.+?)\s+positioned\s+(.+?)\s+into\s+(?:having\s+)?(.+?)[.!?]?",
+            text,
+        )
+        if match:
+            object_a = match.group(1).strip()
+            location = re.sub(
+                r"(?i)^(?:in|on|at)\s+(?:the\s+)?", "", match.group(2)
+            ).strip()
+            raw_goal = re.sub(
+                r"(?i)^(?:a|an|the)\s+", "", match.group(3)
+            ).strip()
+            goals = re.split(r"(?i)\s+(?:with|and)\s+", raw_goal, maxsplit=1)
+            goals = [re.sub(r"(?i)^(?:a|an|the)\s+", "", item).strip() for item in goals]
+            clothing_words = {"attire", "clothes", "clothing", "outfit"}
+            is_skin_and_clothing = (
+                len(goals) == 2
+                and "skin tone" in goals[0].lower()
+                and COLOR_WORDS.intersection(re.findall(r"[a-z]+", goals[1].lower()))
+                and clothing_words.intersection(re.findall(r"[a-z]+", goals[1].lower()))
+            )
+            if is_skin_and_clothing:
+                subgoals = [
+                    {
+                        "edit_type": "color",
+                        "object_a": object_a,
+                        "attribute": goals[0],
+                        "location": location,
+                    },
+                    {
+                        "edit_type": "color",
+                        "object_a": object_a,
+                        "attribute": goals[1],
+                        "location": location,
+                    },
+                ]
+            else:
+                # Keep multi-color compound requests on the MLLM fallback so
+                # distinct objects/attributes can be split into subgoals.
+                second_goal_colors = (
+                    COLOR_WORDS.intersection(re.findall(r"[a-z]+", goals[1].lower()))
+                    if len(goals) == 2
+                    else set()
+                )
+                if raw_goal and not second_goal_colors:
+                    subgoals = [{
+                        "edit_type": "color",
+                        "object_a": object_a,
+                        "attribute": raw_goal,
+                        "location": location,
+                    }]
+    elif edit_type == "motion":
+        compound = re.fullmatch(
+            r"(?i)(?:the\s+)?([a-z][a-z -]*?)\s+"
+            r"(lowers?|raises?)\s+(?:his|her|their|its)\s+([a-z-]+)\s+and\s+"
+            r"(straightens?|bends?)\s+(?:his|her|their|its)\s+([a-z-]+)[.!?]?",
+            text,
+        )
+        if compound:
+            subject = compound.group(1).strip()
+            verb_states = {
+                "lower": "lowered",
+                "lowers": "lowered",
+                "raise": "raised",
+                "raises": "raised",
+                "straighten": "straightened",
+                "straightens": "straightened",
+                "bend": "bent",
+                "bends": "bent",
+            }
+            subgoals = [
+                {
+                    "edit_type": "motion",
+                    "object_a": f"{subject}'s {compound.group(3)}",
+                    "attribute": verb_states[compound.group(2).lower()],
+                },
+                {
+                    "edit_type": "motion",
+                    "object_a": f"{subject}'s {compound.group(5)}",
+                    "attribute": verb_states[compound.group(4).lower()],
+                },
+            ]
+        else:
+            simple = re.fullmatch(
+                r"(?i)(?:the\s+)?([a-z][a-z -]*?)\s+"
+                r"(tilts?|turns?|raises?|lowers?)\s+(?:his|her|their|its)\s+"
+                r"([a-z-]+)(.*?)[.!?]?",
+                text,
+            )
+            if simple and " and " not in simple.group(4).lower():
+                part = simple.group(3).strip()
+                attribute = " ".join(
+                    value.strip()
+                    for value in (simple.group(2), part, simple.group(4))
+                    if value.strip()
+                )
+                subgoals = [{
+                    "edit_type": "motion",
+                    "object_a": simple.group(1).strip(),
+                    "part": part,
+                    "attribute": attribute,
+                }]
+    elif edit_type == "background":
+        match = re.fullmatch(
+            r"(?i)(?:please\s+)?(?:change|replace|turn|make)\s+(?:the\s+)?background\s+(?:to|with|into)\s+(.+?)[.!?]?",
+            text,
+        )
+        if match:
+            subgoals = [{"edit_type": "background", "attribute": match.group(1).strip()}]
+    elif edit_type == "style" and text:
+        style_action = re.search(
+            r"(?i)\b(?:apply|create|design|draw|generate|give|make|modify|paint|perform|"
+            r"recreate|reinterpret|reimagine|render|stylize|transform|turn)\b",
+            text,
+        )
+        if style_action:
+            subgoals = [{"edit_type": "style", "attribute": text.rstrip(".!?")}]
+
+    if not subgoals:
+        return None
+    return normalize_slots(
+        {
+            "instruction_status": "NORMAL",
+            "subgoals": subgoals,
+            "confidence": 1.0,
+            "notes": "high-precision deterministic template",
+        },
+        raw_type,
+    )
 
 
 def _state_evidence_confidence(evidence: Dict) -> float:
@@ -564,6 +752,7 @@ class QwenFactPrefilterRunner:
         max_new_tokens: int,
         confidence_threshold: float,
         boundary_review_fraction: float,
+        slot_cache_size: int,
     ):
         import torch
         from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
@@ -573,6 +762,10 @@ class QwenFactPrefilterRunner:
         self.max_new_tokens = max_new_tokens
         self.confidence_threshold = max(0.0, min(1.0, confidence_threshold))
         self.boundary_review_fraction = max(0.0, min(1.0, boundary_review_fraction))
+        self.slot_cache_size = max(0, int(slot_cache_size))
+        self.slot_cache: OrderedDict[Tuple[str, str], Dict] = OrderedDict()
+        self.generation_calls = 0
+        self.mllm_conversations = 0
         self._torch = torch
         model_kwargs = {"trust_remote_code": True}
         if device == "cpu":
@@ -591,6 +784,27 @@ class QwenFactPrefilterRunner:
             self.processor.tokenizer.padding_side = "left"
 
     @staticmethod
+    def _slot_cache_key(record: Dict) -> Tuple[str, str]:
+        return (
+            canonical_edit_type(record.get("type")),
+            re.sub(r"\s+", " ", str(record.get("instruction") or "")).strip(),
+        )
+
+    def _cached_slots(self, key: Tuple[str, str]) -> Optional[Dict]:
+        cached = self.slot_cache.get(key)
+        if cached is not None:
+            self.slot_cache.move_to_end(key)
+        return cached
+
+    def _cache_slots(self, key: Tuple[str, str], slots: Dict) -> None:
+        if self.slot_cache_size <= 0:
+            return
+        self.slot_cache[key] = slots
+        self.slot_cache.move_to_end(key)
+        while len(self.slot_cache) > self.slot_cache_size:
+            self.slot_cache.popitem(last=False)
+
+    @staticmethod
     def _text_messages(prompts: Sequence[str]) -> List[List[Dict]]:
         return [
             [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
@@ -599,7 +813,9 @@ class QwenFactPrefilterRunner:
 
     @staticmethod
     def _single_image_messages(
-        images: Sequence[Image.Image], prompts: Sequence[str], crops: Optional[Sequence[Optional[Image.Image]]] = None
+        images: Sequence[Image.Image],
+        prompts: Sequence[str],
+        crops: Optional[Sequence[Optional[Image.Image]]] = None,
     ) -> List[List[Dict]]:
         if crops is None:
             crops = [None] * len(images)
@@ -649,6 +865,8 @@ class QwenFactPrefilterRunner:
     def _generate_json(self, conversations: Sequence[List[Dict]]) -> List[Dict]:
         if not conversations:
             return []
+        self.generation_calls += 1
+        self.mllm_conversations += len(conversations)
         try:
             inputs = self.processor.apply_chat_template(
                 conversations,
@@ -741,46 +959,100 @@ class QwenFactPrefilterRunner:
             except Exception as exc:
                 outputs[index] = self._error_result(f"image_decode: {exc!r}")
 
+        slots_by_index: Dict[int, Dict] = {}
+        deterministic_by_index: Dict[int, Dict] = {}
+        slot_fallback_groups: Dict[Tuple[str, str], List[int]] = {}
+        active_indices = []
+        for index in valid_indices:
+            deterministic = deterministic_parse(
+                records[index].get("instruction", ""), records[index].get("type", "")
+            )
+            deterministic_by_index[index] = deterministic
+            slots = parse_simple_instruction_slots(
+                records[index].get("instruction", ""), records[index].get("type", "")
+            )
+            if slots is None:
+                cache_key = self._slot_cache_key(records[index])
+                cached = self._cached_slots(cache_key)
+                if cached is None:
+                    slot_fallback_groups.setdefault(cache_key, []).append(index)
+                else:
+                    slots_by_index[index] = cached
+                    raw_stages[index]["_slot_method"] = "CACHE"
+                    if cached.get("instruction_status") == "NORMAL":
+                        active_indices.append(index)
+                continue
+            slots_by_index[index] = slots
+            raw_stages[index]["_slot_method"] = "DETERMINISTIC"
+            if slots.get("instruction_status") == "NORMAL":
+                active_indices.append(index)
+
+        slot_fallback_items = list(slot_fallback_groups.items())
+        slot_fallback_indices = [indices[0] for _, indices in slot_fallback_items]
         slot_results = self._generate_json(
             self._text_messages(
                 [
                     build_slot_prompt(records[index].get("type", ""), records[index].get("instruction", ""))
-                    for index in valid_indices
+                    for index in slot_fallback_indices
                 ]
             )
         )
-        slots_by_index: Dict[int, Dict] = {}
-        deterministic_by_index: Dict[int, Dict] = {}
-        active_indices = []
-        for index, stage in zip(valid_indices, slot_results):
-            raw_stages[index]["step0_slots"] = stage.get("raw_text", "")
+        for (cache_key, indices), stage in zip(slot_fallback_items, slot_results):
+            representative = indices[0]
+            raw_stages[representative]["step0_slots"] = stage.get("raw_text", "")
+            raw_stages[representative]["_slot_method"] = "MLLM"
             if not stage.get("parse_ok"):
-                outputs[index] = self._error_result(
-                    f"step0_slots: {stage.get('error', 'parse error')}", raw_stages[index]
-                )
+                for index in indices:
+                    outputs[index] = self._error_result(
+                        f"step0_slots: {stage.get('error', 'parse error')}",
+                        raw_stages[index],
+                    )
                 continue
-            slots = normalize_slots(stage["parsed"], records[index].get("type", ""))
-            deterministic = deterministic_parse(
-                records[index].get("instruction", ""), records[index].get("type", "")
+            slots = normalize_slots(
+                stage["parsed"], records[representative].get("type", "")
             )
-            slots_by_index[index] = slots
-            deterministic_by_index[index] = deterministic
-            if slots.get("instruction_status") == "NORMAL":
-                active_indices.append(index)
+            self._cache_slots(cache_key, slots)
+            for position, index in enumerate(indices):
+                slots_by_index[index] = slots
+                if position:
+                    raw_stages[index]["_slot_method"] = "CACHE"
+                if slots.get("instruction_status") == "NORMAL":
+                    active_indices.append(index)
 
         source_by_index: Dict[int, Dict] = {}
         target_by_index: Dict[int, Dict] = {}
         paired_by_index: Dict[int, Dict] = {}
         match_by_index: Dict[int, Dict] = {}
 
-        source_results = self._generate_json(
+        initial_active_indices = list(active_indices)
+        direct_target_indices = [
+            index
+            for index in initial_active_indices
+            if not needs_source_guided_target_crop(slots_by_index[index])
+        ]
+        # Source and non-localized target observations share one generation.
+        # Localized target crops must wait for the source observation's bbox.
+        base_state_results = self._generate_json(
             self._single_image_messages(
-                [sources[index] for index in active_indices],
-                [build_single_image_prompt(slots_by_index[index]) for index in active_indices],
+                [sources[index] for index in initial_active_indices],
+                [
+                    build_single_image_prompt(slots_by_index[index])
+                    for index in initial_active_indices
+                ],
+            )
+            + self._single_image_messages(
+                [targets[index] for index in direct_target_indices],
+                [
+                    build_single_image_prompt(slots_by_index[index])
+                    for index in direct_target_indices
+                ],
             )
         )
+        source_count = len(initial_active_indices)
+        source_results = base_state_results[:source_count]
+        direct_target_results = base_state_results[source_count:]
         next_indices = []
-        for index, stage in zip(active_indices, source_results):
+        for index, stage in zip(initial_active_indices, source_results):
             raw_stages[index]["step1_source"] = stage.get("raw_text", "")
             if not stage.get("parse_ok"):
                 outputs[index] = self._error_result(
@@ -791,19 +1063,32 @@ class QwenFactPrefilterRunner:
             next_indices.append(index)
         active_indices = next_indices
 
-        crops = [
-            select_target_crop(slots_by_index[index], source_by_index[index], targets[index])
+        target_stages_by_index = dict(zip(direct_target_indices, direct_target_results))
+        guided_target_indices = [
+            index
             for index in active_indices
+            if needs_source_guided_target_crop(slots_by_index[index])
         ]
-        target_results = self._generate_json(
+        guided_target_results = self._generate_json(
             self._single_image_messages(
-                [targets[index] for index in active_indices],
-                [build_single_image_prompt(slots_by_index[index]) for index in active_indices],
-                crops,
+                [targets[index] for index in guided_target_indices],
+                [
+                    build_single_image_prompt(slots_by_index[index])
+                    for index in guided_target_indices
+                ],
+                [
+                    select_target_crop(
+                        slots_by_index[index], source_by_index[index], targets[index]
+                    )
+                    for index in guided_target_indices
+                ],
             )
         )
+        target_stages_by_index.update(zip(guided_target_indices, guided_target_results))
+
         next_indices = []
-        for index, stage in zip(active_indices, target_results):
+        for index in active_indices:
+            stage = target_stages_by_index[index]
             raw_stages[index]["step2_target"] = stage.get("raw_text", "")
             if not stage.get("parse_ok"):
                 outputs[index] = self._error_result(
@@ -812,6 +1097,37 @@ class QwenFactPrefilterRunner:
                 continue
             target_by_index[index] = normalize_single_image_evidence(stage["parsed"])
             next_indices.append(index)
+        active_indices = next_indices
+
+        # High-precision no-op states are terminal.  They do not need the
+        # expensive paired-comparison and text-matching calls.  Uncertain
+        # missing-object cases deliberately continue through the full path.
+        next_indices = []
+        for index in active_indices:
+            early_decision = adjudicate_terminal_no_change(
+                slots_by_index[index], source_by_index[index], target_by_index[index]
+            )
+            if early_decision is None:
+                next_indices.append(index)
+                continue
+            raw_stages[index]["_early_exit"] = "TERMINAL_NO_CHANGE"
+            raw_stages[index]["_match_method"] = "NOT_RUN"
+            paired = normalize_pair_evidence({})
+            match = normalize_text_match(
+                {}, len(slots_by_index[index].get("subgoals") or [])
+            )
+            outputs[index] = self._success_result(
+                slots_by_index[index],
+                deterministic_by_index[index],
+                source_by_index[index],
+                target_by_index[index],
+                paired,
+                match,
+                early_decision,
+                None,
+                raw_stages[index],
+                review_selected=False,
+            )
         active_indices = next_indices
 
         pair_results = self._generate_json(
@@ -833,6 +1149,28 @@ class QwenFactPrefilterRunner:
             next_indices.append(index)
         active_indices = next_indices
 
+        # A positive target match can often be derived directly from the two
+        # independent factual states.  Only unresolved rows call the text MLLM.
+        initial_decisions: Dict[int, Dict] = {}
+        match_fallback_indices = []
+        for index in active_indices:
+            code_match = derive_state_text_match(
+                slots_by_index[index], source_by_index[index], target_by_index[index]
+            )
+            if code_match is None:
+                match_fallback_indices.append(index)
+                continue
+            match_by_index[index] = code_match
+            raw_stages[index]["_match_method"] = "CODE_STATES"
+            initial_decisions[index] = adjudicate_evidence(
+                slots_by_index[index],
+                source_by_index[index],
+                target_by_index[index],
+                paired_by_index[index],
+                match_by_index[index],
+                self.confidence_threshold,
+            )
+
         match_results = self._generate_json(
             self._text_messages(
                 [
@@ -841,14 +1179,14 @@ class QwenFactPrefilterRunner:
                         slots_by_index[index],
                         paired_by_index[index],
                     )
-                    for index in active_indices
+                    for index in match_fallback_indices
                 ]
             )
         )
-        next_indices = []
-        initial_decisions: Dict[int, Dict] = {}
-        for index, stage in zip(active_indices, match_results):
+        next_indices = [index for index in active_indices if index not in match_fallback_indices]
+        for index, stage in zip(match_fallback_indices, match_results):
             raw_stages[index]["step4_text_match"] = stage.get("raw_text", "")
+            raw_stages[index]["_match_method"] = "MLLM"
             if not stage.get("parse_ok"):
                 outputs[index] = self._error_result(
                     f"step4_text_match: {stage.get('error', 'parse error')}", raw_stages[index]
@@ -878,7 +1216,7 @@ class QwenFactPrefilterRunner:
         ]
         review_by_index: Dict[int, Dict] = {}
         review_prompts = [build_review_state_prompt(slots_by_index[index]) for index in review_indices]
-        review_crops = [
+        review_source_crops = [
             select_focus_crop(slots_by_index[index], source_by_index[index], sources[index])
             for index in review_indices
         ]
@@ -886,23 +1224,23 @@ class QwenFactPrefilterRunner:
             select_focus_crop(slots_by_index[index], source_by_index[index], targets[index])
             for index in review_indices
         ]
-        # Target and source are deliberately processed in separate single-image
-        # conversations.  The model cannot emit a pairwise success judgment or
-        # let one image bias its factual description of the other.
-        review_target_results = self._generate_json(
+        # Source and target remain separate conversations, but share one
+        # batched generate call for better GPU utilization.
+        review_count = len(review_indices)
+        review_results = self._generate_json(
             self._single_image_messages(
+                [sources[index] for index in review_indices],
+                review_prompts,
+                review_source_crops,
+            )
+            + self._single_image_messages(
                 [targets[index] for index in review_indices],
                 review_prompts,
                 review_target_crops,
             )
         )
-        review_source_results = self._generate_json(
-            self._single_image_messages(
-                [sources[index] for index in review_indices],
-                review_prompts,
-                review_crops,
-            )
-        )
+        review_source_results = review_results[:review_count]
+        review_target_results = review_results[review_count:]
         for index, target_stage, source_stage in zip(
             review_indices, review_target_results, review_source_results
         ):
@@ -986,6 +1324,9 @@ class QwenFactPrefilterRunner:
         review_selected: bool,
     ) -> Dict:
         change = decision.get("change_presence", "UNKNOWN")
+        mllm_stages = sorted(
+            key for key in raw_stages if key.startswith("step")
+        )
         model_output = {
             "verdict": decision["verdict"],
             "confidence": decision.get("confidence", 0.0),
@@ -1015,6 +1356,11 @@ class QwenFactPrefilterRunner:
                 "review_reasons": decision.get("review_reasons", []),
                 "review_selected": review_selected,
                 "review": review,
+                "mllm_calls": len(mllm_stages),
+                "mllm_stages": mllm_stages,
+                "slot_method": raw_stages.get("_slot_method", "UNKNOWN"),
+                "match_method": raw_stages.get("_match_method", "NOT_RUN"),
+                "early_exit": raw_stages.get("_early_exit", ""),
             },
         }
 
@@ -1092,6 +1438,11 @@ def _make_audit_and_manifest_rows(
         ),
         "prefilter_review_evidence_json": json_dumps(evidence.get("review") or {}),
         "prefilter_review_resolution": review_resolution,
+        "prefilter_mllm_calls": int(evidence.get("mllm_calls", 0)),
+        "prefilter_mllm_stages_json": json_dumps(evidence.get("mllm_stages") or []),
+        "prefilter_slot_method": str(evidence.get("slot_method") or "UNKNOWN"),
+        "prefilter_match_method": str(evidence.get("match_method") or "NOT_RUN"),
+        "prefilter_early_exit": str(evidence.get("early_exit") or ""),
         "filter_decision": decision,
         "filter_reason_codes": filter_reason_codes,
         "filter_mismatch_score": float(_filter_score(decision, verdict, confidence)),
@@ -1115,6 +1466,10 @@ def _make_audit_and_manifest_rows(
         "prefilter_predicates_json",
         "prefilter_review_triggered",
         "prefilter_review_resolution",
+        "prefilter_mllm_calls",
+        "prefilter_slot_method",
+        "prefilter_match_method",
+        "prefilter_early_exit",
         "filter_decision",
         "filter_reason_codes",
         "filter_mismatch_score",
@@ -1136,7 +1491,21 @@ def process_shard(
     manifest_path = Path(job.manifest_path)
     tmp_audit_path = audit_path.with_suffix(audit_path.suffix + ".tmp")
     tmp_manifest_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-    summary = {"rows": 0, "errors": 0, "kept": 0, "dropped": 0, "verdicts": {}, "decisions": {}}
+    summary = {
+        "rows": 0,
+        "errors": 0,
+        "kept": 0,
+        "dropped": 0,
+        "verdicts": {},
+        "decisions": {},
+        "mllm_conversations": 0,
+        "generation_calls": 0,
+        "deterministic_slots": 0,
+        "cached_slots": 0,
+        "code_matches": 0,
+        "early_exits": 0,
+    }
+    generation_start = runner.generation_calls
     pf = pq.ParquetFile(input_path)
     audit_writer = None
     manifest_writer = None
@@ -1171,6 +1540,17 @@ def process_shard(
                     summary["kept"] += 1
                 else:
                     summary["dropped"] += 1
+                summary["mllm_conversations"] += int(audit_row["prefilter_mllm_calls"])
+                summary["deterministic_slots"] += int(
+                    audit_row["prefilter_slot_method"] == "DETERMINISTIC"
+                )
+                summary["cached_slots"] += int(
+                    audit_row["prefilter_slot_method"] == "CACHE"
+                )
+                summary["code_matches"] += int(
+                    audit_row["prefilter_match_method"] == "CODE_STATES"
+                )
+                summary["early_exits"] += int(bool(audit_row["prefilter_early_exit"]))
                 audit_rows.append(audit_row)
                 manifest_rows.append(manifest_row)
 
@@ -1207,13 +1587,40 @@ def process_shard(
                 tmp_audit_path.replace(audit_path)
             if tmp_manifest_path.exists():
                 tmp_manifest_path.replace(manifest_path)
+    summary["generation_calls"] = runner.generation_calls - generation_start
     return summary
 
 
 def _existing_summary(manifest_path: Path) -> Dict:
-    summary = {"rows": 0, "errors": 0, "kept": 0, "dropped": 0, "verdicts": {}, "decisions": {}}
+    summary = {
+        "rows": 0,
+        "errors": 0,
+        "kept": 0,
+        "dropped": 0,
+        "verdicts": {},
+        "decisions": {},
+        "mllm_conversations": 0,
+        "generation_calls": 0,
+        "deterministic_slots": 0,
+        "cached_slots": 0,
+        "code_matches": 0,
+        "early_exits": 0,
+    }
+    available = set(pq.ParquetFile(manifest_path).schema.names)
+    optional = {
+        "prefilter_mllm_calls",
+        "prefilter_slot_method",
+        "prefilter_match_method",
+        "prefilter_early_exit",
+    }
     table = pq.read_table(
-        manifest_path, columns=["prefilter_verdict", "filter_decision", "prefilter_parse_ok"]
+        manifest_path,
+        columns=[
+            "prefilter_verdict",
+            "filter_decision",
+            "prefilter_parse_ok",
+            *sorted(optional & available),
+        ],
     )
     for row in table.to_pylist():
         verdict = str(row.get("prefilter_verdict") or "ERROR")
@@ -1224,6 +1631,13 @@ def _existing_summary(manifest_path: Path) -> Dict:
         summary["dropped"] += int(decision != "keep")
         summary["verdicts"][verdict] = summary["verdicts"].get(verdict, 0) + 1
         summary["decisions"][decision] = summary["decisions"].get(decision, 0) + 1
+        summary["mllm_conversations"] += int(row.get("prefilter_mllm_calls") or 0)
+        summary["deterministic_slots"] += int(
+            row.get("prefilter_slot_method") == "DETERMINISTIC"
+        )
+        summary["cached_slots"] += int(row.get("prefilter_slot_method") == "CACHE")
+        summary["code_matches"] += int(row.get("prefilter_match_method") == "CODE_STATES")
+        summary["early_exits"] += int(bool(row.get("prefilter_early_exit")))
     return summary
 
 
@@ -1246,6 +1660,7 @@ def worker_main(
             args.max_new_tokens,
             args.confidence_threshold,
             args.boundary_review_fraction,
+            args.slot_cache_size,
         )
         for job in jobs:
             audit_path, manifest_path = Path(job.audit_path), Path(job.manifest_path)
@@ -1271,12 +1686,20 @@ def aggregate_run_summary(shard_summaries: List[Dict]) -> Dict:
     verdicts: Dict[str, int] = {}
     decisions: Dict[str, int] = {}
     rows = errors = kept = dropped = 0
+    mllm_conversations = generation_calls = deterministic_slots = cached_slots = 0
+    code_matches = early_exits = 0
     for item in shard_summaries:
         summary = item.get("summary") or {}
         rows += int(summary.get("rows", 0))
         errors += int(summary.get("errors", 0))
         kept += int(summary.get("kept", 0))
         dropped += int(summary.get("dropped", 0))
+        mllm_conversations += int(summary.get("mllm_conversations", 0))
+        generation_calls += int(summary.get("generation_calls", 0))
+        deterministic_slots += int(summary.get("deterministic_slots", 0))
+        cached_slots += int(summary.get("cached_slots", 0))
+        code_matches += int(summary.get("code_matches", 0))
+        early_exits += int(summary.get("early_exits", 0))
         for key, value in (summary.get("verdicts") or {}).items():
             verdicts[key] = verdicts.get(key, 0) + int(value)
         for key, value in (summary.get("decisions") or {}).items():
@@ -1289,6 +1712,15 @@ def aggregate_run_summary(shard_summaries: List[Dict]) -> Dict:
         "drop_rate": round(dropped / max(rows, 1), 6),
         "verdict_counts": verdicts,
         "decision_counts": decisions,
+        "mllm_conversations": mllm_conversations,
+        "generation_calls": generation_calls,
+        "average_mllm_conversations_per_row": round(
+            mllm_conversations / max(rows, 1), 6
+        ),
+        "deterministic_slot_rows": deterministic_slots,
+        "cached_slot_rows": cached_slots,
+        "code_match_rows": code_matches,
+        "early_exit_rows": early_exits,
         "prefilter_method": PREFILTER_METHOD,
         "evidence_schema": EVIDENCE_SCHEMA,
     }
