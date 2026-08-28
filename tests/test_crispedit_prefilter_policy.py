@@ -4,11 +4,15 @@ from crispedit_mllm_prefilter import (
     build_review_state_prompt,
     build_single_image_prompt,
     crop_normalized_bbox,
+    needs_source_guided_target_crop,
+    parse_simple_instruction_slots,
     select_focus_bbox,
 )
 from crispedit_mask_dataset_runner import base_prefilter_fields
 from crispedit_prefilter_policy import (
     adjudicate_evidence,
+    adjudicate_terminal_no_change,
+    derive_state_text_match,
     normalize_pair_evidence,
     normalize_single_image_evidence,
     normalize_slots,
@@ -35,7 +39,6 @@ def _single(facts=None, scene="indoor", style="photo"):
             "scene_label": scene,
             "style_label": style,
             "subject_identity": "same person",
-            "subject_bbox": [0.2, 0.1, 0.8, 0.9],
             "facts": facts or [],
             "confidence": 0.95,
         }
@@ -49,7 +52,6 @@ def _fact(index, role, present, count=None, attribute="", pose=""):
         "query": "query",
         "present": present,
         "count": count,
-        "bboxes": [[0.2, 0.2, 0.6, 0.7]] if present == "YES" else [],
         "attribute_value": attribute,
         "pose": pose,
         "confidence": 0.95,
@@ -141,6 +143,116 @@ def test_current_manifest_uses_method_name_without_version_fields():
     propagated = base_prefilter_fields(manifest)
     assert propagated["prefilter_method"] == "fact"
     assert propagated["prefilter_evidence_schema"] == "fact_evidence"
+
+
+def test_simple_instruction_templates_skip_slot_mllm_conservatively():
+    remove = parse_simple_instruction_slots("remove the white great dane", "remove")
+    assert remove["subgoals"][0]["object_a"] == "white great dane"
+
+    replace = parse_simple_instruction_slots(
+        "replace the bottle with a glass of juice", "replace"
+    )
+    assert replace["subgoals"][0]["object_a"] == "bottle"
+    assert replace["subgoals"][0]["object_b"] == "glass of juice"
+
+    background = parse_simple_instruction_slots(
+        "change the background to a misty forest", "background change"
+    )
+    assert background["subgoals"][0]["attribute"] == "a misty forest"
+
+    packshot = parse_simple_instruction_slots(
+        "replace the bottle in the packshot with a glass of juice", "replace"
+    )
+    assert packshot["subgoals"][0]["object_a"] == "bottle"
+    assert packshot["subgoals"][0]["location"] == "in the packshot"
+
+    color = parse_simple_instruction_slots(
+        "Turn girl positioned in the central-left area into darker skin tone with blue attire",
+        "color",
+    )
+    assert [item["attribute"] for item in color["subgoals"]] == [
+        "darker skin tone",
+        "blue attire",
+    ]
+    assert all(item["location"] == "central-left area" for item in color["subgoals"])
+
+    simple_color = parse_simple_instruction_slots(
+        "Turn cap positioned in the upper-central area into red", "color"
+    )
+    assert simple_color["subgoals"][0]["object_a"] == "cap"
+    assert simple_color["subgoals"][0]["attribute"] == "red"
+    assert simple_color["subgoals"][0]["location"] == "upper-central area"
+
+    assert parse_simple_instruction_slots(
+        "Turn wheel positioned in the center into black with red brake caliper",
+        "color",
+    ) is None
+
+    motion = parse_simple_instruction_slots(
+        "The woman lowers her hand and straightens her posture.", "motion change"
+    )
+    assert [item["object_a"] for item in motion["subgoals"]] == [
+        "woman's hand",
+        "woman's posture",
+    ]
+    assert [item["attribute"] for item in motion["subgoals"]] == [
+        "lowered",
+        "straightened",
+    ]
+
+    assert parse_simple_instruction_slots("add a garden with raised beds", "add") is None
+    assert parse_simple_instruction_slots("Make the room feel warmer", "color") is None
+
+    style = parse_simple_instruction_slots(
+        "Would you create a pixel art version of this image?", "style"
+    )
+    assert style["subgoals"][0]["edit_type"] == "style"
+
+
+def test_state_match_fast_path_only_accepts_decisive_positive_states():
+    slots = _slots([{"edit_type": "replace", "object_a": "bottle", "object_b": "glass"}])
+    source = _single(
+        [_fact(0, "OBJECT_A", "YES", count=1), _fact(0, "OBJECT_B", "NO", count=0)]
+    )
+    target = _single(
+        [_fact(0, "OBJECT_A", "NO", count=0), _fact(0, "OBJECT_B", "YES", count=1)]
+    )
+    match = derive_state_text_match(slots, source, target)
+    assert match is not None
+    assert match["method"] == "CODE_STATES"
+    assert match["subgoal_matches"][0]["match"] == "MATCH"
+
+    uncertain_target = _single(
+        [_fact(0, "OBJECT_A", "NO", count=0), _fact(0, "OBJECT_B", "UNCLEAR")]
+    )
+    assert derive_state_text_match(slots, source, uncertain_target) is None
+
+    color_slots = _slots(
+        [{"edit_type": "color", "object_a": "shirt", "attribute": "blue"}]
+    )
+    color_source = _single([_fact(0, "OBJECT_A", "YES", attribute="red")])
+    color_target = _single([_fact(0, "OBJECT_A", "YES", attribute="blue")])
+    assert derive_state_text_match(color_slots, color_source, color_target) is None
+
+
+def test_terminal_no_change_fast_path_is_high_precision():
+    add_slots = _slots([{"edit_type": "add", "object_b": "family"}])
+    same_source = _single([_fact(0, "OBJECT_B", "YES", count=3)])
+    same_target = _single([_fact(0, "OBJECT_B", "YES", count=3)])
+    decision = adjudicate_terminal_no_change(add_slots, same_source, same_target)
+    assert decision is not None
+    assert decision["verdict"] == "FAIL"
+    assert decision["predicates"]["fast_terminal_no_change"] == "TRUE"
+
+    remove_slots = _slots([{"edit_type": "remove", "object_a": "small dog"}])
+    absent = _single([_fact(0, "OBJECT_A", "NO")])
+    assert adjudicate_terminal_no_change(remove_slots, absent, absent) is None
+
+    color_slots = _slots(
+        [{"edit_type": "color", "object_a": "shirt", "attribute": "blue"}]
+    )
+    blue = _single([_fact(0, "OBJECT_A", "YES", attribute="blue")])
+    assert adjudicate_terminal_no_change(color_slots, blue, blue) is None
 
 
 def test_remove_requires_object_in_source_and_absence_in_target():
@@ -375,6 +487,11 @@ def test_review_prompt_keeps_attribute_dimension_but_hides_target_values():
     assert "attire/clothing" in prompt
     assert "darker" not in prompt
     assert "blue" not in prompt
+    # The established base prompt is intentionally unchanged; only the focused
+    # independent review must hide requested target values.
+    base_prompt = build_single_image_prompt(slots).lower()
+    assert "darker" in base_prompt
+    assert "blue" in base_prompt
 
 
 def test_review_can_use_target_state_when_source_state_is_unclear():
@@ -460,6 +577,17 @@ def test_color_outfit_is_not_misclassified_as_object_replacement():
     assert subgoal["edit_type"] == "color"
     assert subgoal["attribute"] == "red outfit"
     assert subgoal["object_b"] == ""
+
+
+def test_only_localized_edit_types_need_source_guided_target_crop():
+    for edit_type in ("remove", "color", "motion"):
+        assert needs_source_guided_target_crop(
+            _slots([{"edit_type": edit_type, "object_a": "subject"}])
+        )
+    for edit_type in ("add", "replace", "background", "style"):
+        assert not needs_source_guided_target_crop(
+            _slots([{"edit_type": edit_type, "object_a": "subject"}])
+        )
 
 
 def test_normalized_crop_expands_and_stays_in_bounds():

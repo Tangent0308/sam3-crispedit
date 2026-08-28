@@ -7,6 +7,7 @@ import argparse
 import io
 import json
 import math
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -58,6 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--report-json", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--wall-seconds", type=float, default=None)
     return parser.parse_args()
 
 
@@ -159,16 +162,20 @@ def bytes_image(value: Any) -> Image.Image:
 
 def load_rows(input_dir: Path, report_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     report = json.loads(report_path.read_text())
-    rows: list[dict[str, Any]] = []
-    for item in report["rows"]:
-        shard = input_dir / item["mini_shard"]
-        table = pq.read_table(shard)
-        record = table.slice(int(item["row_idx"]), 1).to_pylist()[0]
-        merged = dict(record)
-        merged.update(item)
-        merged["source_image"] = bytes_image(record["input_img"])
-        merged["target_image"] = bytes_image(record["output_img"])
-        rows.append(merged)
+    rows = [dict(item) for item in report["rows"]]
+    anchor_indices_by_shard: dict[str, list[int]] = defaultdict(list)
+    for idx, row in enumerate(rows):
+        if str(row["issue_class"]) in GROUP_ORDER:
+            anchor_indices_by_shard[str(row["mini_shard"])].append(idx)
+    for shard_name, indices in anchor_indices_by_shard.items():
+        table = pq.read_table(
+            input_dir / shard_name,
+            columns=["input_img", "output_img"],
+        )
+        for idx in indices:
+            record = table.slice(int(rows[idx]["row_idx"]), 1).to_pylist()[0]
+            rows[idx]["source_image"] = bytes_image(record["input_img"])
+            rows[idx]["target_image"] = bytes_image(record["output_img"])
     return report, rows
 
 
@@ -403,15 +410,22 @@ def draw_compact_tile(
     )
 
 
-def render_overview(report: dict[str, Any], rows: list[dict[str, Any]], output_path: Path) -> None:
+def render_overview(
+    report: dict[str, Any],
+    rows: list[dict[str, Any]],
+    output_path: Path,
+    *,
+    title: str = "CrispEdit fact prefilter · visual regression",
+    subtitle: str | None = None,
+) -> None:
     width, height = 1900, 1350
     canvas = Image.new("RGB", (width, height), BG)
     draw = ImageDraw.Draw(canvas)
     draw.rectangle((0, 0, width, 126), fill=NAVY)
-    draw.text((40, 25), "CrispEdit fact-only Step 5 · visual regression", font=font(38, bold=True), fill=WHITE)
+    draw.text((40, 25), title, font=font(38, bold=True), fill=WHITE)
     draw.text(
         (40, 78),
-        "15-row Qwen3-VL-8B smoke test · exact source/target pairs shown below",
+        subtitle or f"{len(rows)}-row Qwen3-VL-8B test · exact source/target pairs shown below",
         font=font(19),
         fill="#cbd5e5",
     )
@@ -483,16 +497,288 @@ def render_overview(report: dict[str, Any], rows: list[dict[str, Any]], output_p
     canvas.save(output_path, quality=95)
 
 
+def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        issue_class = str(row["issue_class"])
+        correct = bool(row["correct"])
+        counts["rows"] += 1
+        counts["correct"] += int(correct)
+        counts["incorrect"] += int(not correct)
+        counts[f"class_{issue_class}_rows"] += 1
+        counts[f"class_{issue_class}_correct"] += int(correct)
+        counts[f"actual_{row['actual_decision']}"] += 1
+    result = dict(counts)
+    result["accuracy"] = counts["correct"] / max(counts["rows"], 1)
+    return result
+
+
+def draw_horizontal_bar(
+    draw: ImageDraw.ImageDraw,
+    *,
+    x: int,
+    y: int,
+    width: int,
+    value: int,
+    total: int,
+    color: str,
+    label: str,
+    value_label: str | None = None,
+) -> None:
+    label_font = font(17, bold=True)
+    value_font = font(16, bold=True)
+    draw.text((x, y), label, font=label_font, fill=INK)
+    shown = value_label or f"{value}/{total}"
+    shown_w = text_width(draw, shown, value_font)
+    draw.text((x + width - shown_w, y + 1), shown, font=value_font, fill=MUTED)
+    bar_y = y + 30
+    draw.rounded_rectangle((x, bar_y, x + width, bar_y + 18), radius=9, fill="#e2e8f0")
+    filled = int(width * value / max(total, 1))
+    if filled:
+        draw.rounded_rectangle((x, bar_y, x + filled, bar_y + 18), radius=9, fill=color)
+
+
+def render_batch_dashboard(
+    report: dict[str, Any],
+    rows: list[dict[str, Any]],
+    run_summary: dict[str, Any],
+    output_path: Path,
+    *,
+    batch_size: int | None,
+    wall_seconds: float | None,
+) -> None:
+    width, height = 1900, 1320
+    canvas = Image.new("RGB", (width, height), BG)
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle((0, 0, width, 126), fill=NAVY)
+    batch_label = f"batch {batch_size}" if batch_size else "batch run"
+    draw.text((40, 25), f"CrispEdit fact prefilter · {batch_label}", font=font(38, bold=True), fill=WHITE)
+    draw.text(
+        (40, 78),
+        "8 × H100 · 295-row stratified evaluation · legacy labels are diagnostic references, not human gold",
+        font=font(19),
+        fill="#cbd5e5",
+    )
+
+    summary = report["summary"]
+    rows_count = int(summary["rows"])
+    metric_gap = 18
+    metric_margin = 40
+    metric_width = (width - 2 * metric_margin - 3 * metric_gap) // 4
+    wall_value = f"{wall_seconds:.1f} s" if wall_seconds is not None else "n/a"
+    throughput = rows_count / wall_seconds if wall_seconds else 0.0
+    metrics = [
+        ("WALL TIME", wall_value, f"{throughput:.3f} rows/s" if wall_seconds else "not recorded", BLUE),
+        (
+            "MODEL.GENERATE",
+            str(run_summary.get("generation_calls", "n/a")),
+            f'{summary.get("mllm_conversations", 0)} logical conversations',
+            BLUE,
+        ),
+        (
+            "DECISIONS",
+            f'{summary.get("actual_keep", 0)} / {summary.get("actual_drop", 0)}',
+            "keep / drop",
+            GREEN,
+        ),
+        (
+            "ERRORS",
+            str(run_summary.get("errors", 0)),
+            f'{summary.get("review_triggered", 0)} boundary reviews',
+            GREEN if int(run_summary.get("errors", 0)) == 0 else RED,
+        ),
+    ]
+    for idx, metric in enumerate(metrics):
+        draw_metric(draw, metric_margin + idx * (metric_width + metric_gap), 154, metric_width, *metric)
+
+    panel_y = 326
+    left_x, left_w = 40, 570
+    mid_x, mid_w = 632, 570
+    right_x, right_w = 1224, 636
+    panel_h = 330
+    for x, w in ((left_x, left_w), (mid_x, mid_w), (right_x, right_w)):
+        rounded_box(draw, (x, panel_y, x + w, panel_y + panel_h), fill=WHITE, outline=BORDER, width=2, radius=18)
+
+    draw.text((left_x + 24, panel_y + 20), "Output distribution", font=font(24, bold=True), fill=INK)
+    draw_horizontal_bar(
+        draw,
+        x=left_x + 24,
+        y=panel_y + 68,
+        width=left_w - 48,
+        value=int(summary.get("actual_drop", 0)),
+        total=rows_count,
+        color=RED,
+        label="DROP",
+        value_label=f'{summary.get("actual_drop", 0)} · {100 * summary.get("actual_drop", 0) / rows_count:.1f}%',
+    )
+    draw_horizontal_bar(
+        draw,
+        x=left_x + 24,
+        y=panel_y + 129,
+        width=left_w - 48,
+        value=int(summary.get("actual_keep", 0)),
+        total=rows_count,
+        color=GREEN,
+        label="KEEP",
+        value_label=f'{summary.get("actual_keep", 0)} · {100 * summary.get("actual_keep", 0) / rows_count:.1f}%',
+    )
+    verdicts = run_summary.get("verdict_counts", {})
+    draw.text((left_x + 24, panel_y + 205), "Verdicts", font=font(18, bold=True), fill=MUTED)
+    draw.text(
+        (left_x + 24, panel_y + 240),
+        f'PASS {verdicts.get("PASS", 0)}     FAIL {verdicts.get("FAIL", 0)}     UNSURE {verdicts.get("UNSURE", 0)}',
+        font=font(21, bold=True),
+        fill=INK,
+    )
+
+    draw.text((mid_x + 24, panel_y + 20), "Routing and cost", font=font(24, bold=True), fill=INK)
+    routing = [
+        ("Deterministic slots", int(summary.get("deterministic_slots", 0)), BLUE),
+        ("Code state matches", int(summary.get("code_matches", 0)), GREEN),
+        ("Early exits", int(summary.get("early_exits", 0)), GREEN),
+        ("Boundary reviews", int(summary.get("review_triggered", 0)), AMBER),
+    ]
+    for idx, (label, value, color) in enumerate(routing):
+        draw_horizontal_bar(
+            draw,
+            x=mid_x + 24,
+            y=panel_y + 64 + idx * 59,
+            width=mid_w - 48,
+            value=value,
+            total=rows_count,
+            color=color,
+            label=label,
+        )
+
+    draw.text((right_x + 24, panel_y + 20), "15 anchor cases", font=font(24, bold=True), fill=INK)
+    anchor_specs = [
+        ("Class A · false keeps", "A_FALSE_KEEP_NOOP", GREEN),
+        ("Class B · reason mismatch", "B_KEEP_REASON_MISMATCH", GREEN),
+        ("Expected-keep controls", "HIGH_CONFIDENCE_KEEP_CONTROL", AMBER),
+    ]
+    for idx, (label, group, color) in enumerate(anchor_specs):
+        total = int(summary.get(f"class_{group}_rows", 0))
+        correct = int(summary.get(f"class_{group}_correct", 0))
+        draw_horizontal_bar(
+            draw,
+            x=right_x + 24,
+            y=panel_y + 69 + idx * 67,
+            width=right_w - 48,
+            value=correct,
+            total=total,
+            color=color if correct == total else AMBER,
+            label=label,
+        )
+    anchor_misses = [
+        row for row in rows
+        if not str(row["issue_class"]).startswith("LEGACY_") and not bool(row["correct"])
+    ]
+    miss_text = "No anchor misses" if not anchor_misses else "Miss: " + ", ".join(
+        f'{row["source_shard"]}:{row["source_row_idx"]}' for row in anchor_misses
+    )
+    draw_wrapped(
+        draw,
+        (right_x + 24, panel_y + 270),
+        miss_text,
+        font(16, bold=True),
+        AMBER if anchor_misses else GREEN,
+        right_w - 48,
+        2,
+    )
+
+    chart_x, chart_y, chart_w, chart_h = 40, 682, 1820, 556
+    rounded_box(draw, (chart_x, chart_y, chart_x + chart_w, chart_y + chart_h), fill=WHITE, outline=BORDER, width=2, radius=18)
+    draw.text(
+        (chart_x + 24, chart_y + 20),
+        "Legacy high-confidence reference agreement by edit type",
+        font=font(25, bold=True),
+        fill=INK,
+    )
+    draw.text(
+        (chart_x + 24, chart_y + 56),
+        "Each bar is agreement with 20 old-audit reference decisions; this is drift diagnostics, not accuracy.",
+        font=font(17),
+        fill=MUTED,
+    )
+    by_type: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    for row in rows:
+        if not str(row["issue_class"]).startswith("LEGACY_"):
+            continue
+        expected = str(row["expected_decision"])
+        values = by_type[str(row["raw_type"])][expected]
+        values[0] += int(bool(row["correct"]))
+        values[1] += 1
+    type_order = ["add", "background change", "color", "motion change", "remove", "replace", "style"]
+    row_start = chart_y + 104
+    label_w = 220
+    bar_w = 600
+    gap = 90
+    draw.text((chart_x + label_w + 24, chart_y + 85), "Old DROP reference", font=font(15, bold=True), fill=RED)
+    draw.text((chart_x + label_w + 24 + bar_w + gap, chart_y + 85), "Old KEEP reference", font=font(15, bold=True), fill=GREEN)
+    for idx, edit_type in enumerate(type_order):
+        y = row_start + idx * 60
+        label = edit_type.replace(" change", "")
+        draw.text((chart_x + 24, y + 7), label.upper(), font=font(17, bold=True), fill=INK)
+        for col, expected in enumerate(("drop", "keep")):
+            correct, total = by_type[edit_type][expected]
+            bar_x = chart_x + label_w + 24 + col * (bar_w + gap)
+            draw_horizontal_bar(
+                draw,
+                x=bar_x,
+                y=y,
+                width=bar_w,
+                value=correct,
+                total=total,
+                color=RED if expected == "drop" else GREEN,
+                label="",
+                value_label=f"{correct}/{total}",
+            )
+
+    draw.text(
+        (40, 1264),
+        "Interpretation: batch 16 is conservative on remove / motion / replace keeps; inspect disagreements before treating old labels as ground truth.",
+        font=font(17, bold=True),
+        fill=MUTED,
+    )
+    canvas.save(output_path, quality=95)
+
+
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report, rows = load_rows(args.input_dir, args.report_json)
-
-    render_overview(report, rows, args.output_dir / "prefilter_improved_overview.png")
+    prefix = f"batch{args.batch_size}" if args.batch_size else "fact_prefilter"
+    anchor_rows = [
+        row for row in rows if not str(row["issue_class"]).startswith("LEGACY_")
+    ]
+    expanded_report = len(anchor_rows) != len(rows)
+    if expanded_report:
+        run_summary_path = args.report_json.parent / "audit" / "run_summary.json"
+        run_summary = (
+            json.loads(run_summary_path.read_text()) if run_summary_path.exists() else {}
+        )
+        render_batch_dashboard(
+            report,
+            rows,
+            run_summary,
+            args.output_dir / f"{prefix}_summary.png",
+            batch_size=args.batch_size,
+            wall_seconds=args.wall_seconds,
+        )
+        anchor_report = {"summary": summarize_rows(anchor_rows), "rows": anchor_rows}
+        render_overview(
+            anchor_report,
+            anchor_rows,
+            args.output_dir / f"{prefix}_anchors.png",
+            title=f"CrispEdit fact prefilter · {prefix} anchors",
+            subtitle="8 reviewed regression cases + 7 expected-keep controls · exact source/target pairs",
+        )
+    else:
+        render_overview(report, rows, args.output_dir / f"{prefix}_overview.png")
     filenames = {
-        "A_FALSE_KEEP_NOOP": "prefilter_improved_class_a.png",
-        "B_KEEP_REASON_MISMATCH": "prefilter_improved_class_b.png",
-        "HIGH_CONFIDENCE_KEEP_CONTROL": "prefilter_improved_keep_controls.png",
+        "A_FALSE_KEEP_NOOP": f"{prefix}_class_a.png",
+        "B_KEEP_REASON_MISMATCH": f"{prefix}_class_b.png",
+        "HIGH_CONFIDENCE_KEEP_CONTROL": f"{prefix}_keep_controls.png",
     }
     for group in GROUP_ORDER:
         group_rows = [row for row in rows if row["issue_class"] == group]

@@ -31,15 +31,19 @@ def main() -> None:
         audit_path = args.audit_dir / input_path.name
         if not audit_path.exists():
             raise FileNotFoundError(audit_path)
+        input_fields = set(pq.ParquetFile(input_path).schema.names)
+        input_columns = [
+            "instruction",
+            "type",
+            "source_shard",
+            "source_row_idx",
+            "expected_issue_class",
+        ]
+        if "expected_decision" in input_fields:
+            input_columns.append("expected_decision")
         inputs = pq.read_table(
             input_path,
-            columns=[
-                "instruction",
-                "type",
-                "source_shard",
-                "source_row_idx",
-                "expected_issue_class",
-            ],
+            columns=input_columns,
         ).to_pylist()
         audits = {
             row["row_idx"]: row
@@ -54,13 +58,17 @@ def main() -> None:
                     "prefilter_review_triggered",
                     "prefilter_review_resolution",
                     "prefilter_predicates_json",
+                    "prefilter_mllm_calls",
+                    "prefilter_slot_method",
+                    "prefilter_match_method",
+                    "prefilter_early_exit",
                 ],
             ).to_pylist()
         }
         for row_idx, input_row in enumerate(inputs):
             audit = audits[row_idx]
             issue_class = input_row["expected_issue_class"]
-            expected = expected_decision(issue_class)
+            expected = input_row.get("expected_decision") or expected_decision(issue_class)
             actual = audit["filter_decision"]
             correct = actual == expected
             result = {
@@ -80,6 +88,10 @@ def main() -> None:
                 "review_triggered": audit["prefilter_review_triggered"],
                 "review_resolution": audit["prefilter_review_resolution"],
                 "predicates": json.loads(audit["prefilter_predicates_json"]),
+                "mllm_calls": audit["prefilter_mllm_calls"],
+                "slot_method": audit["prefilter_slot_method"],
+                "match_method": audit["prefilter_match_method"],
+                "early_exit": audit["prefilter_early_exit"],
             }
             rows.append(result)
             counts["rows"] += 1
@@ -89,8 +101,20 @@ def main() -> None:
             counts[f"class_{issue_class}_correct"] += int(correct)
             counts[f"actual_{actual}"] += 1
             counts["review_triggered"] += int(audit["prefilter_review_triggered"])
+            counts["mllm_conversations"] += int(audit["prefilter_mllm_calls"])
+            counts["deterministic_slots"] += int(
+                audit["prefilter_slot_method"] == "DETERMINISTIC"
+            )
+            counts["cached_slots"] += int(audit["prefilter_slot_method"] == "CACHE")
+            counts["code_matches"] += int(
+                audit["prefilter_match_method"] == "CODE_STATES"
+            )
+            counts["early_exits"] += int(bool(audit["prefilter_early_exit"]))
     summary = dict(counts)
     summary["accuracy"] = round(counts["correct"] / max(counts["rows"], 1), 6)
+    summary["average_mllm_conversations_per_row"] = round(
+        counts["mllm_conversations"] / max(counts["rows"], 1), 6
+    )
     report = {"summary": summary, "rows": rows}
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output_json:

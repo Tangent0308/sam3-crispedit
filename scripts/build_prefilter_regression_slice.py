@@ -43,6 +43,9 @@ PREFILTER_BAD_CASE_ROWS: List[Tuple[str, int, str, str]] = [
     ("remove_00011.parquet", 225, "A_FALSE_KEEP_NOOP", "drop"),
     ("remove_00023.parquet", 208, "WRONG_THING_EDITED", "drop"),
     ("remove_00071.parquet", 249, "A_FALSE_KEEP_NOOP", "drop"),
+    ("motion change_00007.parquet", 219, "AMBIGUOUS_SUBTLE_CHANGE", "drop"),
+    ("motion change_00038.parquet", 194, "AMBIGUOUS_SUBTLE_CHANGE", "drop"),
+    ("motion change_00048.parquet", 176, "AMBIGUOUS_SUBTLE_CHANGE", "drop"),
 ]
 
 
@@ -66,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-prefilter-bad-cases",
         action="store_true",
-        help="Also include the reviewed prefilter failures from BAD_CASE_REVIEW_20260826.md",
+        help="Also include the reviewed historical prefilter failures",
     )
     return parser.parse_args()
 
