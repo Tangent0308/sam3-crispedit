@@ -27,11 +27,15 @@ from PIL import Image
 from tqdm import tqdm
 
 from crispedit_grounding import (
+    OBSERVATION_PROMPT_VERSION,
     PROMPT_VERSION,
+    build_change_observation_prompt,
     build_grounding_requests,
     canonicalize_type,
     grounding_is_complete,
+    parse_change_observation,
     parse_grounding_output,
+    prompt_version_for_mode,
 )
 
 
@@ -89,6 +93,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--devices", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--tensor-parallel-size", type=int, default=2)
+    parser.add_argument(
+        "--grounding-mode",
+        choices=("two-pass", "single"),
+        default="two-pass",
+        help="two-pass first observes realized changes, then grounds them; single reproduces prompt v2",
+    )
     parser.add_argument("--include-types", default=None)
     parser.add_argument("--max-shards-per-type", type=int, default=None)
     parser.add_argument("--limit-rows-per-shard", type=int, default=None)
@@ -288,6 +298,7 @@ class Qwen35Grounder:
 
         self.torch = torch
         self.args = args
+        self.prompt_version = prompt_version_for_mode(args.grounding_mode)
         visible_count = torch.cuda.device_count()
         if visible_count != args.tensor_parallel_size:
             raise RuntimeError(
@@ -332,6 +343,37 @@ class Qwen35Grounder:
             }
         ]
 
+    @staticmethod
+    def _followup_conversation(
+        source: Image.Image,
+        target: Image.Image,
+        observation_prompt: str,
+        observation_response: str,
+        grounding_prompt: str,
+    ) -> List[Dict]:
+        """Rebuild the first turn plus its answer, then ask the grounding follow-up."""
+
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Image 1 (source):"},
+                    {"type": "image", "image": source},
+                    {"type": "text", "text": "Image 2 (result):"},
+                    {"type": "image", "image": target},
+                    {"type": "text", "text": observation_prompt},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": observation_response}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": grounding_prompt}],
+            },
+        ]
+
     def _generate(self, conversations: Sequence[List[Dict]]) -> List[str]:
         inputs = self.processor.apply_chat_template(
             list(conversations),
@@ -362,18 +404,71 @@ class Qwen35Grounder:
         requests: List[Tuple[int, str, List[Dict]]] = []
         payloads = [
             {
-                "schema_version": 1,
-                "prompt_version": PROMPT_VERSION,
+                "schema_version": 2 if self.args.grounding_mode == "two-pass" else 1,
+                "prompt_version": self.prompt_version,
+                "grounding_mode": self.args.grounding_mode,
                 "requests": [],
                 "boxes": {"source": [], "target": []},
             }
             for _ in samples
         ]
+
+        observations: List[Optional[Dict]] = [None] * len(samples)
+        if self.args.grounding_mode == "two-pass":
+            observation_jobs = []
+            for sample_index, sample in enumerate(samples):
+                prompt = build_change_observation_prompt(sample["type"], sample["instruction"])
+                conversation = self._conversation(sample["input_img"], sample["output_img"], prompt)
+                observation_jobs.append((sample_index, prompt, conversation))
+            for start in range(0, len(observation_jobs), self.args.request_batch_size):
+                chunk = observation_jobs[start : start + self.args.request_batch_size]
+                texts = self._generate([item[2] for item in chunk])
+                for (sample_index, prompt, conversation), initial_text in zip(chunk, texts):
+                    text = initial_text
+                    error = ""
+                    parsed: Dict = {}
+                    for attempt in range(self.args.parse_retries + 1):
+                        try:
+                            parsed = parse_change_observation(text)
+                            error = ""
+                            break
+                        except Exception as exc:
+                            error = repr(exc)
+                            if attempt < self.args.parse_retries:
+                                text = self._generate([conversation])[0]
+                    observation = {
+                        "prompt_version": OBSERVATION_PROMPT_VERSION,
+                        "prompt": prompt,
+                        "raw_text": text,
+                        "parsed": parsed,
+                        "parse_ok": not error,
+                        "error": error,
+                    }
+                    observations[sample_index] = observation
+                    payloads[sample_index]["observation"] = observation
+
         for sample_index, sample in enumerate(samples):
-            for request in build_grounding_requests(sample["type"], sample["instruction"]):
-                conversation = self._conversation(
-                    sample["input_img"], sample["output_img"], request.prompt
-                )
+            observation = observations[sample_index]
+            observation_context = observation["parsed"] if observation and observation["parse_ok"] else None
+            # A malformed observation remains useful natural-language evidence
+            # for the follow-up, but does not become a trusted JSON checklist.
+            if observation and not observation["parse_ok"] and observation["raw_text"].strip():
+                observation_context = {"unparsed_observation": observation["raw_text"].strip()}
+            for request in build_grounding_requests(
+                sample["type"], sample["instruction"], observation_context
+            ):
+                if observation is not None:
+                    conversation = self._followup_conversation(
+                        sample["input_img"],
+                        sample["output_img"],
+                        observation["prompt"],
+                        observation["raw_text"],
+                        request.prompt,
+                    )
+                else:
+                    conversation = self._conversation(
+                        sample["input_img"], sample["output_img"], request.prompt
+                    )
                 requests.append((sample_index, request.grounding_image, conversation))
 
         parsed_results: List[Dict] = []
@@ -405,10 +500,23 @@ class Qwen35Grounder:
         return payloads
 
 
-def _skip_row(row_idx: int, record: Dict, pre: Dict, model_name: str) -> Dict:
+def _skip_row(
+    row_idx: int,
+    record: Dict,
+    pre: Dict,
+    model_name: str,
+    prompt_version: str,
+    grounding_mode: str,
+) -> Dict:
     source = decode_image(record["input_img"])
     target = decode_image(record["output_img"])
-    payload = {"schema_version": 1, "prompt_version": PROMPT_VERSION, "requests": [], "boxes": {}}
+    payload = {
+        "schema_version": 2 if grounding_mode == "two-pass" else 1,
+        "prompt_version": prompt_version,
+        "grounding_mode": grounding_mode,
+        "requests": [],
+        "boxes": {},
+    }
     return {
         "row_idx": row_idx,
         "raw_type": str(record.get("type", "")),
@@ -423,7 +531,7 @@ def _skip_row(row_idx: int, record: Dict, pre: Dict, model_name: str) -> Dict:
         "target_width": target.width,
         "target_height": target.height,
         "mllm_model": model_name,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": prompt_version,
         "grounding_seconds": 0.0,
         **pre,
     }
@@ -459,7 +567,7 @@ def _result_row(row_idx: int, sample: Dict, payload: Dict, pre: Dict, model_name
         "target_width": sample["output_img"].width,
         "target_height": sample["output_img"].height,
         "mllm_model": model_name,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": str(payload.get("prompt_version", PROMPT_VERSION)),
         "grounding_seconds": float(seconds),
         **pre,
     }
@@ -477,7 +585,14 @@ def process_job(
     manifest = load_manifest(job.manifest_path)
     model_name = Path(args.model_path).name
     writer = None
-    summary = {"rows": 0, "errors": 0, "ground_fail": 0, "prefilter_skipped": 0, "statuses": {}}
+    summary = {
+        "rows": 0,
+        "errors": 0,
+        "ground_fail": 0,
+        "observation_parse_fail": 0,
+        "prefilter_skipped": 0,
+        "statuses": {},
+    }
     completed = False
     try:
         for indexed_records in iter_record_batches(job, args.batch_size):
@@ -490,7 +605,14 @@ def process_job(
                     raise KeyError(f"missing manifest row {Path(job.input_path).name}:{row_idx}")
                 pre = prefilter_fields(manifest_row)
                 if pre["filter_decision"] != "keep":
-                    out_rows[slot] = _skip_row(row_idx, record, pre, model_name)
+                    out_rows[slot] = _skip_row(
+                        row_idx,
+                        record,
+                        pre,
+                        model_name,
+                        grounder.prompt_version,
+                        args.grounding_mode,
+                    )
                     summary["prefilter_skipped"] += 1
                 else:
                     sample = {
@@ -514,8 +636,9 @@ def process_job(
                     elapsed = (time.monotonic() - started) / len(infer_samples)
                     for sample, (slot, row_idx, pre) in zip(infer_samples, infer_slots):
                         payload = {
-                            "schema_version": 1,
-                            "prompt_version": PROMPT_VERSION,
+                            "schema_version": 2 if args.grounding_mode == "two-pass" else 1,
+                            "prompt_version": grounder.prompt_version,
+                            "grounding_mode": args.grounding_mode,
                             "requests": [],
                             "boxes": {"source": [], "target": []},
                             "runtime_error": repr(exc),
@@ -528,6 +651,11 @@ def process_job(
                 status = row["grounding_status"]
                 summary["statuses"][status] = summary["statuses"].get(status, 0) + 1
                 summary["ground_fail"] += int(row["qc_flag"] == "GROUND_FAIL")
+                payload = json.loads(row["ground_json"])
+                observation = payload.get("observation")
+                summary["observation_parse_fail"] += int(
+                    bool(observation) and not bool(observation.get("parse_ok"))
+                )
             table = pa.Table.from_pylist(rows, schema=GROUND_SCHEMA)
             if writer is None:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -568,7 +696,15 @@ def worker_main(worker_index: int, physical_devices: List[int], jobs: List[Groun
             output_path = Path(job.output_path)
             if output_path.exists() and not args.overwrite:
                 rows = pq.ParquetFile(output_path).metadata.num_rows
-                summary = {"rows": rows, "errors": 0, "ground_fail": 0, "prefilter_skipped": 0, "statuses": {}, "skipped_existing": True}
+                summary = {
+                    "rows": rows,
+                    "errors": 0,
+                    "ground_fail": 0,
+                    "observation_parse_fail": 0,
+                    "prefilter_skipped": 0,
+                    "statuses": {},
+                    "skipped_existing": True,
+                }
                 progress_queue.put({"kind": "rows", "count": rows})
             else:
                 summary = process_job(job, grounder, args, progress_queue, worker_index)
@@ -582,10 +718,17 @@ def worker_main(worker_index: int, physical_devices: List[int], jobs: List[Groun
 
 
 def aggregate(summaries: Sequence[Dict]) -> Dict:
-    result = {"rows": 0, "errors": 0, "ground_fail": 0, "prefilter_skipped": 0, "statuses": {}}
+    result = {
+        "rows": 0,
+        "errors": 0,
+        "ground_fail": 0,
+        "observation_parse_fail": 0,
+        "prefilter_skipped": 0,
+        "statuses": {},
+    }
     for message in summaries:
         summary = message.get("summary", {})
-        for key in ("rows", "errors", "ground_fail", "prefilter_skipped"):
+        for key in ("rows", "errors", "ground_fail", "observation_parse_fail", "prefilter_skipped"):
             result[key] += int(summary.get(key, 0))
         for status, count in summary.get("statuses", {}).items():
             result["statuses"][status] = result["statuses"].get(status, 0) + int(count)
@@ -609,7 +752,7 @@ def main() -> None:
     args_dict = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     config = {
         "stage": "mllm_grounding",
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": prompt_version_for_mode(args.grounding_mode),
         "device_groups": groups,
         "total_rows": sum(job.num_rows for job in jobs),
         "args": args_dict,

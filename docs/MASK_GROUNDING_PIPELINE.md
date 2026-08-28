@@ -8,7 +8,8 @@ A/B，但新路径不调用 `robust_diff`、不解析 instruction head noun，�
 
 ```text
 raw parquet + keep manifest
-  → S1 Qwen3.5: source/target pair → selected-image ref + bbox_2d
+  → S1a Qwen3.5: source/target pair + instruction → realized-change observation
+  → S1b Qwen3.5: previous turn + observation → selected-image ref + bbox_2d
   → grounding parquet（可独立 resume / 抽检）
   → S2 SAM3: PVS + spatially filtered PCS → rectangle fallback
   → src-coordinate union PNG + per-instance COCO RLE
@@ -33,11 +34,19 @@ raw parquet + keep manifest
 
 入口：`crispedit_mllm_grounding.py`。
 
+- 默认 `--grounding-mode two-pass`。第一轮只观察 source/result 的实际语义变化，输出
+  `edit_summary`、`checked_regions` 和 `changes`，不输出坐标；第二轮沿用同一段多轮
+  conversation，把第一轮结果作为 recall checklist，再输出 ref + bbox；
+- 第一轮同时区分 instruction-aligned 与 collateral/overreach change。color 类会显式审计
+  face/head、neck、arms/hands、torso/clothing 和 visible legs，避免只复述 instruction；
+- 第一轮原始 response、解析结果、prompt 和错误均保存到 `ground_json.observation`；
+  `schema_version=2`，prompt version 为 `qwen35_observe_ground_v3`；
+- `--grounding-mode single` 完整保留原 `qwen35_grounding_v2`，用于 A/B 和兼容复现；
 - 每次请求都提供 source 和 target，但只允许在路由指定的单张图输出坐标；
 - 坐标固定为 `[0,1000]`，只在 S2 按原图尺寸映射；
 - thinking 关闭，greedy decode；
 - 输出会严格解析、clip 并检查非退化 box；原始 response 一并写入 `ground_json`；
-- prompt v2 约束 `ref` 为 2–8 词的 SAM-friendly 视觉短语，并要求稀疏/空心目标在
+- grounding prompt 约束 `ref` 为 2–8 词的 SAM-friendly 视觉短语，并要求稀疏/空心目标在
   8 个实例以内逐实例出框；
 - parser 会恢复 truncated response，也会恢复 Qwen 偶发的单个 object 内重复
   `bbox_2d` key（标准 JSON parser 会静默只保留最后一个 key）；
@@ -98,6 +107,7 @@ python -u crispedit_mllm_grounding.py \
   --model-path /mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B \
   --devices 0,1,2,3,4,5,6,7 \
   --tensor-parallel-size 2 \
+  --grounding-mode two-pass \
   --batch-size 1 \
   --request-batch-size 2 --max-new-tokens 512 \
   --overwrite --fail-fast
@@ -128,7 +138,8 @@ python scripts/reparse_grounding_outputs.py \
 ## 人工检查导出
 
 parquet 是训练/流水线的交换格式；人工检查时可将 Qwen 输出导出为 JSONL、CSV 和
-Markdown（`requests[].raw_text` 保留模型原始 response）：
+Markdown（`observation.raw_text` 与 `requests[].raw_text` 分别保留两轮模型原始
+response）：
 
 ```bash
 python scripts/export_grounding_outputs.py \
@@ -136,6 +147,9 @@ python scripts/export_grounding_outputs.py \
   --output-dir /path/to/model_outputs \
   --write-json-array
 ```
+
+双轮导出会额外生成 `change_observations.csv`，Markdown 中按样本依次显示第一轮观察和
+第二轮 bbox。
 
 若需要按类别查看高清缩略图，脚本会重新读取原始图像 bytes，而不是放大旧 preview：
 
@@ -164,3 +178,16 @@ python scripts/build_category_previews.py \
 最终 47/47 有输出、0 runtime error、0 `GROUND_FAIL`；共恢复并保存 181 个 instance mask。
 样本级 `mask_source` 为 PCS 36、PVS 3、box 8。box 计数按最弱实例聚合，因此一个样本中
 只要 1 个小实例触发 coverage/rectangle fallback，样本级即记为 box。
+
+## 双轮观察实验（2026-08-28）
+
+本轮 47 条实验使用同一 selection、同一 Qwen3.5-35B-A3B 与 SAM3 参数，只把 S1 从
+single-pass 改为 two-pass。结果、可读输出、分类图和 A/B 报告位于：
+
+- `/opt/tiger/tanyue/CrispEdit-mask-improved-eval-20260828-two-pass`
+- 详细结论：`docs/MASK_TWO_PASS_EVAL_20260828.md`
+
+两轮流程本身已跑通，但这 47 条没有人工 GT，不能仅凭 mask 面积或与旧 mask 的 IoU
+判定质量提升。尤其 `color_00074.parquet row=104` 中第一轮明确把 face 判为 unchanged，
+因此第二轮仍只框 arms/hands；这说明多轮分解提高了可审计性，却不能自动修复底层视觉
+比较漏检。当前应把该模式视为可 A/B 的候选流程，扩大人工标注评测后再决定全量采用。

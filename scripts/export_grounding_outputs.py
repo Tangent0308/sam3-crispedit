@@ -135,6 +135,26 @@ def _requests(records: Sequence[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:
             }
 
 
+def _observations(records: Sequence[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:
+    for record in records:
+        payload = record.get("grounding", {})
+        observation = payload.get("observation") if isinstance(payload, dict) else None
+        if not isinstance(observation, dict):
+            continue
+        yield {
+            "canonical_type": record["canonical_type"],
+            "shard": record["shard"],
+            "row_idx": record["row_idx"],
+            "instruction": record["instruction"],
+            "parse_ok": bool(observation.get("parse_ok", False)),
+            "error": str(observation.get("error", "")),
+            "raw_text": str(observation.get("raw_text", "")),
+            "parsed_json": json.dumps(
+                observation.get("parsed", {}), ensure_ascii=False, separators=(",", ":")
+            ),
+        }
+
+
 def _write_jsonl(path: Path, records: Iterable[Dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
@@ -167,6 +187,26 @@ def _write_markdown(path: Path, records: Sequence[Dict[str, Any]]) -> None:
                 ]
             )
             payload = record.get("grounding", {})
+            observation = payload.get("observation") if isinstance(payload, dict) else None
+            if isinstance(observation, dict):
+                observation_raw = str(observation.get("raw_text", ""))
+                lines.extend(
+                    [
+                        "#### pass 1: realized-change observation",
+                        "",
+                        f"- parse: `{observation.get('parse_ok', False)}`; error: `{observation.get('error', '')}`",
+                        "- parsed observation:",
+                        "",
+                        "```json",
+                        json.dumps(observation.get("parsed", {}), ensure_ascii=False, indent=2),
+                        "```",
+                        "",
+                        "- raw model response:",
+                        "",
+                    ]
+                )
+                fence = _fence(observation_raw)
+                lines.extend([f"{fence}text", observation_raw, fence, ""])
             for request in payload.get("requests", []) if isinstance(payload, dict) else []:
                 image_name = str(request.get("grounding_image", ""))
                 raw_text = str(request.get("raw_text", ""))
@@ -222,17 +262,28 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(request_rows)
+    observation_rows = list(_observations(records))
+    with (args.output_dir / "change_observations.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+        fields = [
+            "canonical_type", "shard", "row_idx", "instruction", "parse_ok", "error",
+            "raw_text", "parsed_json",
+        ]
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(observation_rows)
     _write_markdown(args.output_dir / "grounding_outputs.md", records)
 
     summary = {
         "rows": len(records),
         "requests": len(request_rows),
+        "observations": len(observation_rows),
         "categories": dict(sorted(Counter(record["canonical_type"] for record in records).items())),
         "statuses": dict(sorted(Counter(record["grounding_status"] for record in records).items())),
         "qc_flags": dict(sorted(Counter(record["qc_flag"] for record in records).items())),
         "files": [
             "grounding_outputs.jsonl",
             "grounding_requests.csv",
+            "change_observations.csv",
             "grounding_outputs.md",
             "by_category/",
         ] + (["grounding_outputs.json"] if args.write_json_array else []),
