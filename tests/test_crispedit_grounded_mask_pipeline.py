@@ -10,10 +10,15 @@ from crispedit_grounded_mask_pipeline import (
     segment_grounded_box,
 )
 from crispedit_grounding import (
+    TWO_PASS_PROMPT_VERSION,
+    build_change_observation_prompt,
+    build_grounding_prompt,
     build_grounding_requests,
     canonicalize_type,
     grounding_is_complete,
+    parse_change_observation,
     parse_grounding_output,
+    prompt_version_for_mode,
 )
 from scripts.build_mask_bad_case_selection import extract_mask_cases
 
@@ -27,6 +32,56 @@ def test_grounding_routes_and_asymmetric_replace():
     ]
     assert grounding_is_complete("replace", {"source": [], "target": [{"ref": "hands"}]})
     assert not grounding_is_complete("motion", {"source": [], "target": [{"ref": "hand"}]})
+
+
+def test_two_pass_observation_prompt_and_grounding_checklist():
+    prompt = build_change_observation_prompt("color", "make the arms darker")
+    assert "images are the source of truth" in prompt
+    assert "arms and the face" in prompt
+    assert "face/head, neck, each arm/hand" in prompt
+    assert "checked_regions" in prompt
+    observation = {
+        "edit_summary": "arms and face became darker",
+        "changes": [
+            {
+                "source_ref": "man's face",
+                "target_ref": "man's face",
+                "change": "skin tone became darker",
+                "instruction_aligned": False,
+            }
+        ],
+    }
+    grounding_prompt = build_grounding_prompt("color", "make the arms darker", "source", observation)
+    assert "man's face" in grounding_prompt
+    assert "collateral change" in grounding_prompt
+    assert prompt_version_for_mode("two-pass") == TWO_PASS_PROMPT_VERSION
+
+
+def test_change_observation_parser_accepts_fence_and_normalizes():
+    raw = """```json
+{"edit_summary":"arms and face darkened","changes":[
+  {"source_ref":"man's arms","target_ref":"dark arms","change":"skin became darker","instruction_aligned":true},
+  {"source_ref":"man's face","target_ref":"dark face","change":"face also became darker","instruction_aligned":"no"}
+]}
+```"""
+    assert parse_change_observation(raw) == {
+        "edit_summary": "arms and face darkened",
+        "checked_regions": [],
+        "changes": [
+            {
+                "source_ref": "man's arms",
+                "target_ref": "dark arms",
+                "change": "skin became darker",
+                "instruction_aligned": True,
+            },
+            {
+                "source_ref": "man's face",
+                "target_ref": "dark face",
+                "change": "face also became darker",
+                "instruction_aligned": False,
+            },
+        ],
+    }
 
 
 def test_grounding_parser_accepts_fence_label_and_clips():

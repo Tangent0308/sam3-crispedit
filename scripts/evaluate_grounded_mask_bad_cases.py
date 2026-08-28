@@ -37,6 +37,25 @@ def read_parquet_row(path: Path, row_idx: int, columns: Iterable[str]) -> Dict:
     raise IndexError(f"row {row_idx} out of range for {path}")
 
 
+def read_area_by_row_idx(path: Path, row_idx: int) -> float:
+    """Read area_frac from either a dense shard or a sparse review output.
+
+    Sparse evaluation parquet files contain one or a few rows and preserve the
+    original dataset position in an explicit ``row_idx`` column.  Treating that
+    value as the physical parquet offset works for dense outputs but fails for
+    sparse A/B runs.
+    """
+
+    parquet = pq.ParquetFile(path)
+    if "row_idx" not in parquet.schema.names:
+        return float(read_parquet_row(path, row_idx, ["area_frac"])["area_frac"])
+    for batch in parquet.iter_batches(batch_size=256, columns=["row_idx", "area_frac"]):
+        for row in batch.to_pylist():
+            if int(row["row_idx"]) == row_idx:
+                return float(row["area_frac"])
+    raise IndexError(f"row_idx={row_idx} not found in sparse output {path}")
+
+
 def _area_stats(values: List[float]) -> Dict:
     clean = [float(value) for value in values if value is not None]
     if not clean:
@@ -66,8 +85,7 @@ def evaluate(mask_dir: Path, selection_path: Path, old_mask_dir: Path | None) ->
     if old_mask_dir is not None:
         for shard, row_idx in expected:
             old_path = old_mask_dir / shard
-            old = read_parquet_row(old_path, row_idx, ["area_frac"])
-            old_areas[(shard, row_idx)] = float(old["area_frac"])
+            old_areas[(shard, row_idx)] = read_area_by_row_idx(old_path, row_idx)
 
     cases = []
     for row in sorted(rows, key=lambda item: (item["raw_type"], item["shard"], item["row_idx"])):
