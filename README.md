@@ -27,6 +27,8 @@ prefilter 的方法、实现、运行命令、8 卡实验、全量结果和边�
 - `crispedit_mllm_grounding.py`：新 mask 流程 S1，Qwen3.5 输出 ref + bbox；
 - `crispedit_grounded_mask_runner.py`：新 mask 流程 S2，PVS + bbox-filtered PCS → box；
 - `crispedit_grounded_mask_pipeline.py`：无 pixel-diff 的单样本 mask 合成逻辑。
+- `scripts/export_grounding_outputs.py`：将 Qwen grounding parquet 导出为 JSONL/CSV/Markdown；
+- `scripts/build_category_previews.py`：从原图重建按类别高清 mask review 图。
 
 新 mask 流程的设计、字段和 8 卡命令见
 [docs/MASK_GROUNDING_PIPELINE.md](docs/MASK_GROUNDING_PIPELINE.md)。旧的
