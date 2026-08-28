@@ -148,7 +148,7 @@ python scripts/build_category_previews.py \
   --columns 1
 ```
 
-输出目录中每个类别对应一张 PNG；默认每个面板宽 840px、每个类别一张纵向大图，便于
+输出目录中每个类别对应一张 PNG；默认每个面板宽 640px、每个类别一张纵向图，便于
 放大检查 MLLM box 和最终 source-coordinate mask。
 
 本次 47 条回归已从临时运行目录复制到持久路径：
