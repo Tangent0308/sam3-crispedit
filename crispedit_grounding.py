@@ -13,8 +13,8 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 
 SINGLE_PASS_PROMPT_VERSION = "qwen35_grounding_v2"
-TWO_PASS_PROMPT_VERSION = "qwen35_observe_ground_v3"
-OBSERVATION_PROMPT_VERSION = "qwen35_change_observation_v2"
+TWO_PASS_PROMPT_VERSION = "qwen35_realized_edit_region_ground_v6"
+OBSERVATION_PROMPT_VERSION = "qwen35_realized_edit_spec_v4"
 # Two-pass is the default on the mask-improved branch.  The runner still
 # exposes v2 single-pass for controlled A/B and backwards-compatible runs.
 PROMPT_VERSION = TWO_PASS_PROMPT_VERSION
@@ -42,6 +42,14 @@ GROUNDING_ROUTES = {
 }
 
 _NON_VISUAL_REF_RE = re.compile(r"^(?:the\s+)?(?:absence|lack)\s+of\b", re.IGNORECASE)
+_SUBJECT_SURFACE_RE = re.compile(
+    r"\b(?:skin|complexion|fur|feathers?|hair|scales?)\b", re.IGNORECASE
+)
+_LOCAL_BODY_EDIT_RE = re.compile(
+    r"\b(?:arms?|hands?|faces?|heads?|necks?|ears?|legs?|feet|foot|bodies|"
+    r"skin|complexion|fur|feathers?|hair|scales?)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -69,16 +77,45 @@ def grounding_images(raw_type: object) -> Sequence[str]:
     return GROUNDING_ROUTES[canonicalize_type(raw_type)]
 
 
+def _visible_ref(value: object) -> str:
+    ref = str(value or "").strip()
+    if ref.lower() in {
+        "empty",
+        "none",
+        "nothing",
+        "n/a",
+        "na",
+        "not present",
+        "no object",
+        "absent",
+        "removed",
+        "gone",
+        "no longer present",
+    }:
+        return ""
+    return ref
+
+
 def _task_rule(etype: str, grounding_image: str, has_observation: bool = False) -> str:
     if etype == "add":
+        if grounding_image == "source":
+            return (
+                "Find source-side content that the prior comparison says was also removed or "
+                "replaced during this add edit. Do not box empty space."
+            )
         return (
-            "Find every newly added object or decoration in Image 2. Do not box a "
-            "similar object that was already present in Image 1."
+            "Find the complete spatial region occupied by newly added content in Image 2. "
+            "Do not include similar content already present in Image 1."
         )
     if etype == "remove":
+        if grounding_image == "target":
+            return (
+                "Find target-side content that the prior comparison says was also added or "
+                "replaced during this remove edit. Do not box empty space."
+            )
         return (
-            "Find every object or decoration in Image 1 that is removed in Image 2. "
-            "Include all repeated or dispersed removed instances."
+            "Find the complete spatial region occupied in Image 1 by content removed from "
+            "Image 2. Include all clearly removed elements."
         )
     if etype == "replace":
         side = "old/replaced content" if grounding_image == "source" else "new replacement content"
@@ -88,9 +125,12 @@ def _task_rule(etype: str, grounding_image: str, has_observation: bool = False) 
         if has_observation:
             return (
                 "Find every complete object or sub-part on Image 1 whose color/material/texture "
-                "actually changed according to the prior comparison. Treat the observation as a "
-                "recall checklist: include clearly observed extra changed parts even when the "
-                "instruction did not name them, and keep distinct parts as distinct items."
+                "actually changed. Independently recheck every visible same-material subject "
+                "surface before boxing: for a skin-tone edit this explicitly includes face/head, "
+                "neck, arms/hands, and exposed legs even if pass 1 omitted or marked one unchanged. "
+                "Use matching detail tiles as evidence, and add a part only when its source/result "
+                "appearance changes in the same direction. Emit separate part-level refs and cover "
+                "the complete extent of each spatially separated changed region."
             )
         return (
             "Find the complete object whose color/material/texture is changed. Box the "
@@ -101,9 +141,9 @@ def _task_rule(etype: str, grounding_image: str, has_observation: bool = False) 
         if has_observation:
             side = "Image 1 before the change" if grounding_image == "source" else "Image 2 after the change"
             return (
-                f"Find on {side} every body part and directly interacted object listed by the "
-                "prior comparison. Include clearly observed collateral pose/interaction changes "
-                "even if they are outside the wording of the instruction."
+                f"Find on {side} the body part, object, and immediate interaction footprint that "
+                "the prior visual comparison identifies as actually edited. Do not expand a local "
+                "pose edit to the whole person merely because pixels were regenerated."
             )
         return (
             "Find the body parts and directly interacted objects whose pose or position changes "
@@ -120,19 +160,23 @@ def _task_rule(etype: str, grounding_image: str, has_observation: bool = False) 
 
 
 def build_change_observation_prompt(raw_type: object, instruction: object) -> str:
-    """Ask the first pass to describe the realized semantic edit without boxes."""
+    """Ask pass 1 for a precise, image-grounded specification of the realized edit."""
 
     etype = canonicalize_type(raw_type)
     type_audit = ""
     if etype == "color":
         type_audit = (
-            "\nColor/material audit: before writing the changes list, compare the same attribute "
-            "across every visually related region of the edited subject. For a person/animal, "
-            "explicitly check face/head, neck, each arm/hand, torso/clothing, and visible legs. "
-            "A same-attribute spillover on a region outside the instruction is a real change and "
-            "must be listed. Do not infer unchanged merely because the instruction omits it. "
-            "When skin/color is intentionally changed on one part, do not dismiss a credible "
-            "same-direction tone change on another part as illumination drift.\n"
+            "\nMandatory independent color/material audit: temporarily ignore the instruction's "
+            "claimed spatial scope and compare matching source/result regions made of the same "
+            "subject material. Use the enlarged matching detail tiles when supplied. For a "
+            "person/animal, explicitly check visible face/head, neck, each arm/hand, and exposed "
+            "legs/feet; do not invent torso skin hidden by clothing. For every checked region, "
+            "write source_appearance and target_appearance before deciding changed. A region may "
+            "be changed=false only after stating what color/material is visibly observed on both "
+            "sides. List a clear same-direction spillover even if the instruction omits it, but "
+            "do not promote weak global lighting drift. If multiple disconnected exposed surfaces "
+            "changed, emit separate change items for face/head, arms/hands, and legs/feet. NEVER "
+            "replace these part-level items with a whole-person sam_ref.\n"
         )
     return f"""You are comparing a source image and its edited result before spatial grounding.
 
@@ -140,31 +184,50 @@ Image 1 is the source image. Image 2 is the edited result.
 Edit type: {etype}
 Instruction: {str(instruction or '').strip()}
 
-Inspect both images carefully and report what visibly and semantically changed in the realized
-result. The instruction is useful intent, but the images are the source of truth.
+Inspect both images carefully and rewrite the instruction into a precise specification of what
+actually changed in the realized result. The instruction is a useful hypothesis about intent, but
+the paired images are the source of truth. Your description will be used by another model to draw
+complete edit-region boxes, so resolve vague or image-inconsistent wording now.
 {type_audit}
 
 Rules:
-- Include every clear edited object or local region, including collateral/overreach changes not
-  named by the instruction. Example: if arms and the face both become darker, list arms and face
-  as separate changes even when the instruction only names arms.
-- Describe regions at maskable granularity: object, body part, decoration, foreground subject,
-  background region, or directly interacted prop. Separate spatially/semantically distinct parts.
+- State the concrete visual entity or region, its before/after appearance, and its complete spatial
+  extent. The edit_summary must describe the realized edit rather than copy the instruction.
+- Include every clear edited object or local region, including a clear instruction-external change.
+  Example: if arms and the face both become darker, list both even if only the arms were requested.
+- Distinguish one object/region, one nearby group, and genuinely separate regions. Many small,
+  scattered but nearby points (piercings, petals, stars, spots, flowers, debris, etc.) are ONE
+  nearby group; describe the whole group's layout and outer extent instead of enumerating dots.
+- Separate items only when they form spatially well-separated edit regions or require different
+  visual noun phrases. Do not split one contiguous object into incidental sub-parts.
+- Different semantic categories that need different segmentation phrases remain separate even when
+  they touch (for example a hand and a tablet, or an arm and a tool). For color/material edits,
+  also separate visibly disconnected changed surfaces such as face/neck versus arms/hands; clothing
+  or background between them must not be absorbed into one whole-person change.
 - For additions use an empty source_ref; for removals use an empty target_ref. For replacement,
   motion, color, material, and texture edits describe both sides when visible.
-- Ignore JPEG artifacts, tiny alignment/resampling noise, and weak global illumination drift unless
-  global illumination/style is the requested edit.
-- Use short visual noun phrases for source_ref and target_ref. Do not output coordinates or boxes.
+- For motion, describe the actually moved body/object and immediate interaction footprint. Do not
+  label the whole person as changed solely because pose-conditioned reconstruction differs subtly.
+- Ignore JPEG artifacts, alignment/resampling noise, weak reconstruction drift, and weak global
+  illumination drift unless that global change is the requested edit.
+- source_ref and target_ref identify what is visible on each side. sam_ref is a concise 2-8 word
+  visual noun phrase suitable for segmentation. It must include distinguishing visible attributes
+  such as color/material and the concrete head noun (for example "rows of small white boats" or
+  "pink roses and white blooms"). Avoid context/location phrases such as "in marina", "on arch",
+  or "around woman", and avoid vague labels such as "mixed objects". region_description gives
+  precise location, layout, and extent. Do not output coordinates or boxes.
+- Each sam_ref must name exactly one segmentable semantic category. A combined phrase such as
+  "hands holding tablet", "hand and pen", or "person with bicycle" is invalid: create separate
+  change items/refs for the body part and prop.
 - Populate checked_regions before changes. It must include the named edit region and plausible
   same-subject spillover regions you visually compared. Set changed from the images, not from the
   instruction. Every checked region with changed=true must also appear in changes.
-- This is recall-first annotation: when a related region has a credible visible change, mark it
-  changed=true; use changed=false only when you are highly confident it stayed visually identical.
-- A response that simply restates the instruction without auditing other visible regions is wrong.
+- Prefer a complete description of clear changes, but do not manufacture edits from subtle unrelated
+  generative differences. A response that merely restates the instruction is wrong.
 - Output JSON only, with no markdown or explanation.
 
 Required schema:
-{{"edit_summary":"one sentence","checked_regions":[{{"ref":"visual region checked","changed":true}}],"changes":[{{"source_ref":"old visual region or empty","target_ref":"new visual region or empty","change":"what visibly changed","instruction_aligned":true}}]}}
+{{"edit_summary":"precise realized edit in one sentence","checked_regions":[{{"ref":"visual region checked","source_appearance":"literal source appearance","target_appearance":"literal result appearance","changed":true}}],"changes":[{{"source_ref":"old visual entity/region or empty","target_ref":"new visual entity/region or empty","sam_ref":"one specific segmentable category","region_description":"exact location, layout, and complete extent","region_layout":"single|nearby_group|separate_regions","change":"specific before-to-after visual change","instruction_aligned":true}}]}}
 """
 
 
@@ -176,6 +239,66 @@ def _observation_context(observation: Any) -> str:
     return json.dumps(observation, ensure_ascii=False, separators=(",", ":"))
 
 
+def _subject_surface_family(instruction: object, observation: Any) -> str:
+    # This high-recall audit is intentionally narrow.  Pass-1 observations for
+    # an ordinary whole-object recolor often mention incidental body-like parts
+    # (for example an alien's head and hands); allowing that generated text to
+    # select the route can shrink a correct whole-object box to those parts.
+    # Route selection therefore comes only from the user's requested surface.
+    instruction_text = str(instruction or "")
+    if not _LOCAL_BODY_EDIT_RE.search(instruction_text):
+        return ""
+    matches = [
+        match.group(0).lower()
+        for match in _SUBJECT_SURFACE_RE.finditer(instruction_text)
+    ]
+    return matches[0] if matches else ""
+
+
+def _build_subject_surface_grounding_prompt(surface_family: str, observation: Any) -> str:
+    known_changes = []
+    if isinstance(observation, dict):
+        known_changes = observation.get("changes", [])
+    known_refs = []
+    for change in known_changes:
+        if not isinstance(change, dict):
+            continue
+        ref = str(
+            change.get("sam_ref")
+            or change.get("source_ref")
+            or change.get("target_ref")
+            or ""
+        ).strip()
+        if ref and ref not in known_refs:
+            known_refs.append(ref)
+    known_text = json.dumps(known_refs, ensure_ascii=False, separators=(",", ":"))
+    return f"""Independently ground a same-subject surface/material recoloring in Image 1.
+
+Image 1 is the source full image. Image 2 is the edited result full image.
+Surface/material family to compare: {surface_family}
+REQUIRED known changed refs from pass 1: {known_text}
+
+Do not assume the original instruction's named spatial scope is complete, and do not inherit a
+previous unchanged verdict. First output a complete bbox for EVERY required known ref above; none
+may be dropped. Then independently compare matching source/result appearances to ADD any omitted
+same-surface region, using the enlarged paired detail tiles as evidence. The required refs are a
+recall floor, not a complete list. For a person or animal, check every VISIBLE region made of
+this same surface/material: face/head, ears, neck, left and right arms/hands, and exposed legs/feet.
+Do not invent skin/fur hidden by clothing.
+
+Output one item for each spatially disconnected part whose attribute clearly changes in the same
+direction. Use part-level SAM phrases such as "man's face and neck" or "man's bare arms and hands";
+never box the whole person. Each conservative bbox must contain the part's complete visible extent,
+including fingers and thin extremities, with a small safety margin. Coordinates always refer to the
+FULL Image 1 on the 0-1000 scale, never to a detail tile. If only one part truly changes, return only
+that part, except that every REQUIRED known ref must still be returned. Before finalizing, verify that
+each required ref has a corresponding output item. Output JSON only, no explanation.
+
+Required schema:
+[{{"ref":"man's face and neck","bbox_2d":[x1,y1,x2,y2],"region_mode":"object","mask_density":"dense"}}]
+"""
+
+
 def build_grounding_prompt(
     raw_type: object,
     instruction: object,
@@ -183,16 +306,30 @@ def build_grounding_prompt(
     observation: Any = None,
 ) -> str:
     etype = canonicalize_type(raw_type)
-    if grounding_image not in GROUNDING_ROUTES[etype]:
+    if grounding_image not in {"source", "target"} or (
+        grounding_image not in GROUNDING_ROUTES[etype] and observation is None
+    ):
         raise ValueError(f"{grounding_image!r} is not routed for {etype}")
     selected = "Image 1 (source)" if grounding_image == "source" else "Image 2 (result)"
+    supplemental_side = grounding_image not in GROUNDING_ROUTES[etype]
+    instruction_label = (
+        "Original instruction (context only; do NOT ground its absent opposite-side object)"
+        if supplemental_side
+        else "Instruction"
+    )
     observation_text = _observation_context(observation)
+    surface_family = _subject_surface_family(instruction, observation)
+    if etype == "color" and grounding_image == "source" and surface_family:
+        return _build_subject_surface_grounding_prompt(surface_family, observation)
     observation_block = (
-        "\nPrior source/result comparison (use this as a recall checklist):\n"
+        "\nPrior source/result comparison (a realized-edit specification):\n"
         f"{observation_text}\n"
-        "Ground all clear observed changes relevant to the selected image, including any listed "
-        "collateral change not explicitly named by the instruction. Do not invent changes absent "
-        "from both the images and checklist.\n"
+        "Use its concrete entity, region_description, grouping, and sam_ref, while verifying them "
+        "against the two images. Ground clear realized changes relevant to the selected image; do "
+        "not revert to vague instruction wording or invent changes absent from the images. Only "
+        "the change items present in THIS specification are applicable to the selected side. An "
+        "earlier conversational item omitted here because it exists only on the opposite image "
+        "must not be boxed.\n"
         if observation_text
         else ""
     )
@@ -200,30 +337,53 @@ def build_grounding_prompt(
 
 Image 1 is the source image. Image 2 is the edited result.
 Edit type: {etype}
-Instruction: {str(instruction or '').strip()}
+{instruction_label}: {str(instruction or '').strip()}
 {observation_block}
 
 Only produce boxes in {selected}. Use the other image only as visual evidence for what changed.
 Task: {_task_rule(etype, grounding_image, bool(observation_text))}
 
 Rules:
-- Return one JSON item per distinct relevant instance. Include every relevant repeated instance.
-- Use a loose aggregate box only when there are more than 8 tiny/dense instances or the instances
-  truly cannot be counted. Do not replace a small set of distinct instances with one large region.
-- Sparse or hollow edits need special care: for borders/frames, piercings, tattoos, scattered
-  petals, and decorations around a subject, box each visible instance when there are at most 8.
-  When an aggregate is unavoidable, tightly enclose the complete set, including its extremes.
+- Return one JSON item per SPATIALLY SEPARATED EDIT REGION, not per object instance or tiny point.
+- If multiple small edited elements are scattered but spatially near or form one local pattern,
+  ALWAYS emit ONE aggregate_region box enclosing the entire group, regardless of count. Examples:
+  facial piercings, a spray of petals, a flower halo, stars/spots, crumbs, or small removed marks.
+  Never draw one box per dot in such a group.
+- Use separate boxes only for clearly well-separated clusters/objects with substantial empty space
+  between them. Repeated elements that form one band, halo, patch, row, or local area are one region.
+- Spatially touching DIFFERENT semantic categories still need separate boxes and refs when one SAM
+  phrase cannot name both precisely. In particular, do not combine hands/arms with a tablet, bowl,
+  clipboard, pen, drill, or other interacted prop. Do not combine disconnected face/neck skin with
+  arms/hands into a whole-person box.
+- Each ref must name exactly ONE segmentable semantic category. Phrases mixing categories with
+  "and", "with", or "holding" (for example "hands holding tablet") are invalid. Emit overlapping
+  hand and tablet boxes with separate refs when both changed. Color/material body edits must use
+  part refs such as "man's face and neck" and "man's bare arms and hands", never "man/person".
+- A bbox is a conservative SAM search region, not the final mask. It MUST be a superset of the full
+  edited footprint. Inspect the leftmost, rightmost, topmost, and bottommost edited pixels/elements,
+  then add a small safety margin. Missing any edited part is worse than modest extra context.
+- For a normal object or body part, include its complete contour, thin extremities, and any clearly
+  co-changing shadow/reflection. Do not crop at the image edge; use 0 or 1000 when appropriate.
 - Each ref must be a short, SAM-friendly visual noun phrase of 2-8 words. Name only the visual
-  target (for example "pastel blue flowers" or "facial piercings"); do not repeat spatial wording
-  such as "surrounding the girl" because the bbox already expresses location.
-- Boxes must be loose enough to include the full object, thin extremities, and any clearly
-  co-changing shadow/reflection. Coverage is more important than tightness.
+  target (for example "rows of small white boats", "pink roses and white blooms", or "facial
+  piercings"). Include visible color/material/category attributes that distinguish the edited target.
+  Never use context/location nouns such as marina/arch/garden/person to substitute for appearance,
+  and do not repeat spatial wording such as "surrounding the girl". Prefer a specific prior sam_ref.
+- Set region_mode="aggregate_region" for a nearby multi-element group; otherwise use "object".
+- Set mask_density="sparse" when separate small elements have visible gaps between their masks
+  (piercings, petals, stars, small flowers, birds, etc.); set it to "dense" for a contiguous or
+  overlapping cluster/bed/solid region; use "object" for a normal single object.
+- Avoid nested duplicate boxes for the same edit. The region set should cover every described clear
+  edit while remaining faithful to the selected image.
 - Coordinates are relative to the selected image on a 0-1000 scale, independent of image resize.
 - If the requested edit target truly is not visible in the selected image, return [].
+- On a supplemental opposite-side request, return ONLY concrete entities named on that side of the
+  provided specification. A removed source entity is absent from Image 2 and must never be boxed
+  there; likewise a target-only addition does not exist in Image 1.
 - Output JSON only. No markdown and no explanation.
 
 Required schema:
-[{{"ref":"front black chair","bbox_2d":[x1,y1,x2,y2]}}]
+[{{"ref":"facial piercings","bbox_2d":[x1,y1,x2,y2],"region_mode":"aggregate_region","mask_density":"sparse"}}]
 """
 
 
@@ -232,10 +392,50 @@ def build_grounding_requests(
     instruction: object,
     observation: Any = None,
 ) -> List[GroundingRequest]:
-    return [
-        GroundingRequest(image, build_grounding_prompt(raw_type, instruction, image, observation))
-        for image in grounding_images(raw_type)
-    ]
+    etype = canonicalize_type(raw_type)
+    default_images = list(grounding_images(etype))
+    images = list(default_images)
+    # Add/remove samples occasionally realize a clear collateral operation in
+    # the opposite direction (e.g. remove piercings but add earrings).  Route
+    # only explicit source-only/target-only or instruction-external evidence,
+    # avoiding redundant target grounding for ordinary color/motion changes.
+    if etype in {"add", "remove"} and isinstance(observation, dict):
+        for change in observation.get("changes", []):
+            if not isinstance(change, dict):
+                continue
+            source_ref = _visible_ref(change.get("source_ref"))
+            target_ref = _visible_ref(change.get("target_ref"))
+            if source_ref and not target_ref and "source" not in images:
+                images.append("source")
+            if target_ref and not source_ref and "target" not in images:
+                images.append("target")
+    requests = []
+    for image in images:
+        context = observation
+        if isinstance(observation, dict) and isinstance(observation.get("changes"), list):
+            side_key = f"{image}_ref"
+            other_key = "target_ref" if image == "source" else "source_ref"
+            supplemental = image not in default_images
+            applicable = []
+            for change in observation["changes"]:
+                if not isinstance(change, dict) or not _visible_ref(change.get(side_key)):
+                    continue
+                if supplemental and _visible_ref(change.get(other_key)) and bool(
+                    change.get("instruction_aligned", True)
+                ):
+                    continue
+                applicable.append(change)
+            context = {
+                "edit_summary": observation.get("edit_summary", ""),
+                "changes": applicable,
+            }
+        requests.append(
+            GroundingRequest(
+                image,
+                build_grounding_prompt(raw_type, instruction, image, context),
+            )
+        )
+    return requests
 
 
 def _candidate_json_objects(text: str) -> Iterable[str]:
@@ -280,13 +480,46 @@ def parse_change_observation(text: str) -> Dict:
     for candidate in _candidate_json_objects(text):
         try:
             value = json.loads(candidate)
-            if isinstance(value, dict):
+            # A malformed outer object may still contain valid nested objects.
+            # Do not mistake one checked-region/change item for the response.
+            if isinstance(value, dict) and isinstance(value.get("changes"), list):
                 parsed = value
                 break
         except (TypeError, ValueError) as exc:
             last_error = exc
     if parsed is None:
-        raise ValueError(f"no JSON observation object found: {last_error}")
+        # Qwen can omit a brace inside the verbose checked_regions list while
+        # still emitting a complete, valid changes array.  The latter is the
+        # trusted input to pass 2, so recover it and discard only the damaged
+        # audit section.  Restrict the search to text after the `changes` key so
+        # a valid checked_regions array is never misinterpreted as changes.
+        changes_match = re.search(r'"changes"\s*:', str(text or ""))
+        if changes_match:
+            suffix = str(text or "")[changes_match.end() :]
+            for candidate in _candidate_json_arrays(suffix):
+                try:
+                    value = json.loads(candidate)
+                    if isinstance(value, list) and value and all(
+                        isinstance(item, dict) for item in value
+                    ):
+                        summary = ""
+                        summary_match = re.search(
+                            r'"(?:edit_summary|summary)"\s*:\s*'
+                            r'("(?:\\.|[^"\\])*")',
+                            str(text or ""),
+                        )
+                        if summary_match:
+                            summary = str(json.loads(summary_match.group(1))).strip()
+                        parsed = {
+                            "edit_summary": summary,
+                            "checked_regions": [],
+                            "changes": value,
+                        }
+                        break
+                except (TypeError, ValueError) as exc:
+                    last_error = exc
+        if parsed is None:
+            raise ValueError(f"no JSON observation object found: {last_error}")
     summary = str(parsed.get("edit_summary", parsed.get("summary", ""))).strip()
     checked_regions = []
     raw_checks = parsed.get("checked_regions", [])
@@ -301,7 +534,12 @@ def parse_change_observation(text: str) -> Dict:
         changed = item.get("changed", False)
         if isinstance(changed, str):
             changed = changed.strip().lower() in {"true", "yes", "1"}
-        checked_regions.append({"ref": ref, "changed": bool(changed)})
+        checked = {"ref": ref, "changed": bool(changed)}
+        if "source_appearance" in item:
+            checked["source_appearance"] = str(item.get("source_appearance", "")).strip()
+        if "target_appearance" in item:
+            checked["target_appearance"] = str(item.get("target_appearance", "")).strip()
+        checked_regions.append(checked)
     changes = parsed.get("changes")
     if not isinstance(changes, list):
         raise ValueError("observation changes must be a list")
@@ -309,8 +547,23 @@ def parse_change_observation(text: str) -> Dict:
     for index, item in enumerate(changes):
         if not isinstance(item, dict):
             raise ValueError(f"observation change {index} is not an object")
-        source_ref = str(item.get("source_ref", "")).strip()
-        target_ref = str(item.get("target_ref", "")).strip()
+        source_ref = _visible_ref(item.get("source_ref", ""))
+        target_ref = _visible_ref(item.get("target_ref", ""))
+        sam_ref = str(item.get("sam_ref", source_ref or target_ref)).strip()
+        region_description = str(
+            item.get("region_description", item.get("spatial_extent", ""))
+        ).strip()
+        raw_layout = str(item.get("region_layout", "single")).strip().lower()
+        layout_aliases = {
+            "single": "single",
+            "single_object": "single",
+            "object": "single",
+            "nearby_group": "nearby_group",
+            "aggregate": "nearby_group",
+            "aggregate_region": "nearby_group",
+            "separate_regions": "separate_regions",
+        }
+        region_layout = layout_aliases.get(raw_layout, "single")
         change = str(item.get("change", item.get("description", ""))).strip()
         if not source_ref and not target_ref:
             raise ValueError(f"observation change {index} has no visible source/target ref")
@@ -323,6 +576,9 @@ def parse_change_observation(text: str) -> Dict:
             {
                 "source_ref": source_ref,
                 "target_ref": target_ref,
+                "sam_ref": sam_ref,
+                "region_description": region_description,
+                "region_layout": region_layout,
                 "change": change,
                 "instruction_aligned": bool(aligned),
             }
@@ -472,7 +728,20 @@ def parse_grounding_output(text: str) -> List[Dict]:
         # that side; the opposite-side replacement footprint remains valid.
         if _NON_VISUAL_REF_RE.search(ref):
             continue
-        results.append({"ref": ref, "bbox_2d": [round(value, 3) for value in coords]})
+        result = {"ref": ref, "bbox_2d": [round(value, 3) for value in coords]}
+        if "region_mode" in item:
+            raw_mode = str(item.get("region_mode", "object")).strip().lower()
+            result["region_mode"] = (
+                "aggregate_region"
+                if raw_mode in {"aggregate", "aggregate_region", "nearby_group", "group"}
+                else "object"
+            )
+        if "mask_density" in item:
+            raw_density = str(item.get("mask_density", "object")).strip().lower()
+            result["mask_density"] = (
+                raw_density if raw_density in {"sparse", "dense", "object"} else "object"
+            )
+        results.append(result)
     return results
 
 
