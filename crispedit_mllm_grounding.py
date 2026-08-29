@@ -104,10 +104,13 @@ GROUND_SCHEMA = pa.schema(
         ("prefilter_verdict", pa.string()),
         ("prefilter_confidence", pa.float64()),
         ("prefilter_method", pa.string()),
+        ("prefilter_evidence_schema", pa.string()),
         ("prefilter_model_name", pa.string()),
         ("prefilter_run_id", pa.string()),
         ("filter_decision", pa.string()),
         ("prefilter_reason", pa.string()),
+        ("filter_reason_codes", pa.string()),
+        ("filter_mismatch_score", pa.float64()),
     ]
 )
 
@@ -318,19 +321,27 @@ def prefilter_fields(row: Optional[Dict]) -> Dict:
             "prefilter_verdict": "NOT_RUN",
             "prefilter_confidence": math.nan,
             "prefilter_method": "",
+            "prefilter_evidence_schema": "",
             "prefilter_model_name": "",
             "prefilter_run_id": "",
             "filter_decision": "keep",
             "prefilter_reason": "",
+            "filter_reason_codes": "",
+            "filter_mismatch_score": 0.0,
         }
     return {
         "prefilter_verdict": str(row.get("prefilter_verdict", "")),
         "prefilter_confidence": float(row.get("prefilter_confidence", math.nan)),
         "prefilter_method": str(row.get("prefilter_method", "")),
+        "prefilter_evidence_schema": str(row.get("prefilter_evidence_schema", "")),
         "prefilter_model_name": str(row.get("prefilter_model_name", "")),
         "prefilter_run_id": str(row.get("prefilter_run_id", "")),
-        "filter_decision": str(row.get("filter_decision", "drop")),
+        "filter_decision": str(
+            row.get("filter_decision", row.get("prefilter_decision", "drop"))
+        ),
         "prefilter_reason": str(row.get("prefilter_reason", "")),
+        "filter_reason_codes": str(row.get("filter_reason_codes", "")),
+        "filter_mismatch_score": float(row.get("filter_mismatch_score", 0.0)),
     }
 
 

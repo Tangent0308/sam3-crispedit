@@ -92,10 +92,13 @@ MASK_SCHEMA = pa.schema(
         ("prefilter_verdict", pa.string()),
         ("prefilter_confidence", pa.float64()),
         ("prefilter_method", pa.string()),
+        ("prefilter_evidence_schema", pa.string()),
         ("prefilter_model_name", pa.string()),
         ("prefilter_run_id", pa.string()),
         ("filter_decision", pa.string()),
         ("prefilter_reason", pa.string()),
+        ("filter_reason_codes", pa.string()),
+        ("filter_mismatch_score", pa.float64()),
     ]
 )
 
@@ -176,10 +179,17 @@ def _copy_metadata(ground_row: Dict) -> Dict:
         "prefilter_verdict": str(ground_row.get("prefilter_verdict", "")),
         "prefilter_confidence": float(ground_row.get("prefilter_confidence", math.nan)),
         "prefilter_method": str(ground_row.get("prefilter_method", "")),
+        "prefilter_evidence_schema": str(
+            ground_row.get("prefilter_evidence_schema", "")
+        ),
         "prefilter_model_name": str(ground_row.get("prefilter_model_name", "")),
         "prefilter_run_id": str(ground_row.get("prefilter_run_id", "")),
         "filter_decision": str(ground_row.get("filter_decision", "")),
         "prefilter_reason": str(ground_row.get("prefilter_reason", "")),
+        "filter_reason_codes": str(ground_row.get("filter_reason_codes", "")),
+        "filter_mismatch_score": float(
+            ground_row.get("filter_mismatch_score", 0.0)
+        ),
     }
 
 

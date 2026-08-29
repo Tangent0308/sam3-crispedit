@@ -25,6 +25,8 @@ from crispedit_grounding import (
     parse_grounding_output,
     prompt_version_for_mode,
 )
+from crispedit_mllm_grounding import GROUND_SCHEMA, prefilter_fields
+from crispedit_grounded_mask_runner import MASK_SCHEMA, _copy_metadata
 from scripts.build_mask_bad_case_selection import extract_mask_cases
 
 
@@ -37,6 +39,34 @@ def test_grounding_routes_and_asymmetric_replace():
     ]
     assert grounding_is_complete("replace", {"source": [], "target": [{"ref": "hands"}]})
     assert not grounding_is_complete("motion", {"source": [], "target": [{"ref": "hand"}]})
+
+
+def test_latest_prefilter_manifest_metadata_survives_grounding_and_mask():
+    manifest_row = {
+        "prefilter_verdict": "PASS",
+        "prefilter_confidence": 0.91,
+        "prefilter_method": "fact_prefilter",
+        "prefilter_evidence_schema": "fact_evidence",
+        "prefilter_model_name": "Qwen3-VL",
+        "prefilter_run_id": "run-id",
+        "prefilter_reason": "supported",
+        "prefilter_decision": "keep",
+        "filter_reason_codes": "",
+        "filter_mismatch_score": 0.02,
+    }
+    grounded = prefilter_fields(manifest_row)
+    assert grounded["filter_decision"] == "keep"
+    assert grounded["prefilter_evidence_schema"] == "fact_evidence"
+    assert grounded["filter_mismatch_score"] == 0.02
+    copied = _copy_metadata(grounded)
+    assert {key: copied[key] for key in grounded} == grounded
+    for field in (
+        "prefilter_evidence_schema",
+        "filter_reason_codes",
+        "filter_mismatch_score",
+    ):
+        assert field in GROUND_SCHEMA.names
+        assert field in MASK_SCHEMA.names
 
 
 def test_add_remove_route_clear_collateral_opposite_side_changes():

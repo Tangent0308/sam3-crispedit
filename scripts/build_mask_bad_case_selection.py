@@ -32,7 +32,8 @@ def main() -> None:
     parser.add_argument(
         "--review-doc",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "docs" / "BAD_CASE_REVIEW_20260826.md",
+        required=True,
+        help="Markdown review document containing a 'Mask 打标这一侧 bad case' section",
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
