@@ -16,11 +16,18 @@ from crispedit_grounded_mask_pipeline import (
 )
 from crispedit_grounding import (
     TWO_PASS_PROMPT_VERSION,
+    bbox_refinement_crop,
+    box_needs_local_refinement,
+    build_bbox_refinement_prompt,
     build_change_observation_prompt,
     build_grounding_prompt,
     build_grounding_requests,
     canonicalize_type,
+    conservative_refined_bbox,
     grounding_is_complete,
+    local_bbox_refinement_enabled,
+    map_crop_bbox_to_full,
+    parse_bbox_refinement_output,
     parse_change_observation,
     parse_grounding_output,
     prompt_version_for_mode,
@@ -154,6 +161,82 @@ def test_two_pass_observation_prompt_and_grounding_checklist():
     assert "ALWAYS emit ONE aggregate_region box" in grouped_prompt
     assert "MUST be a superset" in grouped_prompt
     assert prompt_version_for_mode("two-pass") == TWO_PASS_PROMPT_VERSION
+
+
+def test_small_box_local_refinement_geometry_is_recall_first():
+    initial = {"ref": "black cap", "bbox_2d": [270, 183, 505, 333]}
+    assert box_needs_local_refinement(initial)
+    assert not box_needs_local_refinement(
+        {"ref": "whole person", "bbox_2d": [100, 100, 700, 800]}
+    )
+    crop = bbox_refinement_crop(initial["bbox_2d"])
+    assert crop == [35.0, 33.0, 740.0, 483.0]
+    mapped = map_crop_bbox_to_full(crop, [100, 100, 700, 700])
+    assert mapped == [105.5, 78.0, 528.5, 348.0]
+    final = conservative_refined_bbox(initial["bbox_2d"], mapped)
+    assert final == [81.5, 54.0, 552.5, 372.0]
+    assert final[0] <= mapped[0] and final[1] <= mapped[1]
+    assert final[2] >= initial["bbox_2d"][2] and final[3] >= initial["bbox_2d"][3]
+
+    # A clearly shifted refinement replaces the initial proposal instead of
+    # unioning a wrong nearby facial feature into the final search region.
+    mouth = conservative_refined_bbox(
+        [638, 425, 692, 465], [642.95, 483.64, 689.99, 498.76]
+    )
+    assert mouth == [630.95, 471.64, 701.99, 510.76]
+
+    # A crop pass can lock onto a salient subpart such as a hammer head.  High
+    # containment keeps the initial full-object extent even when IoU < 0.25.
+    contained_subpart = conservative_refined_bbox(
+        [392, 592, 442, 750], [388, 594, 434, 633]
+    )
+    assert contained_subpart == [376.0, 580.0, 454.0, 762.0]
+
+    # A failed local pass still expands the initial proposal conservatively.
+    fallback = conservative_refined_bbox(initial["bbox_2d"], None)
+    assert fallback == [195.0, 108.0, 580.0, 408.0]
+
+
+def test_bbox_refinement_prompt_and_parser_keep_candidate_ids():
+    candidates = [
+        {
+            "candidate_id": 2,
+            "ref": "speaker's mouth",
+            "initial_bbox": [638, 425, 692, 465],
+            "crop_bbox": [518, 305, 812, 585],
+        }
+    ]
+    prompt = build_bbox_refinement_prompt(candidates)
+    assert "complete mouth/lips rather than the nose" in prompt
+    assert '"candidate_id":2' in prompt
+    assert "638" not in prompt
+    assert "812" not in prompt
+    assert "derive every returned number solely from the visible candidate crop" in prompt
+    parsed = parse_bbox_refinement_output(
+        "```json\n"
+        '[{"candidate_id":2,"ref":"speaker mouth","bbox_2d":[210,380,790,690]}]'
+        "\n```"
+    )
+    assert parsed == [
+        {
+            "candidate_id": 2,
+            "ref": "speaker mouth",
+            "bbox_2d": [210.0, 380.0, 790.0, 690.0],
+        }
+    ]
+
+
+def test_background_protection_boxes_are_not_local_refinement_candidates():
+    # The pure geometry trigger may consider a thin foreground-protection box
+    # small; the runner explicitly bypasses the entire background route before
+    # constructing views.  Keep the trigger behavior documented here so future
+    # refactors do not mistake size alone for route eligibility.
+    assert box_needs_local_refinement(
+        {"ref": "foreground person", "bbox_2d": [100, 100, 260, 700]}
+    )
+    assert not local_bbox_refinement_enabled("background change")
+    assert not local_bbox_refinement_enabled("style")
+    assert local_bbox_refinement_enabled("motion change")
 
 
 def test_change_observation_parser_accepts_fence_and_normalizes():

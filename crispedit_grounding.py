@@ -13,8 +13,9 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 
 SINGLE_PASS_PROMPT_VERSION = "qwen35_grounding_v2"
-TWO_PASS_PROMPT_VERSION = "qwen35_realized_edit_region_ground_v6"
+TWO_PASS_PROMPT_VERSION = "qwen35_realized_edit_region_ground_v7"
 OBSERVATION_PROMPT_VERSION = "qwen35_realized_edit_spec_v4"
+BBOX_REFINEMENT_PROMPT_VERSION = "qwen35_local_bbox_refinement_v1"
 # Two-pass is the default on the mask-improved branch.  The runner still
 # exposes v2 single-pass for controlled A/B and backwards-compatible runs.
 PROMPT_VERSION = TWO_PASS_PROMPT_VERSION
@@ -743,6 +744,208 @@ def parse_grounding_output(text: str) -> List[Dict]:
             )
         results.append(result)
     return results
+
+
+def box_needs_local_refinement(box: Dict, threshold: float = 220.0) -> bool:
+    """Return whether a normalized grounding box is too small to trust globally.
+
+    Small edit targets receive relatively few vision tokens when two wide full
+    images are shown together.  The semantic noun is usually correct, but the
+    resulting box is often shifted or clips a thin extremity.  Those candidates
+    are sent through a high-resolution crop-localized verification pass.
+    """
+
+    bbox = box.get("bbox_2d") if isinstance(box, dict) else None
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return False
+    x1, y1, x2, y2 = (float(value) for value in bbox)
+    return min(x2 - x1, y2 - y1) < float(threshold)
+
+
+def local_bbox_refinement_enabled(raw_type: object) -> bool:
+    """Return whether boxes for an edit route represent editable regions."""
+
+    return canonicalize_type(raw_type) not in {"background", "style"}
+
+
+def bbox_refinement_crop(
+    bbox: Sequence[float],
+    min_context: float = 120.0,
+    context_scale: float = 1.0,
+) -> List[float]:
+    """Build a context-rich full-image crop in normalized coordinates."""
+
+    x1, y1, x2, y2 = (float(value) for value in bbox)
+    width = x2 - x1
+    height = y2 - y1
+    if width <= 0 or height <= 0:
+        raise ValueError(f"cannot refine degenerate bbox: {bbox}")
+    x_margin = max(float(min_context), width * float(context_scale))
+    y_margin = max(float(min_context), height * float(context_scale))
+    return [
+        round(max(0.0, x1 - x_margin), 3),
+        round(max(0.0, y1 - y_margin), 3),
+        round(min(1000.0, x2 + x_margin), 3),
+        round(min(1000.0, y2 + y_margin), 3),
+    ]
+
+
+def build_bbox_refinement_prompt(candidates: Sequence[Dict]) -> str:
+    """Ask Qwen to re-ground initial proposals in enlarged candidate crops."""
+
+    checklist = []
+    for candidate in candidates:
+        checklist.append(
+            {
+                "candidate_id": int(candidate["candidate_id"]),
+                "ref": str(candidate["ref"]),
+            }
+        )
+    checklist_text = json.dumps(checklist, ensure_ascii=False, separators=(",", ":"))
+    return f"""Verify and correct small edit-region bounding boxes using enlarged image crops.
+
+Each candidate image shown above is an enlarged crop for exactly one checklist item, in the same
+order as the checklist.  Treat each crop as an independent image with its own [0,1000] coordinate
+system.  Each crop was proposed by a noisy detector, so the requested entity may be off-center and
+the proposal may originally have contained only its upper/lower half.  No full-image coordinates
+are provided here; derive every returned number solely from the visible candidate crop.
+
+Checklist: {checklist_text}
+
+For every candidate, locate the concrete visual entity named by ref inside that candidate's crop.
+Return a conservative crop-relative bbox that contains its COMPLETE visible contour.  Explicitly
+check top, bottom, left and right extremes.  Include thin extremities, the full crown/brim of
+headwear, the full hand including fingers, the complete mouth/lips rather than the nose, and the
+entire held object rather than only its most salient half.  Modest surrounding context is better
+than clipping any edited pixel.  Do not infer or reuse coordinates from any other image.
+
+Return exactly one item for each candidate_id, using coordinates relative to that candidate's CROP,
+not the full image.  Output JSON only, with no markdown or explanation.
+
+Required schema:
+[{{"candidate_id":0,"ref":"black cap","bbox_2d":[x1,y1,x2,y2]}}]
+"""
+
+
+def parse_bbox_refinement_output(text: str) -> List[Dict]:
+    """Parse crop-relative bbox refinements while retaining candidate ids."""
+
+    parsed = None
+    last_error: Exception | None = None
+    for candidate in _candidate_json_arrays(text):
+        try:
+            value = json.loads(candidate)
+            if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+                parsed = value
+                break
+        except (TypeError, ValueError) as exc:
+            last_error = exc
+    if parsed is None:
+        raise ValueError(f"no bbox refinement JSON array found: {last_error}")
+
+    results = []
+    seen = set()
+    for index, item in enumerate(parsed):
+        try:
+            candidate_id = int(item.get("candidate_id"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"refinement item {index} has invalid candidate_id") from exc
+        if candidate_id in seen:
+            raise ValueError(f"duplicate refinement candidate_id: {candidate_id}")
+        seen.add(candidate_id)
+        bbox = item.get("bbox_2d")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            raise ValueError(f"refinement item {index} has invalid bbox_2d")
+        try:
+            coords = [max(0.0, min(1000.0, float(value))) for value in bbox]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"refinement item {index} has non-numeric bbox_2d") from exc
+        if not (coords[0] < coords[2] and coords[1] < coords[3]):
+            raise ValueError(f"refinement item {index} has a degenerate bbox_2d: {coords}")
+        results.append(
+            {
+                "candidate_id": candidate_id,
+                "ref": str(item.get("ref", "")).strip(),
+                "bbox_2d": [round(value, 3) for value in coords],
+            }
+        )
+    return results
+
+
+def map_crop_bbox_to_full(
+    crop_bbox: Sequence[float], crop_relative_bbox: Sequence[float]
+) -> List[float]:
+    """Map a [0,1000] crop-relative box back into full-image coordinates."""
+
+    crop_x1, crop_y1, crop_x2, crop_y2 = (float(value) for value in crop_bbox)
+    x1, y1, x2, y2 = (float(value) for value in crop_relative_bbox)
+    crop_width = crop_x2 - crop_x1
+    crop_height = crop_y2 - crop_y1
+    return [
+        round(crop_x1 + x1 * crop_width / 1000.0, 3),
+        round(crop_y1 + y1 * crop_height / 1000.0, 3),
+        round(crop_x1 + x2 * crop_width / 1000.0, 3),
+        round(crop_y1 + y2 * crop_height / 1000.0, 3),
+    ]
+
+
+def conservative_refined_bbox(
+    initial_bbox: Sequence[float],
+    refined_bbox: Sequence[float] | None,
+    min_padding: float = 12.0,
+    max_padding: float = 24.0,
+    union_iou_threshold: float = 0.25,
+    union_containment_threshold: float = 0.75,
+    fallback_min_padding: float = 60.0,
+    fallback_max_padding: float = 80.0,
+) -> List[float]:
+    """Return a recall-first envelope around initial and locally refined boxes.
+
+    A successful local answer receives only a modest edge margin.  The initial
+    and refined boxes are unioned when they overlap enough to represent
+    compatible edge estimates, or when one substantially contains the other.
+    The containment check prevents a crop pass that sees only a salient
+    subpart (for example a hammer head) from discarding a recall-safe initial
+    box.  A clearly shifted proposal (for example a nose box corrected to a
+    mouth) must not contaminate the final region.  A larger recall-first
+    expansion is reserved for refinement failure.
+    """
+
+    x1, y1, x2, y2 = (float(value) for value in initial_bbox)
+    if refined_bbox is None:
+        min_extent = min(x2 - x1, y2 - y1)
+        padding = min(
+            float(fallback_max_padding),
+            max(float(fallback_min_padding), 0.5 * min_extent),
+        )
+        envelope = [x1 - padding, y1 - padding, x2 + padding, y2 + padding]
+    else:
+        rx1, ry1, rx2, ry2 = (float(value) for value in refined_bbox)
+        intersection_width = max(0.0, min(x2, rx2) - max(x1, rx1))
+        intersection_height = max(0.0, min(y2, ry2) - max(y1, ry1))
+        intersection = intersection_width * intersection_height
+        initial_area = (x2 - x1) * (y2 - y1)
+        refined_area = (rx2 - rx1) * (ry2 - ry1)
+        union_area = initial_area + refined_area - intersection
+        iou = intersection / union_area if union_area > 0 else 0.0
+        smaller_area = min(initial_area, refined_area)
+        containment = intersection / smaller_area if smaller_area > 0 else 0.0
+        if (
+            iou >= float(union_iou_threshold)
+            or containment >= float(union_containment_threshold)
+        ):
+            base = [min(x1, rx1), min(y1, ry1), max(x2, rx2), max(y2, ry2)]
+        else:
+            base = [rx1, ry1, rx2, ry2]
+        min_extent = min(base[2] - base[0], base[3] - base[1])
+        padding = min(float(max_padding), max(float(min_padding), 0.15 * min_extent))
+        envelope = [
+            base[0] - padding,
+            base[1] - padding,
+            base[2] + padding,
+            base[3] + padding,
+        ]
+    return [round(max(0.0, min(1000.0, value)), 3) for value in envelope]
 
 
 def grounding_is_complete(etype: str, boxes_by_image: Dict[str, List[Dict]]) -> bool:
