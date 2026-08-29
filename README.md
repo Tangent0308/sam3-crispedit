@@ -9,7 +9,7 @@ fact prefilter（Qwen3-VL + 代码裁决）
     ↓
 keep manifest
     ↓
-Qwen3.5 two-pass grounding（realized edit → region ref + conservative bbox）
+Qwen3.5 grounding（realized edit → region ref/bbox → small-region crop refinement）
     ↓
 SAM3 dual-prompt mask（bbox PVS + phrase PCS + phrase/bbox PCS + region fusion）
 ```
@@ -23,8 +23,8 @@ SAM3 dual-prompt mask（bbox PVS + phrase PCS + phrase/bbox PCS + region fusion�
 
 - `crispedit_mllm_prefilter.py`：从原始 parquet 生成 audit 和 keep manifest；
 - `crispedit_prefilter_policy.py`：事实归一化与确定性决策；
-- `crispedit_mllm_grounding.py`：mask 流程 S1，Qwen3.5 双轮输出 realized edit、region ref
-  与 recall-first bbox；
+- `crispedit_mllm_grounding.py`：mask 流程 S1，Qwen3.5 输出 realized edit、region ref
+  与 recall-first bbox，并对小区域进行局部高清重定位；
 - `crispedit_grounded_mask_runner.py`：mask 流程 S2，bbox/phrase 双提示与 region fusion；
 - `crispedit_grounded_mask_pipeline.py`：无 pixel-diff 的单样本 mask 合成逻辑。
 - `scripts/export_grounding_outputs.py`：将 Qwen grounding parquet 导出为 JSONL/CSV/Markdown；
@@ -70,7 +70,8 @@ python crispedit_mllm_grounding.py \
   --model-path /mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B \
   --devices 0,1,2,3,4,5,6,7 \
   --tensor-parallel-size 2 \
-  --grounding-mode two-pass
+  --grounding-mode two-pass \
+  --bbox-refinement small
 
 python crispedit_grounded_mask_runner.py \
   --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \

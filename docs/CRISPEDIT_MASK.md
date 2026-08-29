@@ -10,6 +10,7 @@ source/result 中实际发生的编辑并给出保守区域框，再由 SAM3 同
 raw parquet + prefilter manifest
   → Qwen3.5 第一轮：source + result + instruction → realized edit specification
   → Qwen3.5 第二轮：realized edit → region ref + conservative bbox
+  → 小区域局部复核：高清 context crop → corrected complete-object bbox
   → grounding parquet
   → SAM3 bbox-only PVS
              + phrase-only PCS
@@ -26,6 +27,15 @@ raw parquet + prefilter manifest
 第二轮按“空间编辑区域”而不是按像素点出框。bbox 是 SAM 的 recall-first 搜索范围，必须
 完整包含编辑区域并留有安全边距。相邻花朵、穿孔、花瓣、纹身、斑点等小元素使用一个
 `aggregate_region` 框，不逐点出框；语义类别不同或空间明显分离的对象仍分别输出。
+
+由于两张完整大图共同输入时，帽子、嘴、手、手持小物等小目标获得的视觉 token
+有限，第二轮可能出现语义正确但框偏移，或只框住上/下半部。默认对短边小于
+220（`[0,1000]` 坐标）的候选裁出带语境的局部图，放大后让模型独立复核完整边界。
+新旧框明显重合、或者一框高度包含另一框时，取带小安全边距的并集，防止局部复核只看到
+锤头等显著子部件；两框明显错位时只保留局部复核框，
+避免将误定位的鼻子等区域并入嘴部框。若局部输出无法解析，则回退为对原框做较大的
+recall-first 扩展。background/style 不使用这一复核，因为 background 的框表示需保护的前景，
+不是编辑区域。原框、crop、局部原始输出和最终框都保存在 `bbox_refinement` 字段中便于审计。
 
 每个 grounding item 包含：
 
@@ -87,8 +97,8 @@ raw parquet + prefilter manifest
 
 | 文件 | 作用 |
 |---|---|
-| `crispedit_grounding.py` | 两轮 prompt、编辑类型路由、JSON parser 与 region schema |
-| `crispedit_mllm_grounding.py` | 8 卡 Qwen3.5 runner、局部细节图、manifest 对齐和 grounding parquet |
+| `crispedit_grounding.py` | 两轮与小区域复核 prompt、编辑类型路由、bbox 融合、JSON parser 与 region schema |
+| `crispedit_mllm_grounding.py` | 8 卡 Qwen3.5 runner、局部细节/框复核图、manifest 对齐和 grounding parquet |
 | `crispedit_grounded_mask_pipeline.py` | 单样本 SAM3 三路候选、融合、映射和连通区域逻辑 |
 | `crispedit_grounded_mask_runner.py` | 8 卡 SAM3 shard runner、最终 parquet 与逐样本 preview |
 | `scripts/export_grounding_outputs.py` | 将模型两轮输出导出为 JSON/JSONL/CSV/Markdown |
@@ -121,11 +131,16 @@ python -u crispedit_mllm_grounding.py \
   --devices 0,1,2,3,4,5,6,7 \
   --tensor-parallel-size 2 \
   --grounding-mode two-pass \
+  --bbox-refinement small \
   --batch-size 1 \
   --request-batch-size 2 \
   --max-new-tokens 512 \
   --fail-fast
 ```
+
+`--bbox-refinement small` 是默认生产策略；可用 `off` 做旧路线对照，或用 `all` 复核所有
+bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine-min-context`
+与 `--bbox-refine-context-scale` 调整。
 
 不加 `--overwrite` 时完整 shard 会被跳过。修改 prompt 或策略后应使用新的输出目录，避免
 把不同策略的 parquet 混在一起。

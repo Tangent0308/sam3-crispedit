@@ -27,13 +27,21 @@ from PIL import Image
 from tqdm import tqdm
 
 from crispedit_grounding import (
+    BBOX_REFINEMENT_PROMPT_VERSION,
     OBSERVATION_PROMPT_VERSION,
     PROMPT_VERSION,
+    bbox_refinement_crop,
+    box_needs_local_refinement,
     build_change_observation_prompt,
+    build_bbox_refinement_prompt,
     build_grounding_requests,
     canonicalize_type,
+    conservative_refined_bbox,
     grounding_images,
     grounding_is_complete,
+    local_bbox_refinement_enabled,
+    map_crop_bbox_to_full,
+    parse_bbox_refinement_output,
     parse_change_observation,
     parse_grounding_output,
     prompt_version_for_mode,
@@ -153,6 +161,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--max-pixels", type=int, default=1_310_720, help="Per-image Qwen preprocessing pixel cap")
     parser.add_argument("--parse-retries", type=int, default=1)
+    parser.add_argument(
+        "--bbox-refinement",
+        choices=("off", "small", "all"),
+        default="small",
+        help="Re-ground small/all proposal boxes in enlarged single-candidate crops",
+    )
+    parser.add_argument("--bbox-refine-threshold", type=float, default=220.0)
+    parser.add_argument("--bbox-refine-min-context", type=float, default=120.0)
+    parser.add_argument("--bbox-refine-context-scale", type=float, default=1.0)
+    parser.add_argument("--bbox-safety-padding-min", type=float, default=12.0)
+    parser.add_argument("--bbox-safety-padding-max", type=float, default=24.0)
     parser.add_argument("--gpu-memory-gib", type=int, default=74)
     parser.add_argument("--compression", default="zstd")
     parser.add_argument("--overwrite", action="store_true")
@@ -446,6 +465,59 @@ class Qwen35Grounder:
             },
         ]
 
+    @staticmethod
+    def _bbox_refinement_conversation(views: Sequence[Dict], prompt: str) -> List[Dict]:
+        content = []
+        for view in views:
+            content.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Candidate {view['candidate_id']} enlarged crop for ref "
+                            f"{json.dumps(view['ref'], ensure_ascii=False)}:"
+                        ),
+                    },
+                    {"type": "image", "image": view["image"]},
+                ]
+            )
+        content.append({"type": "text", "text": prompt})
+        return [{"role": "user", "content": content}]
+
+    def _bbox_refinement_views(
+        self, image: Image.Image, boxes: Sequence[Dict]
+    ) -> List[Dict]:
+        views = []
+        for candidate_id, box in enumerate(boxes):
+            should_refine = self.args.bbox_refinement == "all" or (
+                self.args.bbox_refinement == "small"
+                and box_needs_local_refinement(box, self.args.bbox_refine_threshold)
+            )
+            if not should_refine:
+                continue
+            crop_bbox = bbox_refinement_crop(
+                box["bbox_2d"],
+                min_context=self.args.bbox_refine_min_context,
+                context_scale=self.args.bbox_refine_context_scale,
+            )
+            width, height = image.size
+            pixel_crop = (
+                round(crop_bbox[0] * width / 1000.0),
+                round(crop_bbox[1] * height / 1000.0),
+                round(crop_bbox[2] * width / 1000.0),
+                round(crop_bbox[3] * height / 1000.0),
+            )
+            views.append(
+                {
+                    "candidate_id": candidate_id,
+                    "ref": box["ref"],
+                    "initial_bbox": list(box["bbox_2d"]),
+                    "crop_bbox": crop_bbox,
+                    "image": image.crop(pixel_crop),
+                }
+            )
+        return views
+
     def _generate(self, conversations: Sequence[List[Dict]]) -> List[str]:
         inputs = self.processor.apply_chat_template(
             list(conversations),
@@ -596,6 +668,107 @@ class Qwen35Grounder:
                 parsed_results.append(
                     {"raw_text": text, "boxes": boxes, "parse_ok": not error, "error": error}
                 )
+
+        refinement_jobs = []
+        if self.args.bbox_refinement != "off":
+            for result_index, ((sample_index, grounding_image, _), result) in enumerate(
+                zip(requests, parsed_results)
+            ):
+                if not result["parse_ok"] or not result["boxes"]:
+                    continue
+                sample = samples[sample_index]
+                # Background boxes identify foreground content to protect, not
+                # the edit region itself.  Enlarging/refining those boxes can
+                # unnecessarily subtract editable background, so preserve the
+                # established background route exactly.
+                if not local_bbox_refinement_enabled(sample["type"]):
+                    continue
+                selected_image = (
+                    sample["input_img"] if grounding_image == "source" else sample["output_img"]
+                )
+                views = self._bbox_refinement_views(selected_image, result["boxes"])
+                if not views:
+                    continue
+                candidates = [
+                    {
+                        "candidate_id": view["candidate_id"],
+                        "ref": view["ref"],
+                        "initial_bbox": view["initial_bbox"],
+                        "crop_bbox": view["crop_bbox"],
+                    }
+                    for view in views
+                ]
+                prompt = build_bbox_refinement_prompt(candidates)
+                conversation = self._bbox_refinement_conversation(views, prompt)
+                refinement_jobs.append(
+                    {
+                        "result_index": result_index,
+                        "views": views,
+                        "prompt": prompt,
+                        "conversation": conversation,
+                    }
+                )
+
+        for start in range(0, len(refinement_jobs), self.args.request_batch_size):
+            chunk = refinement_jobs[start : start + self.args.request_batch_size]
+            texts = self._generate([job["conversation"] for job in chunk])
+            for job, initial_text in zip(chunk, texts):
+                text = initial_text
+                error = ""
+                refinements: List[Dict] = []
+                for attempt in range(self.args.parse_retries + 1):
+                    try:
+                        refinements = parse_bbox_refinement_output(text)
+                        error = ""
+                        break
+                    except Exception as exc:
+                        error = repr(exc)
+                        if attempt < self.args.parse_retries:
+                            text = self._generate([job["conversation"]])[0]
+
+                result = parsed_results[job["result_index"]]
+                initial_boxes = [dict(box) for box in result["boxes"]]
+                final_boxes = [dict(box) for box in initial_boxes]
+                refined_by_id = {
+                    item["candidate_id"]: item for item in refinements
+                } if not error else {}
+                audit_candidates = []
+                for view in job["views"]:
+                    candidate_id = view["candidate_id"]
+                    refined = refined_by_id.get(candidate_id)
+                    mapped_bbox = None
+                    if refined is not None:
+                        mapped_bbox = map_crop_bbox_to_full(
+                            view["crop_bbox"], refined["bbox_2d"]
+                        )
+                    final_bbox = conservative_refined_bbox(
+                        view["initial_bbox"],
+                        mapped_bbox,
+                        min_padding=self.args.bbox_safety_padding_min,
+                        max_padding=self.args.bbox_safety_padding_max,
+                    )
+                    final_boxes[candidate_id]["bbox_2d"] = final_bbox
+                    audit_candidates.append(
+                        {
+                            "candidate_id": candidate_id,
+                            "ref": view["ref"],
+                            "initial_bbox": view["initial_bbox"],
+                            "crop_bbox": view["crop_bbox"],
+                            "refined_crop_bbox": refined["bbox_2d"] if refined else None,
+                            "refined_full_bbox": mapped_bbox,
+                            "final_bbox": final_bbox,
+                        }
+                    )
+                result["initial_boxes"] = initial_boxes
+                result["boxes"] = final_boxes
+                result["bbox_refinement"] = {
+                    "prompt_version": BBOX_REFINEMENT_PROMPT_VERSION,
+                    "prompt": job["prompt"],
+                    "raw_text": text,
+                    "parse_ok": not error,
+                    "error": error,
+                    "candidates": audit_candidates,
+                }
 
         for request, result in zip(requests, parsed_results):
             sample_index, grounding_image, _ = request
