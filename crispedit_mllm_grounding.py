@@ -32,6 +32,7 @@ from crispedit_grounding import (
     build_change_observation_prompt,
     build_grounding_requests,
     canonicalize_type,
+    grounding_images,
     grounding_is_complete,
     parse_change_observation,
     parse_grounding_output,
@@ -40,6 +41,48 @@ from crispedit_grounding import (
 
 
 DEFAULT_MODEL_PATH = "/mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B"
+
+# Pass 1 still makes one source/result comparison, but color/material edits get
+# paired overlapping views of those same two images.  This gives small faces,
+# hands, fur, and other subject surfaces enough vision tokens without adding a
+# third model turn or introducing pixel differences.
+LOCAL_DETAIL_TILES = (
+    ("upper-left", (0.0, 0.0, 0.55, 0.55)),
+    ("upper-right", (0.45, 0.0, 1.0, 0.55)),
+    ("lower-left", (0.0, 0.45, 0.55, 1.0)),
+    ("lower-right", (0.45, 0.45, 1.0, 1.0)),
+)
+
+
+def build_local_detail_views(
+    raw_type: object,
+    source: Image.Image,
+    target: Image.Image,
+) -> List[Dict]:
+    if canonicalize_type(raw_type) != "color":
+        return []
+    views = []
+    for label, normalized_box in LOCAL_DETAIL_TILES:
+        paired = []
+        for image in (source, target):
+            width, height = image.size
+            x1, y1, x2, y2 = normalized_box
+            crop_box = (
+                round(x1 * width),
+                round(y1 * height),
+                round(x2 * width),
+                round(y2 * height),
+            )
+            paired.append(image.crop(crop_box).resize(image.size, Image.Resampling.LANCZOS))
+        views.append(
+            {
+                "label": label,
+                "normalized_box": list(normalized_box),
+                "source": paired[0],
+                "target": paired[1],
+            }
+        )
+    return views
 
 GROUND_SCHEMA = pa.schema(
     [
@@ -329,17 +372,40 @@ class Qwen35Grounder:
         )
 
     @staticmethod
-    def _conversation(source: Image.Image, target: Image.Image, prompt: str) -> List[Dict]:
+    def _conversation(
+        source: Image.Image,
+        target: Image.Image,
+        prompt: str,
+        detail_views: Optional[Sequence[Dict]] = None,
+    ) -> List[Dict]:
+        content = [
+            {"type": "text", "text": "Image 1 (source, full image):"},
+            {"type": "image", "image": source},
+            {"type": "text", "text": "Image 2 (result, full image):"},
+            {"type": "image", "image": target},
+        ]
+        for view in detail_views or []:
+            label = view["label"]
+            normalized_box = view["normalized_box"]
+            content.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Image 1 detail tile {label} (enlarged crop of full-image "
+                            f"normalized region {normalized_box}):"
+                        ),
+                    },
+                    {"type": "image", "image": view["source"]},
+                    {"type": "text", "text": f"Image 2 matching detail tile {label}:"},
+                    {"type": "image", "image": view["target"]},
+                ]
+            )
+        content.append({"type": "text", "text": prompt})
         return [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": "Image 1 (source):"},
-                    {"type": "image", "image": source},
-                    {"type": "text", "text": "Image 2 (result):"},
-                    {"type": "image", "image": target},
-                    {"type": "text", "text": prompt},
-                ],
+                "content": content,
             }
         ]
 
@@ -350,20 +416,15 @@ class Qwen35Grounder:
         observation_prompt: str,
         observation_response: str,
         grounding_prompt: str,
+        detail_views: Optional[Sequence[Dict]] = None,
     ) -> List[Dict]:
         """Rebuild the first turn plus its answer, then ask the grounding follow-up."""
 
+        first_turn = Qwen35Grounder._conversation(
+            source, target, observation_prompt, detail_views
+        )[0]
         return [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Image 1 (source):"},
-                    {"type": "image", "image": source},
-                    {"type": "text", "text": "Image 2 (result):"},
-                    {"type": "image", "image": target},
-                    {"type": "text", "text": observation_prompt},
-                ],
-            },
+            first_turn,
             {
                 "role": "assistant",
                 "content": [{"type": "text", "text": observation_response}],
@@ -418,12 +479,17 @@ class Qwen35Grounder:
             observation_jobs = []
             for sample_index, sample in enumerate(samples):
                 prompt = build_change_observation_prompt(sample["type"], sample["instruction"])
-                conversation = self._conversation(sample["input_img"], sample["output_img"], prompt)
-                observation_jobs.append((sample_index, prompt, conversation))
+                detail_views = build_local_detail_views(
+                    sample["type"], sample["input_img"], sample["output_img"]
+                )
+                conversation = self._conversation(
+                    sample["input_img"], sample["output_img"], prompt, detail_views
+                )
+                observation_jobs.append((sample_index, prompt, conversation, detail_views))
             for start in range(0, len(observation_jobs), self.args.request_batch_size):
                 chunk = observation_jobs[start : start + self.args.request_batch_size]
                 texts = self._generate([item[2] for item in chunk])
-                for (sample_index, prompt, conversation), initial_text in zip(chunk, texts):
+                for (sample_index, prompt, conversation, detail_views), initial_text in zip(chunk, texts):
                     text = initial_text
                     error = ""
                     parsed: Dict = {}
@@ -444,6 +510,14 @@ class Qwen35Grounder:
                         "parse_ok": not error,
                         "error": error,
                     }
+                    if detail_views:
+                        observation["detail_views"] = [
+                            {
+                                "label": view["label"],
+                                "normalized_box": view["normalized_box"],
+                            }
+                            for view in detail_views
+                        ]
                     observations[sample_index] = observation
                     payloads[sample_index]["observation"] = observation
 
@@ -458,13 +532,33 @@ class Qwen35Grounder:
                 sample["type"], sample["instruction"], observation_context
             ):
                 if observation is not None:
-                    conversation = self._followup_conversation(
-                        sample["input_img"],
-                        sample["output_img"],
-                        observation["prompt"],
-                        observation["raw_text"],
-                        request.prompt,
+                    detail_views = build_local_detail_views(
+                        sample["type"], sample["input_img"], sample["output_img"]
                     )
+                    is_supplemental_side = request.grounding_image not in grounding_images(
+                        sample["type"]
+                    )
+                    # For color/material verification and opposite-side
+                    # collateral edits, the raw first answer can anchor pass 2
+                    # to an erroneous `changed=false` or wrong-side entity.
+                    # The normalized first-pass specification is already
+                    # embedded in request.prompt, so use a clean second turn.
+                    if canonicalize_type(sample["type"]) == "color" or is_supplemental_side:
+                        conversation = self._conversation(
+                            sample["input_img"],
+                            sample["output_img"],
+                            request.prompt,
+                            detail_views,
+                        )
+                    else:
+                        conversation = self._followup_conversation(
+                            sample["input_img"],
+                            sample["output_img"],
+                            observation["prompt"],
+                            observation["raw_text"],
+                            request.prompt,
+                            detail_views,
+                        )
                 else:
                     conversation = self._conversation(
                         sample["input_img"], sample["output_img"], request.prompt

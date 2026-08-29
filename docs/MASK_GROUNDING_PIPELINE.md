@@ -11,7 +11,9 @@ raw parquet + keep manifest
   → S1a Qwen3.5: source/target pair + instruction → realized-change observation
   → S1b Qwen3.5: previous turn + observation → selected-image ref + bbox_2d
   → grounding parquet（可独立 resume / 抽检）
-  → S2 SAM3: PVS + spatially filtered PCS → rectangle fallback
+  → S2 SAM3: bbox-only PVS + phrase-only PCS + phrase+bbox PCS
+      → density-aware fusion / compact tiny-group connected coverage
+      → rectangle fallback only if all SAM candidates fail
   → src-coordinate union PNG + per-instance COCO RLE
 ```
 
@@ -34,20 +36,27 @@ raw parquet + keep manifest
 
 入口：`crispedit_mllm_grounding.py`。
 
-- 默认 `--grounding-mode two-pass`。第一轮只观察 source/result 的实际语义变化，输出
-  `edit_summary`、`checked_regions` 和 `changes`，不输出坐标；第二轮沿用同一段多轮
-  conversation，把第一轮结果作为 recall checklist，再输出 ref + bbox；
+- 默认 `--grounding-mode two-pass`。第一轮同时查看 source、result 和 instruction，但把
+  图像对视为事实来源：先把含糊或与实际结果不一致的 instruction 重写成明确的
+  `edit_summary`、`checked_regions` 和逐区域 `changes`，不输出坐标；第二轮沿用第一轮
+  观察作为 recall checklist，再输出 `ref + bbox + region_mode + mask_density`；
 - 第一轮同时区分 instruction-aligned 与 collateral/overreach change。color 类会显式审计
   face/head、neck、arms/hands、torso/clothing 和 visible legs，避免只复述 instruction；
 - 第一轮原始 response、解析结果、prompt 和错误均保存到 `ground_json.observation`；
-  `schema_version=2`，prompt version 为 `qwen35_observe_ground_v3`；
+  `schema_version=2`，当前 observation/grounding prompt version 分别为
+  `qwen35_realized_edit_spec_v4` / `qwen35_realized_edit_region_ground_v6`；
 - `--grounding-mode single` 完整保留原 `qwen35_grounding_v2`，用于 A/B 和兼容复现；
 - 每次请求都提供 source 和 target，但只允许在路由指定的单张图输出坐标；
 - 坐标固定为 `[0,1000]`，只在 S2 按原图尺寸映射；
 - thinking 关闭，greedy decode；
 - 输出会严格解析、clip 并检查非退化 box；原始 response 一并写入 `ground_json`；
-- grounding prompt 约束 `ref` 为 2–8 词的 SAM-friendly 视觉短语，并要求稀疏/空心目标在
-  8 个实例以内逐实例出框；
+- 第二轮 bbox 是 recall-first 的 SAM 搜索区域：必须包含第一轮描述区域的所有极值并留
+  margin，宁可略大不能截断编辑区域；同一局部范围内的花、点、穿孔、纹身等很多相邻
+  小元素输出一个 `aggregate_region` 大框，不能逐点出框；语义类别不同或空间明显分离的
+  区域仍分开；
+- `ref` 是可直接输入 SAM 的可见名词短语，不包含 change verb、颜色变化叙述或抽象
+  absence。parser 保留 `region_mode`（`object/aggregate_region`）和 `mask_density`
+  （`dense/sparse/object`），供 S2 选择融合策略；
 - parser 会恢复 truncated response，也会恢复 Qwen 偶发的单个 object 内重复
   `bbox_2d` key（标准 JSON parser 会静默只保留最后一个 key）；
 - `absence of ...` 等不可见抽象框会丢弃，replace 仍可使用另一侧的真实 footprint；
@@ -63,26 +72,33 @@ raw parquet + keep manifest
 入口：`crispedit_grounded_mask_runner.py`。构建 SAM3 时开启
 `enable_inst_interactivity=True`，从而使用仓库已有但旧 CrispEdit pipeline 未启用的 PVS。
 
-每个 MLLM box 同时评估几何和语义候选：
+每个 MLLM box 同时评估三路候选：
 
 1. PVS box prompt 返回 multimask 和 predicted IoU。候选需满足 mask bbox 与 prompt box
    IoU ≥ 0.60，且至少 90% mask 位于再外扩 5% 的 box 内；合格候选按 predicted IoU 选；
-2. PCS 默认先做 text-only 检测，再用 MLLM box 的 5% containment 区域过滤，至少 80%
-   mask 像素需落在区域内；这样 bbox 负责实例消歧，text 负责分出 frame、piercing、petal、
-   arm 等 PVS 容易选中父物体的目标。text-only 为空时才重试 `ref + positive box`；
-3. 对稀疏集合、装饰和部件语义优先 PCS；其它目标保留 PVS 主路径，但 PVS 相对 box
-   过密/过稀且 PCS 更合理时允许语义候选覆盖。每个实例记录 `selection_reason` 和
-   `semantic_mask_source`；
-4. 两条 SAM 路径都失败才使用矩形 box；
-5. 80% directional coverage 针对原始 MLLM box（不是额外外扩后的 prompt box）。稀疏
-   语义集合不填充内部空白；其它候选覆盖不足时仍与原始矩形取并，保证宁多勿漏。
+2. PCS phrase-only 与 phrase+positive-box 都运行，再用 MLLM box 的 5% containment
+   区域过滤，至少 80% mask 像素需落在区域内；bbox 负责实例消歧，phrase 负责分出
+   frame、piercing、petal、arm 等 PVS 容易选中父物体的目标；
+3. 普通 object 优先联合提示；aggregate region 在两路结果互补时取并集。若一条路径明显
+   退化成包围物/背景，按 fill ratio、候选数、置信度和两路 IoU 拒绝异常稠密或异常微小
+   的候选。每个实例记录 query mode、融合原因、两路 fill 和 `selection_reason`；
+4. 对局部且紧凑的花瓣、穿孔、纹身、斑点等小元素组，若 PCS 确认至少 6 个实例与 6 个
+   小连通分量，则用实际语义 mask 的凸包生成一个实心连通区域。bbox 超过半图的全局散布
+   不连通；boats/chains 等重复大对象也不进入这条规则，避免跨背景的巨大三角形；
+5. color 编辑中，若 ref 明确是人类 face/neck/arm/hand/leg/foot，会把给 SAM 的短语规范为
+   `exposed human ... skin`，由 bbox 锁定具体人物，避免 `man's arms` 误分成整个人或衣服；
+6. 三条 SAM 路径都失败才使用矩形 box；原始 MLLM box 的 directional coverage 仅作为
+   audit 信号，不把语义 mask 强行补成矩形。
 
 PCS threshold 为 0.3，小目标的低分召回由 bbox containment 约束；这是 47 条抽检中
 `piercing`、`petal` 等目标在 0.5 threshold 下明显漏实例后的实测选择。
 
-原 bbox 先按 box 尺寸外扩 2.5%，并为极小框提供短边 0.25% 的最小 margin。target
-mask 用 nearest resize 映射到 source，再膨胀 source 短边的 1.5%。source/target aspect
-ratio 相对差异超过 2% 时标 `AR_MISMATCH` 并额外膨胀 2%。
+原 bbox 先按自身尺寸外扩 2.5%。仅当某一维不超过图像短边 5% 时，该维才启用图像短边
+1.5% 的最小 margin；这能救回 tiny earring/finger/petal，又不会改变正常 face/limb 的
+SAM proposal。target mask 用 nearest resize 映射到 source：普通 mask 膨胀 source 短边
+1.5%，已连通区域只膨胀 0.3%。source/target aspect ratio 相对差异超过 2% 时标
+`AR_MISMATCH` 并额外膨胀 2%。当前策略版本是
+`sam3-dual-prompt-region-fusion-v5-surface-aware`。
 
 最终字段包括 `ground_json`、`mask_png`、`instance_masks`（带 COCO RLE）、
 `mask_source`、`area_frac`、`qc_flag`、`mllm_model`、`prompt_version` 和 `sam_version`。
@@ -191,3 +207,11 @@ single-pass 改为 two-pass。结果、可读输出、分类图和 A/B 报告位
 判定质量提升。尤其 `color_00074.parquet row=104` 中第一轮明确把 face 判为 unchanged，
 因此第二轮仍只框 arms/hands；这说明多轮分解提高了可审计性，却不能自动修复底层视觉
 比较漏检。当前应把该模式视为可 A/B 的候选流程，扩大人工标注评测后再决定全量采用。
+
+## 区域框与双提示改进（2026-08-29）
+
+本轮从 `CrispEdit-mask-improved-eval-20260828-two-pass` 对应提交重新开发，落实第一轮
+realized edit 精化、第二轮 recall-first region bbox，以及 bbox/phrase 双提示融合。47 条
+bad case 使用 8 卡完成两阶段运行，结果为 47/47 `OK`、0 runtime error、0
+`GROUND_FAIL`、0 rectangle fallback；详细报告见
+`docs/MASK_REGION_BOX_EVAL_20260829.md`。
