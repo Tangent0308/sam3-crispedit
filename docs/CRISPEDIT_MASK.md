@@ -1,8 +1,11 @@
 # CrispEdit mask 打标
 
-本文说明 prefilter 后的 mask 打标流程。它不使用 pixel diff，而是先由 Qwen3.5 理解
+本文说明 prefilter 后的最终 mask 打标流程。它不使用 pixel diff，而是先由 Qwen3.5 理解
 source/result 中实际发生的编辑并给出保守区域框，再由 SAM3 同时使用 bbox 与指代短语
 生成候选 mask。
+
+本文所述方法及默认参数已经固化为当前生产方案。历史 one-pass、仅放大 bbox、不同
+region fusion 阈值等实验路线不再作为生产入口。
 
 ## 流程概览
 
@@ -177,23 +180,41 @@ python scripts/build_category_previews.py \
   --columns 1
 ```
 
-## 小批量运行结果
+## 最终实验结果
+
+### 历史 mask 难例：47 条
 
 使用仓库内 [eval_selection.json](../docs_assets/mask_pipeline/eval_selection.json) 的 47 条历史
 mask 难例，在 GPU 0–7 上分别运行 Qwen3.5 和 SAM3。该评测专门检查 mask 方法，因此没有
 应用 prefilter drop：
 
-- grounding：47 rows，0 runtime error，0 observation parse failure，0 `GROUND_FAIL`；
+- grounding：47 rows，0 runtime error，0 `GROUND_FAIL`，46 `OK` + 1 `PARTIAL_OK`；
+- region bbox：113；小区域复核 33 requests / 52 candidates，0 refinement parse failure；
+- 第一轮 observation 有 1 条长输出 JSON 截断；第二轮 grounding 和最终 mask 正常完成；
 - mask：47/47 `OK`，0 runtime error，0 rectangle fallback；
-- 样本级 mask source：PCS 39、PVS 3、connected group 5；
-- region bbox：114；
-- mask area fraction：min 0.0062、median 0.1046、mean 0.1594、max 0.7510；
-- 单元测试与 manifest 集成测试：48 passed。
+- 样本级 mask source：PCS 40、PVS 3、connected group 4；
+- mask area fraction：min 0.0126、median 0.1070、mean 0.1646、max 0.7510；
+- 单元测试与 manifest 集成测试：51 passed。
 
 这组样本没有像素级 GT，因此面积和来源统计只用于发现异常，最终仍需人工检查。当前已知
 边界包括：如果第一轮把完整对象错误改写成材质/纹理短语，SAM 可能只分割其轮廓。例如
 `remove_00070.parquet row=133` 的完整兔耳被描述为 `tufts of fur`，当前结果主要覆盖耳缘；
 这属于 realized-edit 语义错误，不是 bbox 漏框。
+
+### Prefilter keep 均匀抽样：56 条
+
+从最新 prefilter 全量输出的 keep 数据中按 7 个类别各抽 8 条，并使用同一最终流程运行：
+
+- grounding：56 rows，0 runtime error，0 `GROUND_FAIL`，48 `OK` + 8 `STYLE_FULL_IMAGE`；
+- region bbox：97；小区域复核 30 requests / 35 candidates，0 refinement parse failure；
+- 第一轮 observation 有 5 条长输出 JSON 截断，集中在不依赖局部 grounding 的
+  style/background 路线，均未影响最终 mask；
+- mask：56/56 `OK`，0 runtime error，0 rectangle fallback；
+- 样本级 mask source：PCS 22、PVS 26、style full-image box 8；
+- mask area fraction：min 0.0054、median 0.1474、mean 0.3161、max 1.0000。
+
+下面六张图是当前最终流程在 47 条历史难例上的分类可视化。每行依次展示 source 与 MLLM
+bbox、target 与 MLLM bbox、映射到 source 的最终 mask overlay，以及二值 mask。
 
 ### Add
 

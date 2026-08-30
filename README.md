@@ -1,6 +1,7 @@
 # SAM3 × CrispEdit
 
-本仓库用于 CrispEdit-2M 的三阶段处理：
+本仓库用于 CrispEdit-2M 的三阶段处理。`prefilter_mask_improved` 分支中的下述流程是
+当前最终生产方案：
 
 ```text
 原始 source/target parquet
@@ -32,6 +33,9 @@ SAM3 dual-prompt mask（bbox PVS + phrase PCS + phrase/bbox PCS + region fusion�
 
 `crispedit_mask_dataset_runner.py` 和 `crispedit_mask_pipeline.py` 保留用于旧流程回归对照，
 不再是推荐生产入口。
+
+mask 阶段的最终设计、8 卡运行方式、两组最终评测统计和分类可视化统一见
+[docs/CRISPEDIT_MASK.md](docs/CRISPEDIT_MASK.md)。
 
 ## 环境
 
