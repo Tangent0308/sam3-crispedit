@@ -47,8 +47,8 @@ target mask 按归一化坐标映射到 source；两图宽高比差异超过 2% 
 
 ## 验证集运行
 
-以下命令将所有产物写到 codebase 内的 `ScaleEdit-results/validation-v1`，不会向验证集目录
-写入任何内容。
+以下命令将所有产物写到 workspace 中独立的 `ScaleEdit-results/validation-v1`，不会向验证集
+目录写入任何内容。
 
 ```bash
 cd /opt/tiger/tanyue/sam3-prefilter_improved
@@ -79,7 +79,8 @@ python scripts/visualize_scaleedit_masks.py \
   --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-200-v5 \
   --grounding-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/grounding-final \
   --mask-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/masks \
-  --output-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/review
+  --output-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/review-by-category \
+  --coarse-category-groups
 
 python scripts/validate_scaleedit_masks.py \
   --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-200-v5 \
@@ -111,12 +112,83 @@ mask parquet 继续逐行对齐，包含：
 - `mllm_model`、`prompt_version`、`sam_version`、`mask_policy_version`。
 
 可视化脚本会严格检查 raw/grounding/mask 的行数和 `sample_id`，再生成每类代表样本的
-分页 review 图与 `summary.json`。
+分页 review 图与 `summary.json`。默认按 23 个 `final_task` 选样；加入
+`--coarse-category-groups` 后，会生成本文采用的五组粗粒度 review 目录及根目录
+`index.json`。该模式不能与 `--task` 或 `--sample-id` 混用。
 
 `product photography` / `product mockup` 式 extraction 还有一条窄范围确定性后处理：即使
 MLLM 把它误判为普通背景替换，也强制改为全图，并把原契约保存在 `route_override` 中。
 这是为了避免反转前景后在主体旧位置留下漏标空洞。已有 raw grounding 可通过
 `scripts/apply_scaleedit_grounding_policy.py` 写到新目录，无需重跑模型。
+
+## 200 条验证集结果
+
+归档结果来自 `ScaleEdit-filtered-balanced-final-task-200-v5`，共覆盖 23 个任务。最终运行目录
+使用 `grounding-final-v4` 和 `masks-final`；版本后缀记录验证期间的定向复核，不是生产路径的
+硬编码要求。机器校验结果归档在
+[`validation_summary.json`](../docs_assets/scaleedit/validation_v1/validation_summary.json)。
+
+| 指标 | 结果 |
+|---|---:|
+| 样本 / 唯一 sample ID | 200 / 200 |
+| 任务数 | 23 |
+| instance RLE 数 | 488 |
+| 结构校验错误 | 0 |
+| `regions` / `full_image` / `protect_foreground` | 178 / 17 / 5 |
+| PVS / PCS / hybrid | 81 / 15 / 33 |
+| direct box / full image / inverse foreground | 49 / 17 / 5 |
+| mask 面积比例，中位数 / 均值 | 0.1156 / 0.2725 |
+
+这里的 `qc=OK` 表示输出对齐、JSON/RLE、尺寸、非空性和 fallback 等机器规则通过，不代表
+人工确认语义完全正确。人工抽查已经发现一个 `count_change` 样本中，MLLM 的两个 target
+bbox 明显向桌面方向下移；PVS 又接受了与错误框自洽但包含桌面的 mask。该问题应在 100k
+生产运行前通过 bbox 复核和语义质量阈值继续改进，不能把本次 200/200 `OK` 解读为
+200/200 人工验收通过。
+
+## 粗粒度分类可视化
+
+每个细任务选择一个代表样本。每行从左到右依次为 source 与 bbox、edited result 与 bbox、
+source 坐标系 mask overlay、二值 mask。图片和对应选样统计均保存在
+`docs_assets/scaleedit/validation_v1/`；五组的任务映射和相对产物路径见
+[`index.json`](../docs_assets/scaleedit/validation_v1/index.json)。
+
+### 1. 对象增删与构图
+
+包含 `object_addition`、`object_removal`、`object_replacement`、`count_change` 和
+`compositional_editing`。对应的
+[选样与统计](../docs_assets/scaleedit/validation_v1/01_object_composition/summary.json)。
+
+![ScaleEdit object and composition review](../docs_assets/scaleedit/validation_v1/01_object_composition/scaleedit_mask_preview_page_1.jpg)
+
+### 2. 属性、材质、尺度与动作
+
+包含 `action_editing`、`color_change`、`material_change` 和 `size_change`。对应的
+[选样与统计](../docs_assets/scaleedit/validation_v1/02_attribute_action/summary.json)。
+
+![ScaleEdit attribute and action review](../docs_assets/scaleedit/validation_v1/02_attribute_action/scaleedit_mask_preview_page_1.jpg)
+
+### 3. 文本与符号
+
+包含四类表面文字编辑和 `symbolic_reasoning`。对应的
+[选样与统计](../docs_assets/scaleedit/validation_v1/03_text_symbol/summary.json)。
+
+![ScaleEdit text and symbol review](../docs_assets/scaleedit/validation_v1/03_text_symbol/scaleedit_mask_preview_page_1.jpg)
+
+### 4. 推理、修复与美化
+
+包含 `perceptual_reasoning`、`scientific_reasoning`、`social_reasoning` 和
+`visual_beautification`。对应的
+[选样与统计](../docs_assets/scaleedit/validation_v1/04_reasoning_repair/summary.json)。
+
+![ScaleEdit reasoning and repair review](../docs_assets/scaleedit/validation_v1/04_reasoning_repair/scaleedit_mask_preview_page_1.jpg)
+
+### 5. 场景、全局变化与主体提取
+
+包含 `background_replacement`、`part_extraction`、`style_transfer`、`tone_adjustment` 和
+`viewpoint_transformation`。对应的
+[选样与统计](../docs_assets/scaleedit/validation_v1/05_scene_global_extraction/summary.json)。
+
+![ScaleEdit scene, global edit, and extraction review](../docs_assets/scaleedit/validation_v1/05_scene_global_extraction/scaleedit_mask_preview_page_1.jpg)
 
 ## 全量切换
 

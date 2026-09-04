@@ -1,7 +1,10 @@
-# CrispEdit-2M labeling
+# Image-edit mask labeling
 
-本仓库提供 CrispEdit-2M 的完整三阶段打标流程：先过滤无效编辑，再用 MLLM 定位实际
-编辑区域，最后用 SAM3 生成 source 坐标系下的 mask。当前生产方法不使用 pixel diff。
+本仓库提供 CrispEdit-2M 和 ScaleEdit 的图像编辑区域打标流程。两套数据集共享底层
+SAM3 能力，但保留独立的输入、prompt、任务策略和输出契约，不通过类别名强行互相映射。
+当前生产方法不使用 pixel diff。
+
+CrispEdit 完整流程：
 
 ```text
 raw parquet
@@ -11,8 +14,18 @@ raw parquet
   -> dual-prompt mask (SAM3)
 ```
 
-详细设计见 [prefilter 文档](docs/CRISPEDIT_PREFILTER.md) 和
-[mask 文档](docs/CRISPEDIT_MASK.md)。
+ScaleEdit 从已经清洗并分配 `final_task` 的 source/result pair 开始：
+
+```text
+ScaleEdit parquet
+  -> paired-image edit audit and grounding (Qwen3.5)
+  -> task-aware mask routing and segmentation (SAM3)
+  -> aligned parquet, validation report, and visual review
+```
+
+详细设计见 [CrispEdit prefilter 文档](docs/CRISPEDIT_PREFILTER.md)、
+[CrispEdit mask 文档](docs/CRISPEDIT_MASK.md) 和
+[ScaleEdit mask 文档与验证结果](docs/SCALEEDIT_MASK.md)。
 
 ## 代码组织
 
@@ -37,7 +50,18 @@ crispedit/
 
 `scripts/` 保存评测、导出和可视化工具，`tests/` 保存单元测试。
 
-## 当前打标方式
+ScaleEdit 的独立实现位于 `scaleedit/`，稳定入口为：
+
+- `scaleedit_mllm_grounding.py`
+- `scaleedit_grounded_mask_runner.py`
+- `scripts/visualize_scaleedit_masks.py`
+- `scripts/validate_scaleedit_masks.py`
+
+验证集的统计、粗粒度分类和可视化结果已归档在
+[`docs/SCALEEDIT_MASK.md`](docs/SCALEEDIT_MASK.md)，原始预览图位于
+`docs_assets/scaleedit/validation_v1/`。
+
+## CrispEdit 当前打标方式
 
 1. **Prefilter**：Qwen3-VL 分别提取 source、target 和盲对比事实；代码按编辑类别检查
    change、主体一致性、构图和无关区域保持情况。模型不直接决定 keep/drop，最终采用
@@ -52,7 +76,7 @@ crispedit/
 Prefilter drop 行保留 `PREFILTER_SKIP` 占位，不调用后续模型；所有输出 parquet 与原始
 shard 同名、逐行对齐。
 
-## 运行
+## CrispEdit 运行
 
 要求 Python 3.11、CUDA GPU，以及本地 Qwen3-VL、Qwen3.5 和 SAM3 checkpoint。
 

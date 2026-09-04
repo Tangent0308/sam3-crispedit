@@ -1,0 +1,90 @@
+{
+  "rows": 45,
+  "task_count": 5,
+  "tasks": {
+    "compositional_editing": 9,
+    "count_change": 9,
+    "object_addition": 9,
+    "object_removal": 9,
+    "object_replacement": 9
+  },
+  "qc_flags": {
+    "OK": 45
+  },
+  "mask_sources": {
+    "direct_box": 1,
+    "hybrid": 12,
+    "pcs": 5,
+    "pvs": 27
+  },
+  "mask_modes": {
+    "regions": 45
+  },
+  "per_task": {
+    "compositional_editing": {
+      "rows": 9,
+      "mean_area_frac": 0.180391,
+      "min_area_frac": 0.007844,
+      "max_area_frac": 0.661765
+    },
+    "count_change": {
+      "rows": 9,
+      "mean_area_frac": 0.11446,
+      "min_area_frac": 0.009531,
+      "max_area_frac": 0.283726
+    },
+    "object_addition": {
+      "rows": 9,
+      "mean_area_frac": 0.111623,
+      "min_area_frac": 0.01205,
+      "max_area_frac": 0.282127
+    },
+    "object_removal": {
+      "rows": 9,
+      "mean_area_frac": 0.154948,
+      "min_area_frac": 0.003259,
+      "max_area_frac": 0.378938
+    },
+    "object_replacement": {
+      "rows": 9,
+      "mean_area_frac": 0.153443,
+      "min_area_frac": 0.028351,
+      "max_area_frac": 0.380301
+    }
+  },
+  "preview_pages": [
+    "scaleedit_mask_preview_page_1.jpg"
+  ],
+  "selected_samples": [
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0005.parquet#17954",
+      "final_task": "compositional_editing",
+      "shard": "part-00002.parquet",
+      "row_idx": 16
+    },
+    {
+      "sample_id": "3.4_count_change/count_change_0000.parquet#182",
+      "final_task": "count_change",
+      "shard": "part-00000.parquet",
+      "row_idx": 8
+    },
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0007.parquet#12120",
+      "final_task": "object_addition",
+      "shard": "part-00004.parquet",
+      "row_idx": 1
+    },
+    {
+      "sample_id": "5.4_scientific_reasoning/scientific_reasoning_0000.parquet#6617",
+      "final_task": "object_removal",
+      "shard": "part-00002.parquet",
+      "row_idx": 0
+    },
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0007.parquet#35743",
+      "final_task": "object_replacement",
+      "shard": "part-00004.parquet",
+      "row_idx": 17
+    }
+  ]
+}

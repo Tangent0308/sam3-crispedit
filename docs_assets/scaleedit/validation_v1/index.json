@@ -1,0 +1,78 @@
+{
+  "groups": [
+    {
+      "name": "01_object_composition",
+      "tasks": [
+        "object_addition",
+        "object_removal",
+        "object_replacement",
+        "count_change",
+        "compositional_editing"
+      ],
+      "rows": 45,
+      "summary": "01_object_composition/summary.json",
+      "preview_pages": [
+        "01_object_composition/scaleedit_mask_preview_page_1.jpg"
+      ]
+    },
+    {
+      "name": "02_attribute_action",
+      "tasks": [
+        "action_editing",
+        "color_change",
+        "material_change",
+        "size_change"
+      ],
+      "rows": 35,
+      "summary": "02_attribute_action/summary.json",
+      "preview_pages": [
+        "02_attribute_action/scaleedit_mask_preview_page_1.jpg"
+      ]
+    },
+    {
+      "name": "03_text_symbol",
+      "tasks": [
+        "building_surface_text_editing",
+        "gui_interface_text_editing",
+        "movie_poster_text_editing",
+        "object_surface_text_editing",
+        "symbolic_reasoning"
+      ],
+      "rows": 44,
+      "summary": "03_text_symbol/summary.json",
+      "preview_pages": [
+        "03_text_symbol/scaleedit_mask_preview_page_1.jpg"
+      ]
+    },
+    {
+      "name": "04_reasoning_repair",
+      "tasks": [
+        "perceptual_reasoning",
+        "scientific_reasoning",
+        "social_reasoning",
+        "visual_beautification"
+      ],
+      "rows": 34,
+      "summary": "04_reasoning_repair/summary.json",
+      "preview_pages": [
+        "04_reasoning_repair/scaleedit_mask_preview_page_1.jpg"
+      ]
+    },
+    {
+      "name": "05_scene_global_extraction",
+      "tasks": [
+        "background_replacement",
+        "part_extraction",
+        "style_transfer",
+        "tone_adjustment",
+        "viewpoint_transformation"
+      ],
+      "rows": 42,
+      "summary": "05_scene_global_extraction/summary.json",
+      "preview_pages": [
+        "05_scene_global_extraction/scaleedit_mask_preview_page_1.jpg"
+      ]
+    }
+  ],
+  "samples_per_task": 1
+}

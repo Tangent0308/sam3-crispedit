@@ -1,0 +1,32 @@
+{
+  "rows": 200,
+  "unique_sample_ids": 200,
+  "task_count": 23,
+  "instances": 488,
+  "validation_error_count": 0,
+  "validation_errors": [],
+  "qc_flags": {
+    "OK": 200
+  },
+  "mask_sources": {
+    "direct_box": 49,
+    "full_image": 17,
+    "hybrid": 33,
+    "inverse_foreground": 5,
+    "pcs": 15,
+    "pvs": 81
+  },
+  "mask_modes": {
+    "full_image": 17,
+    "protect_foreground": 5,
+    "regions": 178
+  },
+  "area_frac": {
+    "min": 0.003258544564421669,
+    "median": 0.11560310555069034,
+    "mean": 0.2725216724549482,
+    "max": 1.0,
+    "empty": 0,
+    "full": 18
+  }
+}

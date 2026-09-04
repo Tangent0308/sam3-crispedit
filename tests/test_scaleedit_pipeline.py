@@ -15,12 +15,19 @@ from scaleedit.policy import (
     parse_grounding,
     parse_observation,
 )
+from scripts.visualize_scaleedit_masks import COARSE_CATEGORY_GROUPS
 
 
 def test_all_scaleedit_tasks_are_explicitly_supported():
     assert len(SUPPORTED_TASKS) == 23
     for task in SUPPORTED_TASKS:
         assert canonical_task(task.replace("_", " ")) == task
+
+
+def test_coarse_review_groups_cover_every_scaleedit_task_once():
+    grouped_tasks = [task for _, tasks in COARSE_CATEGORY_GROUPS for task in tasks]
+    assert len(grouped_tasks) == len(set(grouped_tasks))
+    assert set(grouped_tasks) == SUPPORTED_TASKS
 
 
 def test_task_prompts_do_not_collapse_scaleedit_to_crispedit_routes():
