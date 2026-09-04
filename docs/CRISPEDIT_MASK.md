@@ -11,7 +11,7 @@ region fusion 阈值等实验路线不再作为生产入口。
 
 ```text
 raw parquet + prefilter manifest
-  → Qwen3.5 第一轮：source + result + instruction → realized edit specification
+  → Qwen3.5 第一轮：按类别观察 realized edit 或 background protected foreground
   → Qwen3.5 第二轮：realized edit → region ref + conservative bbox
   → 小区域局部复核：高清 context crop → corrected complete-object bbox
   → grounding parquet
@@ -26,6 +26,14 @@ raw parquet + prefilter manifest
 的对象、修改前后外观、空间布局和完整范围。color/material 类型额外提供四组 source/result
 匹配局部放大图，并检查 face/head、neck、arms/hands、可见 legs/feet，避免 instruction
 只提到手臂时漏掉同方向变化的脸部。
+
+background change 使用不同的第一轮目标：不再要求模型把“背景变化”改写成待分割对象，
+而是逐项审计 source/result 中身份与空间范围保持稳定、必须从背景 mask 排除的前景。天空、
+地形、道路、水面、山林和通用植被在参与环境替换时仍属于背景。存在稳定人物、动物、产品、
+建筑/道具时输出 `exclude_foreground` 并在第二轮给出完整保护框；若整幅可见场景都被转换且
+没有独立稳定前景，则输出 `full_image`，最终直接生成全图 mask，不再把合法空框误报为
+`GROUND_FAIL`。近邻同类小物合框，远距离同类实例分框，且第二轮必须逐项覆盖第一轮描述的
+全部位置。
 
 第二轮按“空间编辑区域”而不是按像素点出框。bbox 是 SAM 的 recall-first 搜索范围，必须
 完整包含编辑区域并留有安全边距。相邻花朵、穿孔、花瓣、纹身、斑点等小元素使用一个
@@ -93,17 +101,18 @@ recall-first 扩展。background/style 不使用这一复核，因为 background
 | replace | source 旧物 + target 新物 | source ∪ mapped target |
 | color/material | source 中所有实际变色部位 | source regions |
 | motion change | source/target 动作部位和直接交互物 | source ∪ mapped target |
-| background change | source 中需保护的前景 | NOT(dilated foreground) |
+| background change | source 中稳定前景；无稳定前景时显式 full image | NOT(dilated foreground) 或 full image |
 | style | 无需 grounding | full image |
 
 ## 代码结构
 
 | 文件 | 作用 |
 |---|---|
-| `crispedit_grounding.py` | 两轮与小区域复核 prompt、编辑类型路由、bbox 融合、JSON parser 与 region schema |
-| `crispedit_mllm_grounding.py` | 8 卡 Qwen3.5 runner、局部细节/框复核图、manifest 对齐和 grounding parquet |
-| `crispedit_grounded_mask_pipeline.py` | 单样本 SAM3 三路候选、融合、映射和连通区域逻辑 |
-| `crispedit_grounded_mask_runner.py` | 8 卡 SAM3 shard runner、最终 parquet 与逐样本 preview |
+| `crispedit/mask/grounding.py` | 两轮与小区域复核 prompt、类别路由、bbox 融合、JSON parser 与 region schema |
+| `crispedit/mask/grounding_runner.py` | 8 卡 Qwen3.5 调度、局部复核图、manifest 对齐和 grounding parquet |
+| `crispedit/mask/pipeline.py` | 单样本 SAM3 三路候选、融合、映射和连通区域逻辑 |
+| `crispedit/mask/runner.py` | 8 卡 SAM3 shard 调度、最终 parquet 与逐样本 preview |
+| `crispedit_mllm_grounding.py` / `crispedit_grounded_mask_runner.py` | 稳定的生产命令行入口 |
 | `scripts/export_grounding_outputs.py` | 将模型两轮输出导出为 JSON/JSONL/CSV/Markdown |
 | `scripts/build_category_previews.py` | 从原图重建按类别 review 图，避免放大低清 runtime preview |
 | `scripts/evaluate_grounded_mask_bad_cases.py` | 小批量输出完整性、QC、来源和面积统计 |
@@ -134,9 +143,11 @@ python -u crispedit_mllm_grounding.py \
   --devices 0,1,2,3,4,5,6,7 \
   --tensor-parallel-size 2 \
   --grounding-mode two-pass \
+  --background-observation-mode foreground-audit \
   --bbox-refinement small \
-  --batch-size 1 \
-  --request-batch-size 2 \
+  --batch-size 16 \
+  --request-batch-size 8 \
+  --max-images-per-generate 20 \
   --max-new-tokens 512 \
   --fail-fast
 ```
@@ -144,6 +155,15 @@ python -u crispedit_mllm_grounding.py \
 `--bbox-refinement small` 是默认生产策略；可用 `off` 做旧路线对照，或用 `all` 复核所有
 bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine-min-context`
 与 `--bbox-refine-context-scale` 调整。
+
+`--background-observation-mode foreground-audit` 是默认背景策略。仅在复现旧输出时使用
+`legacy`；两种模式不应写入同一个新实验目录。
+
+生产配置在 shard 内积累多条 keep 样本，并把同一轮请求批量送入模型。runner 同时按照
+`--max-images-per-generate` 限制每次 generate 的总视觉负载：普通双图请求可以充分合批，
+color/material 的四组局部 crop 会自动拆成较小 batch；若仍触发 CUDA OOM，则自动二分
+重试。style 的最终策略本来就是 full-image mask，因此 grounding 阶段直接写入
+`STYLE_FULL_IMAGE` 契约，不再执行不会影响 mask 的 MLLM observation。
 
 不加 `--overwrite` 时完整 shard 会被跳过。修改 prompt 或策略后应使用新的输出目录，避免
 把不同策略的 parquet 混在一起。
@@ -173,14 +193,88 @@ python scripts/export_grounding_outputs.py \
 python scripts/build_category_previews.py \
   --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
   --mask-dir /path/to/masks \
-  --selection-file docs_assets/mask_pipeline/eval_selection.json \
+  --selection-file docs_assets/mask_pipeline/full_run_selection.json \
   --output-dir /path/to/previews_by_category \
-  --panel-width 520 \
-  --panel-height 325 \
-  --columns 1
+  --panel-width 420 \
+  --panel-height 280 \
+  --columns 1 \
+  --image-format jpeg \
+  --jpeg-quality 86
 ```
 
-## 最终实验结果
+## 全量运行结果
+
+2026-09-01 完成了 prefilter keep 数据的全量 grounding 与 SAM3 mask 生成。路径如下：
+
+```text
+原始数据       /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
+prefilter      /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter
+keep manifest  /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest
+grounding      /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding
+mask           /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask
+runtime preview /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-previews
+run log         /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-run-resumed-after-background-audit-20260831/full_mask_labeling.log
+```
+
+完整性检查为 591/591 个同名 shard、150,421 行、0 runtime error、0 临时文件。prefilter
+保留 42,639 行并跳过 107,782 行；保留行中 42,475 个 mask 为 `OK`，140 个为
+`GROUND_FAIL`，24 个使用 `BOX_FALLBACK`。恢复运行阶段的 grounding 约 32 小时 41 分，
+SAM3 阶段约 2 小时 39 分。
+
+| 类别 | 原始行 | prefilter keep | OK | GROUND_FAIL | BOX_FALLBACK |
+|---|---:|---:|---:|---:|---:|
+| add | 21,504 | 5,797 | 5,775 | 16 | 6 |
+| background | 21,504 | 10,059 | 10,028 | 24 | 7 |
+| color | 21,294 | 8,154 | 8,131 | 21 | 2 |
+| motion | 21,559 | 2,497 | 2,417 | 76 | 4 |
+| remove | 21,504 | 2,509 | 2,504 | 3 | 2 |
+| replace | 21,504 | 716 | 713 | 0 | 3 |
+| style | 21,552 | 12,907 | 12,907 | 0 | 0 |
+| **总计** | **150,421** | **42,639** | **42,475** | **140** | **24** |
+
+最终候选来源为 PCS 14,839、PVS 14,633、connected group 96、box/full-image
+13,071。所有 mask 均在 source 坐标系，drop 行仍以 `PREFILTER_SKIP` 保持逐行对齐。
+
+需要注意：这批全量产物启动时显式使用了旧的 background observation 模式。其 background
+中有 24 条 `GROUND_FAIL`，另有 57 条虽标记 `OK` 但 mask 面积为 0。当前代码已经将默认
+策略改为本文前述的 `foreground-audit`，但尚未回灌到以上全量路径；正式发布数据前应只对
+background 类使用新目录定向重跑并重新做完整性检查。
+
+### 全量结果代表性可视化
+
+以下样本直接从全量 mask parquet 和原始图片重建。每张依次展示 source + bbox、target +
+bbox、source 坐标系 mask overlay 和二值 mask；具体选择记录在
+[`full_run_selection.json`](../docs_assets/mask_pipeline/full_run_selection.json)。
+
+#### Add
+
+![full-run add mask](../docs_assets/mask_pipeline/full_run/add.jpg)
+
+#### Background
+
+![full-run background mask](../docs_assets/mask_pipeline/full_run/background.jpg)
+
+#### Color
+
+![full-run color mask](../docs_assets/mask_pipeline/full_run/color.jpg)
+
+#### Motion
+
+![full-run motion mask](../docs_assets/mask_pipeline/full_run/motion.jpg)
+
+#### Remove
+
+![full-run remove mask](../docs_assets/mask_pipeline/full_run/remove.jpg)
+
+#### Replace
+
+![full-run replace mask](../docs_assets/mask_pipeline/full_run/replace.jpg)
+
+#### Style
+
+![full-run style mask](../docs_assets/mask_pipeline/full_run/style.jpg)
+
+## 小批量回归结果
 
 ### 历史 mask 难例：47 条
 
@@ -194,7 +288,7 @@ mask 难例，在 GPU 0–7 上分别运行 Qwen3.5 和 SAM3。该评测专门�
 - mask：47/47 `OK`，0 runtime error，0 rectangle fallback；
 - 样本级 mask source：PCS 40、PVS 3、connected group 4；
 - mask area fraction：min 0.0126、median 0.1070、mean 0.1646、max 0.7510；
-- 单元测试与 manifest 集成测试：51 passed。
+- 当前仓库单元测试与 manifest 集成测试：55 passed。
 
 这组样本没有像素级 GT，因此面积和来源统计只用于发现异常，最终仍需人工检查。当前已知
 边界包括：如果第一轮把完整对象错误改写成材质/纹理短语，SAM 可能只分割其轮廓。例如

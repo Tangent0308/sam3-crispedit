@@ -35,7 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--panel-width", type=int, default=640)
     parser.add_argument("--panel-height", type=int, default=400)
     parser.add_argument("--columns", type=int, default=1, help="Cards per category sheet row; 1 maximizes clarity")
-    parser.add_argument("--jpeg-quality", type=int, default=95, help="Reserved for future JPEG export")
+    parser.add_argument("--image-format", choices=("png", "jpeg"), default="png")
+    parser.add_argument("--jpeg-quality", type=int, default=88)
     return parser.parse_args()
 
 
@@ -66,6 +67,14 @@ def _load_selection(path: Optional[Path]) -> Optional[Dict[str, set[int]]]:
     for item in cases:
         selected[str(item["shard"])].add(int(item["row_idx"]))
     return selected
+
+
+def _selected_mask_paths(
+    mask_dir: Path, selection: Optional[Dict[str, set[int]]]
+) -> Iterable[Path]:
+    for path in sorted(mask_dir.glob("*.parquet")):
+        if selection is None or path.name in selection:
+            yield path
 
 
 def _read_rows(
@@ -239,7 +248,7 @@ def main() -> None:
     grouped: Dict[str, List[Image.Image]] = defaultdict(list)
     entries: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
-    for mask_path in sorted(args.mask_dir.glob("*.parquet")):
+    for mask_path in _selected_mask_paths(args.mask_dir, selection):
         selected = selection.get(mask_path.name) if selection is not None else None
         mask_rows = _read_rows(
             mask_path,
@@ -272,7 +281,7 @@ def main() -> None:
                     "shard": mask_path.name,
                     "row_idx": row_idx,
                     "instruction": str(raw_rows[row_idx].get("instruction", "")),
-                    "output": f"{_slug(category)}.png",
+                    "output": f"{_slug(category)}.{'jpg' if args.image_format == 'jpeg' else 'png'}",
                 }
             )
 
@@ -301,8 +310,12 @@ def main() -> None:
             x = gap + column * (card_width + gap)
             y = title_height + gap + row * (card_height + gap)
             sheet.paste(card, (x, y))
-        path = args.output_dir / f"{_slug(category)}.png"
-        sheet.save(path, format="PNG", optimize=True)
+        extension = "jpg" if args.image_format == "jpeg" else "png"
+        path = args.output_dir / f"{_slug(category)}.{extension}"
+        if args.image_format == "jpeg":
+            sheet.save(path, format="JPEG", quality=args.jpeg_quality, optimize=True)
+        else:
+            sheet.save(path, format="PNG", optimize=True)
         category_paths[category] = str(path)
 
     index = {

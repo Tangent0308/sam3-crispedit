@@ -172,9 +172,10 @@ mods = [
     'PIL',
     'einops',
     'pycocotools',
-    'crispedit_mllm_prefilter',
-    'crispedit_mask_dataset_runner',
-    'crispedit_mask_pipeline',
+    'crispedit.prefilter.runner',
+    'crispedit.mask.grounding_runner',
+    'crispedit.mask.runner',
+    'crispedit.legacy.pipeline',
     'sam3',
 ]
 for name in mods:
@@ -259,10 +260,12 @@ Next steps:
        huggingface-cli whoami
   2) Run the smoke prefilter:
        python crispedit_mllm_prefilter.py --help
-  3) Run the smoke mask stage:
-       python crispedit_mask_dataset_runner.py --help
+  3) Inspect the grounding and mask stages:
+       python crispedit_mllm_grounding.py --help
+       python crispedit_grounded_mask_runner.py --help
 
 Production docs:
   - README.md
   - docs/CRISPEDIT_PREFILTER.md
+  - docs/CRISPEDIT_MASK.md
 EOF

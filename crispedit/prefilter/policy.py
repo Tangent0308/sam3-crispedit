@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Evidence normalization and deterministic decisions for the CrispEdit fact prefilter.
 
 The vision-language model is deliberately not asked for a keep/drop verdict.  It

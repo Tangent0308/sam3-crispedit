@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
-"""
-CrispEdit-2M 全量/分片 mask 打标 Runner
-======================================
+"""Legacy CrispEdit pixel-difference-assisted mask runner.
+
+This module is retained only for regression comparison.  Run it explicitly as
+``python -m crispedit.legacy.runner``; it is not part of the production path.
 
 特点:
 1) 一个进程绑定一张 GPU，尽可能并行地处理多个 parquet shard
@@ -25,7 +25,7 @@ CrispEdit-2M 全量/分片 mask 打标 Runner
     mask = Image.open(io.BytesIO(row['mask_png'])).convert('L')
 
 小规模验证建议:
-    python crispedit_mask_dataset_runner.py \
+    python -m crispedit.legacy.runner \
       --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
       --output-dir /tmp/crispedit_mask_parallel_test \
       --devices 0,1 \
@@ -57,7 +57,7 @@ import pyarrow.parquet as pq
 from PIL import Image, ImageDraw
 from tqdm import tqdm
 
-from crispedit_mask_pipeline import annotate_one, canonicalize_type
+from crispedit.legacy.pipeline import annotate_one, canonicalize_type
 
 
 @dataclass

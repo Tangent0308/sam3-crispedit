@@ -1,4 +1,4 @@
-from crispedit_mllm_prefilter import (
+from crispedit.prefilter.runner import (
     _make_audit_and_manifest_rows,
     build_questionnaire,
     build_review_state_prompt,
@@ -8,8 +8,8 @@ from crispedit_mllm_prefilter import (
     parse_simple_instruction_slots,
     select_focus_bbox,
 )
-from crispedit_mask_dataset_runner import base_prefilter_fields
-from crispedit_prefilter_policy import (
+from crispedit.legacy.runner import base_prefilter_fields
+from crispedit.prefilter.policy import (
     adjudicate_evidence,
     adjudicate_terminal_no_change,
     derive_state_text_match,

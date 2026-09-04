@@ -1,0 +1,73 @@
+{
+  "categories": {
+    "add": "docs_assets/mask_pipeline/full_run/add.jpg",
+    "color": "docs_assets/mask_pipeline/full_run/color.jpg",
+    "remove": "docs_assets/mask_pipeline/full_run/remove.jpg",
+    "replace": "docs_assets/mask_pipeline/full_run/replace.jpg",
+    "style": "docs_assets/mask_pipeline/full_run/style.jpg",
+    "background": "docs_assets/mask_pipeline/full_run/background.jpg",
+    "motion": "docs_assets/mask_pipeline/full_run/motion.jpg"
+  },
+  "entries": {
+    "add": [
+      {
+        "shard": "add_00000.parquet",
+        "row_idx": 17,
+        "instruction": "Add the boats back to the marina",
+        "output": "add.jpg"
+      }
+    ],
+    "background": [
+      {
+        "shard": "background change_00029.parquet",
+        "row_idx": 181,
+        "instruction": "change the background to a galaxy filled with stars",
+        "output": "background.jpg"
+      }
+    ],
+    "color": [
+      {
+        "shard": "color_00000.parquet",
+        "row_idx": 25,
+        "instruction": "Turn motorcycle positioned in the right-central area into red",
+        "output": "color.jpg"
+      }
+    ],
+    "motion": [
+      {
+        "shard": "motion change_00024.parquet",
+        "row_idx": 178,
+        "instruction": "The person lowers their hands to their sides.",
+        "output": "motion.jpg"
+      }
+    ],
+    "remove": [
+      {
+        "shard": "remove_00009.parquet",
+        "row_idx": 15,
+        "instruction": "remove the multiple piercings on her face",
+        "output": "remove.jpg"
+      }
+    ],
+    "replace": [
+      {
+        "shard": "replace_00080.parquet",
+        "row_idx": 77,
+        "instruction": "replace the absence of hands with elegantly detailed hands",
+        "output": "replace.jpg"
+      }
+    ],
+    "style": [
+      {
+        "shard": "style_00000.parquet",
+        "row_idx": 0,
+        "instruction": "Please recreate this in digital painting artistic style",
+        "output": "style.jpg"
+      }
+    ]
+  },
+  "panel_width": 420,
+  "panel_height": 280,
+  "columns": 1,
+  "note": "Rendered from original input image bytes and final mask_png; masks are source-coordinate masks."
+}
