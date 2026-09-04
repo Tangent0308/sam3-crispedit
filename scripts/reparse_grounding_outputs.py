@@ -11,8 +11,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from crispedit_grounding import grounding_is_complete, parse_grounding_output
-from crispedit_mllm_grounding import GROUND_SCHEMA
+from crispedit.mask.grounding import grounding_is_complete, parse_grounding_output
+from crispedit.mask.grounding_runner import GROUND_SCHEMA
 
 
 def repair_row(row: dict) -> dict:

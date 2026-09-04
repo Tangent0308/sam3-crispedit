@@ -1,0 +1,12 @@
+{
+  "name": "full_run_representative_masks",
+  "cases": [
+    {"shard": "add_00000.parquet", "row_idx": 17},
+    {"shard": "background change_00029.parquet", "row_idx": 181},
+    {"shard": "color_00000.parquet", "row_idx": 25},
+    {"shard": "motion change_00024.parquet", "row_idx": 178},
+    {"shard": "remove_00009.parquet", "row_idx": 15},
+    {"shard": "replace_00080.parquet", "row_idx": 77},
+    {"shard": "style_00000.parquet", "row_idx": 0}
+  ]
+}

@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageFilter
 
-from crispedit_grounding import canonicalize_type
+from crispedit.mask.grounding import canonicalize_type
 
 
 @dataclass(frozen=True)
@@ -951,6 +951,18 @@ def annotate_grounded_sample(processor, sample: Dict, ground_row: Dict, sam_vers
             "mask_source": "box",
             "qc_flag": "GROUND_FAIL",
             "qc_flags": ["GROUND_FAIL"],
+            "ar_delta": ar_delta,
+            "sam_version": sam_version,
+        }
+
+    if etype == "background" and payload.get("background_mask_mode") == "full_image":
+        mask = np.ones(source_shape, dtype=np.uint8)
+        return {
+            "mask": mask,
+            "instances": [],
+            "mask_source": "background_full_image",
+            "qc_flag": "OK",
+            "qc_flags": ["BACKGROUND_FULL_IMAGE"],
             "ar_delta": ar_delta,
             "sam_version": sam_version,
         }

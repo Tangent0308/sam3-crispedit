@@ -1,4 +1,4 @@
-"""Shared policy and parsing for the CrispEdit MLLM grounding stage.
+"""Prompt policy and parsing for the CrispEdit MLLM grounding stage.
 
 The grounding coordinate system is always ``[0, 1000]`` in the image named by
 ``grounding_image``.  Pixel conversion intentionally happens only in stage 2.
@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Sequence
 SINGLE_PASS_PROMPT_VERSION = "qwen35_grounding_v2"
 TWO_PASS_PROMPT_VERSION = "qwen35_realized_edit_region_ground_v7"
 OBSERVATION_PROMPT_VERSION = "qwen35_realized_edit_spec_v4"
+BACKGROUND_FOREGROUND_OBSERVATION_PROMPT_VERSION = "qwen35_background_foreground_audit_v1"
 BBOX_REFINEMENT_PROMPT_VERSION = "qwen35_local_bbox_refinement_v1"
 # Two-pass is the default on the mask-improved branch.  The runner still
 # exposes v2 single-pass for controlled A/B and backwards-compatible runs.
@@ -160,10 +161,57 @@ def _task_rule(etype: str, grounding_image: str, has_observation: bool = False) 
     raise ValueError(f"no grounding task for type {etype}")
 
 
-def build_change_observation_prompt(raw_type: object, instruction: object) -> str:
+def _build_background_foreground_observation_prompt(instruction: object) -> str:
+    return f"""You are auditing a background-replacement image edit before spatial grounding.
+
+Image 1 is the source image. Image 2 is the edited result.
+Instruction: {str(instruction or '').strip()}
+
+Your goal is NOT merely to describe what changed. Decide which visible source foreground entities,
+if any, must be protected from the editable background mask. Compare both images directly; the
+paired images are the source of truth and the instruction is only context.
+
+Definitions:
+- A protected foreground entity is a salient person, animal, product, vehicle, building/prop, or
+  decorative subject with a clear corresponding identity and spatial footprint in both images.
+- It may have weak relighting or minor reconstruction drift and still count as preserved.
+- Sky, clouds, terrain, fields, roads, water, mountains, forests/trees, generic vegetation, and
+  other environmental scene components belong to the replaced background when their appearance
+  or scene identity changes. Do not protect them merely because they occupy the lower/front part.
+- An object that is replaced, recolored, structurally transformed, appears only on one side, or is
+  itself part of the requested new scene is edited content, not unchanged foreground.
+
+Procedure:
+1. Describe the realized source-to-result background/environment change.
+2. Independently match every plausible salient foreground entity across the two images.
+3. Put only clearly corresponding, materially preserved entities in unchanged_foreground. Give a
+   concise SAM-friendly noun phrase and a precise location/extent description for each one.
+   Merge nearby repeated items of the same semantic category into one entry when one SAM phrase
+   can segment them. Keep at most 8 entries, ordered by visual salience and protected area; do not
+   spend entries on incidental texture or environmental scenery.
+4. If at least one protected entity exists, set background_mask_mode="exclude_foreground".
+5. If the whole visible scene/environment is transformed and no independent stable foreground
+   remains, set background_mask_mode="full_image" and return unchanged_foreground=[].
+6. Never use full_image merely because foreground detection is difficult. Use it only after the
+   explicit cross-image audit finds no stable entity. Output JSON only, no markdown or explanation.
+7. Be compact so the JSON is never truncated: edit_summary <= 25 words, each background string
+   <= 12 words, and each region_description <= 18 words.
+
+Required schema:
+{{"edit_summary":"precise realized background change","source_background":"literal source environment","target_background":"literal result environment","background_extent":"full_image|around_foreground","unchanged_foreground":[{{"source_ref":"source entity","target_ref":"matching result entity","sam_ref":"specific 2-8 word visual noun phrase","region_description":"exact source-image location and complete extent"}}],"background_mask_mode":"exclude_foreground|full_image","confidence":"high|medium|low"}}
+"""
+
+
+def build_change_observation_prompt(
+    raw_type: object,
+    instruction: object,
+    background_observation_mode: str = "legacy",
+) -> str:
     """Ask pass 1 for a precise, image-grounded specification of the realized edit."""
 
     etype = canonicalize_type(raw_type)
+    if etype == "background" and background_observation_mode == "foreground-audit":
+        return _build_background_foreground_observation_prompt(instruction)
     type_audit = ""
     if etype == "color":
         type_audit = (
@@ -300,11 +348,46 @@ Required schema:
 """
 
 
+def _build_background_foreground_grounding_prompt(
+    instruction: object, observation: Any
+) -> str:
+    observation_text = _observation_context(observation)
+    return f"""Ground only the source foreground that must be protected from a background mask.
+
+Image 1 is the source image. Image 2 is the edited result.
+Instruction: {str(instruction or '').strip()}
+Prior cross-image foreground audit:
+{observation_text}
+
+Independently verify the audit against both images, then draw conservative source-image boxes for
+every truly preserved item in unchanged_foreground. Each bbox must cover the complete visible
+source extent, including hair, limbs, thin edges, attached details, and important foreground props.
+
+Do not box sky, clouds, terrain, fields, roads, water, mountains, forests/trees, generic vegetation,
+or other environmental scene components that participate in the replacement. Do not protect an
+entity merely because it lies in the lower/front part of Image 1. If an audited item is actually
+replaced, recolored, structurally transformed, or absent in Image 2, omit it. Conversely, do not
+omit a clearly corresponding person, animal, product, vehicle, building/prop, or decorative subject.
+
+If the audit says background_mask_mode="full_image" and your independent comparison also finds no
+stable foreground entity, return []. If the audit names protected foreground, every verified item
+must have a box; an empty result is invalid. Cross-check every location and instance named in each
+region_description before finalizing. Merge nearby repeated same-category elements into one
+conservative box, but emit multiple boxes with the same ref for well-separated instances/clusters;
+never cover only the easiest instance of a plural ref. Use concise 2-8 word visible noun phrases.
+Coordinates refer to full Image 1 on a 0-1000 scale. Output JSON only.
+
+Required schema:
+[{{"ref":"woman in gold dress","bbox_2d":[x1,y1,x2,y2],"region_mode":"object","mask_density":"object"}}]
+"""
+
+
 def build_grounding_prompt(
     raw_type: object,
     instruction: object,
     grounding_image: str,
     observation: Any = None,
+    background_observation_mode: str = "legacy",
 ) -> str:
     etype = canonicalize_type(raw_type)
     if grounding_image not in {"source", "target"} or (
@@ -319,6 +402,8 @@ def build_grounding_prompt(
         else "Instruction"
     )
     observation_text = _observation_context(observation)
+    if etype == "background" and background_observation_mode == "foreground-audit":
+        return _build_background_foreground_grounding_prompt(instruction, observation)
     surface_family = _subject_surface_family(instruction, observation)
     if etype == "color" and grounding_image == "source" and surface_family:
         return _build_subject_surface_grounding_prompt(surface_family, observation)
@@ -392,6 +477,7 @@ def build_grounding_requests(
     raw_type: object,
     instruction: object,
     observation: Any = None,
+    background_observation_mode: str = "legacy",
 ) -> List[GroundingRequest]:
     etype = canonicalize_type(raw_type)
     default_images = list(grounding_images(etype))
@@ -413,7 +499,11 @@ def build_grounding_requests(
     requests = []
     for image in images:
         context = observation
-        if isinstance(observation, dict) and isinstance(observation.get("changes"), list):
+        if (
+            etype != "background"
+            and isinstance(observation, dict)
+            and isinstance(observation.get("changes"), list)
+        ):
             side_key = f"{image}_ref"
             other_key = "target_ref" if image == "source" else "source_ref"
             supplemental = image not in default_images
@@ -433,7 +523,13 @@ def build_grounding_requests(
         requests.append(
             GroundingRequest(
                 image,
-                build_grounding_prompt(raw_type, instruction, image, context),
+                build_grounding_prompt(
+                    raw_type,
+                    instruction,
+                    image,
+                    context,
+                    background_observation_mode=background_observation_mode,
+                ),
             )
         )
     return requests
@@ -473,6 +569,71 @@ def _candidate_json_objects(text: str) -> Iterable[str]:
                     break
 
 
+def _parse_background_foreground_observation(parsed: Dict) -> Dict:
+    summary = str(parsed.get("edit_summary", parsed.get("summary", ""))).strip()
+    source_background = str(parsed.get("source_background", "")).strip()
+    target_background = str(parsed.get("target_background", "")).strip()
+    background_extent = str(parsed.get("background_extent", "")).strip().lower()
+    mode = str(parsed.get("background_mask_mode", "")).strip().lower()
+    mode_aliases = {
+        "exclude_foreground": "exclude_foreground",
+        "protect_foreground": "exclude_foreground",
+        "around_foreground": "exclude_foreground",
+        "full_image": "full_image",
+        "full-image": "full_image",
+        "entire_image": "full_image",
+    }
+    if mode not in mode_aliases:
+        raise ValueError(f"invalid background_mask_mode: {mode!r}")
+    mode = mode_aliases[mode]
+    raw_foreground = parsed.get("unchanged_foreground")
+    if not isinstance(raw_foreground, list):
+        raise ValueError("background unchanged_foreground must be a list")
+    foreground = []
+    for index, item in enumerate(raw_foreground):
+        if not isinstance(item, dict):
+            raise ValueError(f"unchanged foreground {index} is not an object")
+        source_ref = _visible_ref(item.get("source_ref", item.get("ref", "")))
+        target_ref = _visible_ref(item.get("target_ref", source_ref))
+        sam_ref = str(item.get("sam_ref", source_ref or target_ref)).strip()
+        region_description = str(
+            item.get("region_description", item.get("spatial_extent", ""))
+        ).strip()
+        unchanged_evidence = str(
+            item.get("unchanged_evidence", item.get("evidence", ""))
+        ).strip()
+        if not source_ref or not target_ref or not sam_ref:
+            raise ValueError(
+                f"unchanged foreground {index} needs source_ref, target_ref, and sam_ref"
+            )
+        foreground.append(
+            {
+                "source_ref": source_ref,
+                "target_ref": target_ref,
+                "sam_ref": sam_ref,
+                "region_description": region_description,
+                "unchanged_evidence": unchanged_evidence,
+            }
+        )
+    if mode == "full_image" and foreground:
+        raise ValueError("full_image background mode cannot contain protected foreground")
+    if mode == "exclude_foreground" and not foreground:
+        raise ValueError("exclude_foreground background mode needs protected foreground")
+    confidence = str(parsed.get("confidence", "medium")).strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium"
+    return {
+        "observation_kind": "background_foreground_audit",
+        "edit_summary": summary,
+        "source_background": source_background,
+        "target_background": target_background,
+        "background_extent": background_extent,
+        "unchanged_foreground": foreground,
+        "background_mask_mode": mode,
+        "confidence": confidence,
+    }
+
+
 def parse_change_observation(text: str) -> Dict:
     """Parse and normalize the first-pass realized-change checklist."""
 
@@ -483,7 +644,13 @@ def parse_change_observation(text: str) -> Dict:
             value = json.loads(candidate)
             # A malformed outer object may still contain valid nested objects.
             # Do not mistake one checked-region/change item for the response.
-            if isinstance(value, dict) and isinstance(value.get("changes"), list):
+            if isinstance(value, dict) and (
+                isinstance(value.get("changes"), list)
+                or (
+                    isinstance(value.get("unchanged_foreground"), list)
+                    and "background_mask_mode" in value
+                )
+            ):
                 parsed = value
                 break
         except (TypeError, ValueError) as exc:
@@ -521,6 +688,9 @@ def parse_change_observation(text: str) -> Dict:
                     last_error = exc
         if parsed is None:
             raise ValueError(f"no JSON observation object found: {last_error}")
+    if "background_mask_mode" in parsed or "unchanged_foreground" in parsed:
+        return _parse_background_foreground_observation(parsed)
+
     summary = str(parsed.get("edit_summary", parsed.get("summary", ""))).strip()
     checked_regions = []
     raw_checks = parsed.get("checked_regions", [])

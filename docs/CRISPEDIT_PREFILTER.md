@@ -76,10 +76,11 @@ Step 5 仅用于预算选中的边界样本。source/target 仍是独立对话�
 
 | 文件 | 作用 | 是否生产必需 |
 |---|---|---:|
-| `crispedit_mllm_prefilter.py` | 多卡调度、Qwen3-VL prompts、crop、batching、parquet I/O | 是 |
-| `crispedit_prefilter_policy.py` | 证据归一化、状态转换、代码谓词与 verdict | 是 |
-| `crispedit_mask_dataset_runner.py` | 消费 manifest，写入与原始数据对齐的 mask shard | mask 阶段 |
-| `crispedit_mask_pipeline.py` | 单样本 SAM3 mask 逻辑 | mask 阶段 |
+| `crispedit/prefilter/runner.py` | 多卡调度、Qwen3-VL prompts、crop、batching、parquet I/O | 是 |
+| `crispedit/prefilter/policy.py` | 证据归一化、状态转换、代码谓词与 verdict | 是 |
+| `crispedit_mllm_prefilter.py` | 稳定的命令行入口 | 是 |
+| `crispedit/mask/` | 当前无 pixel-diff 的 grounding 与 SAM3 mask 实现 | 下游 |
+| `crispedit/legacy/` | 历史 pixel-diff 对照实现 | 否 |
 | `scripts/build_prefilter_regression_slice.py` | 从原始数据重建人工回归切片 | 实验 |
 | `scripts/evaluate_prefilter_regression_slice.py` | 对齐 audit 并计算回归结果 | 实验 |
 | `scripts/visualize_prefilter_regression.py` | 生成回归图板和 batch dashboard | 实验 |
@@ -107,7 +108,7 @@ mkdir -p /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-pref
 mkdir -p /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest
 
 tmux new-session -d -s crispedit_fact_prefilter \
-  "cd /opt/tiger/tanyue/sam3-crispedit && \
+  "cd /opt/tiger/tanyue/sam3-prefilter_improved && \
    python -u crispedit_mllm_prefilter.py \
      --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
      --audit-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit \
@@ -126,16 +127,8 @@ tmux new-session -d -s crispedit_fact_prefilter \
 
 ### 4.2 下游 mask
 
-```bash
-python crispedit_mask_dataset_runner.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
-  --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-mask \
-  --devices 0,1,2,3,4,5,6,7 \
-  --batch-size 8
-```
-
-drop 行保留 `PREFILTER_SKIP` 占位，不进入 SAM3。
+当前下游依次运行 Qwen3.5 grounding 和 SAM3 mask，完整命令见
+[CRISPEDIT_MASK.md](CRISPEDIT_MASK.md)。drop 行保留 `PREFILTER_SKIP` 占位，不进入模型。
 
 ## 5. 实验
 
@@ -265,8 +258,8 @@ verdict 为 PASS 42,639、FAIL 75,937、UNSURE 31,259、ERROR 586。共执行 60
 ```bash
 python -m pytest -q tests/test_crispedit_prefilter_policy.py
 python -m py_compile \
-  crispedit_mllm_prefilter.py \
-  crispedit_prefilter_policy.py \
+  crispedit/prefilter/runner.py \
+  crispedit/prefilter/policy.py \
   scripts/build_prefilter_regression_slice.py \
   scripts/evaluate_prefilter_regression_slice.py \
   scripts/visualize_prefilter_regression.py

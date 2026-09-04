@@ -2,19 +2,21 @@ import json
 
 import cv2
 import numpy as np
+from PIL import Image
 
-from crispedit_grounded_mask_pipeline import (
+from crispedit.mask.pipeline import (
     _aggregate_semantic_connected_coverage,
     _color_surface_sam_prompt,
     _fuse_pcs_prompts,
     _sam_text_prompt,
+    annotate_grounded_sample,
     aspect_ratio_delta,
     box_iou,
     expand_box,
     map_target_mask_to_source,
     segment_grounded_box,
 )
-from crispedit_grounding import (
+from crispedit.mask.grounding import (
     TWO_PASS_PROMPT_VERSION,
     bbox_refinement_crop,
     box_needs_local_refinement,
@@ -32,8 +34,13 @@ from crispedit_grounding import (
     parse_grounding_output,
     prompt_version_for_mode,
 )
-from crispedit_mllm_grounding import GROUND_SCHEMA, prefilter_fields
-from crispedit_grounded_mask_runner import MASK_SCHEMA, _copy_metadata
+from crispedit.mask.grounding_runner import (
+    GROUND_SCHEMA,
+    conversation_image_count,
+    prefilter_fields,
+    split_conversations_by_image_budget,
+)
+from crispedit.mask.runner import MASK_SCHEMA, _copy_metadata
 from scripts.build_mask_bad_case_selection import extract_mask_cases
 
 
@@ -46,6 +53,110 @@ def test_grounding_routes_and_asymmetric_replace():
     ]
     assert grounding_is_complete("replace", {"source": [], "target": [{"ref": "hands"}]})
     assert not grounding_is_complete("motion", {"source": [], "target": [{"ref": "hand"}]})
+
+
+def test_background_foreground_audit_routes_full_image_and_protected_subjects():
+    prompt = build_change_observation_prompt(
+        "background change",
+        "change the background to a snowy forest",
+        background_observation_mode="foreground-audit",
+    )
+    assert "unchanged_foreground" in prompt
+    assert 'background_mask_mode="full_image"' in prompt
+    assert "environmental scene components" in prompt
+
+    full_image = parse_change_observation(
+        json.dumps(
+            {
+                "edit_summary": "the entire tropical environment became snowy",
+                "source_background": "tropical palms and lagoon",
+                "target_background": "snow-covered palms and frozen lagoon",
+                "background_extent": "full_image",
+                "unchanged_foreground": [],
+                "background_mask_mode": "full_image",
+                "confidence": "high",
+            }
+        )
+    )
+    assert full_image["background_mask_mode"] == "full_image"
+    assert full_image["unchanged_foreground"] == []
+
+    protected = parse_change_observation(
+        json.dumps(
+            {
+                "edit_summary": "curtains changed to a ballroom",
+                "source_background": "brown curtains",
+                "target_background": "ballroom interior",
+                "background_extent": "around_foreground",
+                "unchanged_foreground": [
+                    {
+                        "source_ref": "man in red uniform",
+                        "target_ref": "same man in red uniform",
+                        "sam_ref": "man in red uniform",
+                        "region_description": "center, nearly full height",
+                        "unchanged_evidence": "same face, pose, and uniform",
+                    }
+                ],
+                "background_mask_mode": "exclude_foreground",
+                "confidence": "high",
+            }
+        )
+    )
+    requests = build_grounding_requests(
+        "background change",
+        "change the background",
+        protected,
+        background_observation_mode="foreground-audit",
+    )
+    assert len(requests) == 1
+    assert "man in red uniform" in requests[0].prompt
+    assert "Do not box sky, clouds, terrain" in requests[0].prompt
+    assert "never cover only the easiest instance of a plural ref" in requests[0].prompt
+
+
+def test_background_full_image_grounding_skips_sam_and_returns_all_ones():
+    sample = {
+        "input_img": Image.new("RGB", (7, 5), "navy"),
+        "output_img": Image.new("RGB", (7, 5), "orange"),
+        "instruction": "change the background to a desert",
+        "type": "background change",
+    }
+    ground_row = {
+        "qc_flag": "OK",
+        "ground_json": json.dumps(
+            {
+                "boxes": {"source": [], "target": []},
+                "background_mask_mode": "full_image",
+            }
+        ),
+    }
+    result = annotate_grounded_sample(None, sample, ground_row, "sam-test")
+    assert result["mask_source"] == "background_full_image"
+    assert result["qc_flags"] == ["BACKGROUND_FULL_IMAGE"]
+    assert result["mask"].shape == (5, 7)
+    assert np.all(result["mask"] == 1)
+
+
+def test_visual_load_batching_preserves_order_and_single_large_request():
+    def conversation(image_count):
+        return [
+            {
+                "role": "user",
+                "content": [{"type": "image", "image": object()}] * image_count,
+            }
+        ]
+
+    requests = [conversation(2), conversation(2), conversation(10), conversation(2)]
+    assert [conversation_image_count(item) for item in requests] == [2, 2, 10, 2]
+    chunks = split_conversations_by_image_budget(requests, max_images=10)
+    assert [[conversation_image_count(item) for item in chunk] for chunk in chunks] == [
+        [2, 2],
+        [10],
+        [2],
+    ]
+    oversized = split_conversations_by_image_budget([conversation(12)], max_images=10)
+    assert len(oversized) == 1
+    assert [conversation_image_count(item) for item in oversized[0]] == [12]
 
 
 def test_latest_prefilter_manifest_metadata_survives_grounding_and_mask():

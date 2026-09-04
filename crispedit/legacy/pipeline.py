@@ -1,6 +1,8 @@
-"""
-CrispEdit-2M 编辑区域 Mask 打标 Pipeline（增强版）
-=================================================
+"""Legacy CrispEdit pixel-difference-assisted mask pipeline.
+
+This module is retained only for regression comparison.  The production path
+lives under :mod:`crispedit.mask` and does not use pixel differences.
+
 目标: 对每条 (input_img, output_img, instruction, type) 生成“被编辑区域/对象”的 mask，
       追求 不错(按类型分治+局部消歧) / 不漏(diff 兜底) / 不冗余(拒绝局部编辑全图化)。
 

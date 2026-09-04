@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from scripts.build_category_previews import _load_selection, _selected_mask_paths
 from scripts.compare_grounded_mask_runs import _mask_metrics
 from scripts.evaluate_grounded_mask_bad_cases import read_area_by_row_idx
 
@@ -29,3 +32,22 @@ def test_mask_comparison_reports_directional_added_and_lost_fractions():
     assert metrics["iou"] == pytest.approx(1 / 3)
     assert metrics["candidate_added_frac"] == pytest.approx(1 / 2)
     assert metrics["baseline_lost_frac"] == pytest.approx(1 / 2)
+
+
+def test_category_preview_selection_is_keyed_by_shard(tmp_path: Path):
+    selection_path = tmp_path / "selection.json"
+    selection_path.write_text(
+        '{"cases":[{"shard":"add_00001.parquet","row_idx":7}]}',
+        encoding="utf-8",
+    )
+    selected = _load_selection(selection_path)
+    assert selected == {"add_00001.parquet": {7}}
+    assert "add_00002.parquet" not in selected
+
+    mask_dir = tmp_path / "masks"
+    mask_dir.mkdir()
+    (mask_dir / "add_00001.parquet").touch()
+    (mask_dir / "add_00002.parquet").touch()
+    assert [path.name for path in _selected_mask_paths(mask_dir, selected)] == [
+        "add_00001.parquet"
+    ]
