@@ -19,6 +19,53 @@ from PIL import Image, ImageDraw, ImageFont
 from scaleedit.io import decode_image, discover_shards
 
 
+COARSE_CATEGORY_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (
+        "01_object_composition",
+        (
+            "object_addition",
+            "object_removal",
+            "object_replacement",
+            "count_change",
+            "compositional_editing",
+        ),
+    ),
+    (
+        "02_attribute_action",
+        ("action_editing", "color_change", "material_change", "size_change"),
+    ),
+    (
+        "03_text_symbol",
+        (
+            "building_surface_text_editing",
+            "gui_interface_text_editing",
+            "movie_poster_text_editing",
+            "object_surface_text_editing",
+            "symbolic_reasoning",
+        ),
+    ),
+    (
+        "04_reasoning_repair",
+        (
+            "perceptual_reasoning",
+            "scientific_reasoning",
+            "social_reasoning",
+            "visual_beautification",
+        ),
+    ),
+    (
+        "05_scene_global_extraction",
+        (
+            "background_replacement",
+            "part_extraction",
+            "style_transfer",
+            "tone_adjustment",
+            "viewpoint_transformation",
+        ),
+    ),
+)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize ScaleEdit mask labels")
     parser.add_argument("--input-dir", type=Path, required=True)
@@ -31,6 +78,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--panel-height", type=int, default=230)
     parser.add_argument("--task", action="append", default=[], help="Keep this final_task")
     parser.add_argument("--sample-id", action="append", default=[], help="Keep this exact sample_id")
+    parser.add_argument(
+        "--coarse-category-groups",
+        action="store_true",
+        help="Write the five documented ScaleEdit category groups below output-dir",
+    )
     return parser.parse_args()
 
 
@@ -236,14 +288,58 @@ def _summary(rows: Sequence[Dict], selected: Sequence[Dict], pages: Sequence[str
     }
 
 
+def _write_review(rows: Sequence[Dict], args: argparse.Namespace, output_dir: Path) -> Dict:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    render_args = argparse.Namespace(**vars(args))
+    render_args.output_dir = output_dir
+    selected = _select(rows, args.samples_per_task)
+    pages = _write_pages(selected, render_args)
+    summary = _summary(rows, selected, pages)
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return summary
+
+
 def main() -> None:
     args = parse_args()
     for field in ("input_dir", "grounding_dir", "mask_dir", "output_dir"):
         setattr(args, field, getattr(args, field).resolve())
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     rows = _load_rows(args)
     requested_tasks = {str(value) for value in args.task}
     requested_ids = {str(value) for value in args.sample_id}
+    if args.coarse_category_groups:
+        if requested_tasks or requested_ids:
+            raise ValueError(
+                "--coarse-category-groups cannot be combined with --task or --sample-id"
+            )
+        groups = []
+        for name, tasks in COARSE_CATEGORY_GROUPS:
+            task_set = set(tasks)
+            group_rows = [
+                item
+                for item in rows
+                if str(item["mask"]["final_task"]) in task_set
+            ]
+            if not group_rows:
+                raise ValueError(f"no rows found for coarse category group {name}")
+            summary = _write_review(group_rows, args, args.output_dir / name)
+            groups.append(
+                {
+                    "name": name,
+                    "tasks": list(tasks),
+                    "rows": len(group_rows),
+                    "summary": f"{name}/summary.json",
+                    "preview_pages": [f"{name}/{page}" for page in summary["preview_pages"]],
+                }
+            )
+        index = {"groups": groups, "samples_per_task": args.samples_per_task}
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        (args.output_dir / "index.json").write_text(
+            json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(json.dumps(index, indent=2, ensure_ascii=False))
+        return
     if requested_tasks:
         rows = [item for item in rows if str(item["mask"]["final_task"]) in requested_tasks]
     if requested_ids:
@@ -253,12 +349,7 @@ def main() -> None:
             raise KeyError(f"sample_id(s) not found after filtering: {sorted(requested_ids - found_ids)}")
     if not rows:
         raise ValueError("no rows remain after visualization filters")
-    selected = _select(rows, args.samples_per_task)
-    pages = _write_pages(selected, args)
-    summary = _summary(rows, selected, pages)
-    (args.output_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    summary = _write_review(rows, args, args.output_dir)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 

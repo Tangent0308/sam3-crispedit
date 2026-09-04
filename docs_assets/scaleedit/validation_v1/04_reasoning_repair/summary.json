@@ -1,0 +1,77 @@
+{
+  "rows": 34,
+  "task_count": 4,
+  "tasks": {
+    "perceptual_reasoning": 9,
+    "scientific_reasoning": 9,
+    "social_reasoning": 8,
+    "visual_beautification": 8
+  },
+  "qc_flags": {
+    "OK": 34
+  },
+  "mask_sources": {
+    "direct_box": 4,
+    "hybrid": 10,
+    "pcs": 3,
+    "pvs": 17
+  },
+  "mask_modes": {
+    "regions": 34
+  },
+  "per_task": {
+    "perceptual_reasoning": {
+      "rows": 9,
+      "mean_area_frac": 0.168764,
+      "min_area_frac": 0.015227,
+      "max_area_frac": 0.476217
+    },
+    "scientific_reasoning": {
+      "rows": 9,
+      "mean_area_frac": 0.442992,
+      "min_area_frac": 0.013055,
+      "max_area_frac": 0.902975
+    },
+    "social_reasoning": {
+      "rows": 8,
+      "mean_area_frac": 0.253978,
+      "min_area_frac": 0.007956,
+      "max_area_frac": 0.979919
+    },
+    "visual_beautification": {
+      "rows": 8,
+      "mean_area_frac": 0.110818,
+      "min_area_frac": 0.009199,
+      "max_area_frac": 0.383751
+    }
+  },
+  "preview_pages": [
+    "scaleedit_mask_preview_page_1.jpg"
+  ],
+  "selected_samples": [
+    {
+      "sample_id": "5.1_perceptual_reasoning/perceptual_reasoning_0000.parquet#646",
+      "final_task": "perceptual_reasoning",
+      "shard": "part-00000.parquet",
+      "row_idx": 12
+    },
+    {
+      "sample_id": "5.4_scientific_reasoning/scientific_reasoning_0000.parquet#6270",
+      "final_task": "scientific_reasoning",
+      "shard": "part-00000.parquet",
+      "row_idx": 36
+    },
+    {
+      "sample_id": "5.3_social_reasoning/social_reasoning_0000.parquet#1844",
+      "final_task": "social_reasoning",
+      "shard": "part-00000.parquet",
+      "row_idx": 23
+    },
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0007.parquet#13804",
+      "final_task": "visual_beautification",
+      "shard": "part-00005.parquet",
+      "row_idx": 10
+    }
+  ]
+}

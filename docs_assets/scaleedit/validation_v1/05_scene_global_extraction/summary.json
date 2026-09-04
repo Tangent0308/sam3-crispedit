@@ -1,0 +1,94 @@
+{
+  "rows": 42,
+  "task_count": 5,
+  "tasks": {
+    "background_replacement": 9,
+    "part_extraction": 9,
+    "style_transfer": 8,
+    "tone_adjustment": 8,
+    "viewpoint_transformation": 8
+  },
+  "qc_flags": {
+    "OK": 42
+  },
+  "mask_sources": {
+    "direct_box": 1,
+    "full_image": 17,
+    "hybrid": 4,
+    "inverse_foreground": 5,
+    "pcs": 1,
+    "pvs": 14
+  },
+  "mask_modes": {
+    "full_image": 17,
+    "protect_foreground": 5,
+    "regions": 20
+  },
+  "per_task": {
+    "background_replacement": {
+      "rows": 9,
+      "mean_area_frac": 0.405014,
+      "min_area_frac": 0.056587,
+      "max_area_frac": 0.697287
+    },
+    "part_extraction": {
+      "rows": 9,
+      "mean_area_frac": 0.893174,
+      "min_area_frac": 0.038567,
+      "max_area_frac": 1.0
+    },
+    "style_transfer": {
+      "rows": 8,
+      "mean_area_frac": 0.68683,
+      "min_area_frac": 0.165222,
+      "max_area_frac": 1.0
+    },
+    "tone_adjustment": {
+      "rows": 8,
+      "mean_area_frac": 0.986751,
+      "min_area_frac": 0.942924,
+      "max_area_frac": 1.0
+    },
+    "viewpoint_transformation": {
+      "rows": 8,
+      "mean_area_frac": 0.601691,
+      "min_area_frac": 0.272161,
+      "max_area_frac": 1.0
+    }
+  },
+  "preview_pages": [
+    "scaleedit_mask_preview_page_1.jpg"
+  ],
+  "selected_samples": [
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0007.parquet#11363",
+      "final_task": "background_replacement",
+      "shard": "part-00002.parquet",
+      "row_idx": 22
+    },
+    {
+      "sample_id": "2.5_part_extraction/part_extraction_0005.parquet#18995",
+      "final_task": "part_extraction",
+      "shard": "part-00005.parquet",
+      "row_idx": 13
+    },
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0007.parquet#24948",
+      "final_task": "style_transfer",
+      "shard": "part-00005.parquet",
+      "row_idx": 4
+    },
+    {
+      "sample_id": "5.4_scientific_reasoning/scientific_reasoning_0000.parquet#9478",
+      "final_task": "tone_adjustment",
+      "shard": "part-00002.parquet",
+      "row_idx": 3
+    },
+    {
+      "sample_id": "5.1_perceptual_reasoning/perceptual_reasoning_0000.parquet#2798",
+      "final_task": "viewpoint_transformation",
+      "shard": "part-00000.parquet",
+      "row_idx": 18
+    }
+  ]
+}

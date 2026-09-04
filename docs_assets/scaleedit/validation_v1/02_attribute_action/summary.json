@@ -1,0 +1,77 @@
+{
+  "rows": 35,
+  "task_count": 4,
+  "tasks": {
+    "action_editing": 9,
+    "color_change": 9,
+    "material_change": 9,
+    "size_change": 8
+  },
+  "qc_flags": {
+    "OK": 35
+  },
+  "mask_sources": {
+    "direct_box": 1,
+    "hybrid": 7,
+    "pcs": 6,
+    "pvs": 21
+  },
+  "mask_modes": {
+    "regions": 35
+  },
+  "per_task": {
+    "action_editing": {
+      "rows": 9,
+      "mean_area_frac": 0.130377,
+      "min_area_frac": 0.016084,
+      "max_area_frac": 0.455675
+    },
+    "color_change": {
+      "rows": 9,
+      "mean_area_frac": 0.201824,
+      "min_area_frac": 0.023334,
+      "max_area_frac": 0.479877
+    },
+    "material_change": {
+      "rows": 9,
+      "mean_area_frac": 0.249819,
+      "min_area_frac": 0.038792,
+      "max_area_frac": 0.688013
+    },
+    "size_change": {
+      "rows": 8,
+      "mean_area_frac": 0.146797,
+      "min_area_frac": 0.070229,
+      "max_area_frac": 0.244497
+    }
+  },
+  "preview_pages": [
+    "scaleedit_mask_preview_page_1.jpg"
+  ],
+  "selected_samples": [
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0007.parquet#11853",
+      "final_task": "action_editing",
+      "shard": "part-00002.parquet",
+      "row_idx": 19
+    },
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0007.parquet#20557",
+      "final_task": "color_change",
+      "shard": "part-00003.parquet",
+      "row_idx": 10
+    },
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0007.parquet#29514",
+      "final_task": "material_change",
+      "shard": "part-00003.parquet",
+      "row_idx": 23
+    },
+    {
+      "sample_id": "3.5_size_change/size_change_0000.parquet#174",
+      "final_task": "size_change",
+      "shard": "part-00000.parquet",
+      "row_idx": 46
+    }
+  ]
+}

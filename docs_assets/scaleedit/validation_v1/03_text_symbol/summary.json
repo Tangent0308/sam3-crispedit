@@ -1,0 +1,88 @@
+{
+  "rows": 44,
+  "task_count": 5,
+  "tasks": {
+    "building_surface_text_editing": 9,
+    "gui_interface_text_editing": 9,
+    "movie_poster_text_editing": 9,
+    "object_surface_text_editing": 9,
+    "symbolic_reasoning": 8
+  },
+  "qc_flags": {
+    "OK": 44
+  },
+  "mask_sources": {
+    "direct_box": 42,
+    "pvs": 2
+  },
+  "mask_modes": {
+    "regions": 44
+  },
+  "per_task": {
+    "building_surface_text_editing": {
+      "rows": 9,
+      "mean_area_frac": 0.04447,
+      "min_area_frac": 0.015469,
+      "max_area_frac": 0.093182
+    },
+    "gui_interface_text_editing": {
+      "rows": 9,
+      "mean_area_frac": 0.050308,
+      "min_area_frac": 0.027235,
+      "max_area_frac": 0.09375
+    },
+    "movie_poster_text_editing": {
+      "rows": 9,
+      "mean_area_frac": 0.068951,
+      "min_area_frac": 0.014529,
+      "max_area_frac": 0.225033
+    },
+    "object_surface_text_editing": {
+      "rows": 9,
+      "mean_area_frac": 0.090274,
+      "min_area_frac": 0.02121,
+      "max_area_frac": 0.146782
+    },
+    "symbolic_reasoning": {
+      "rows": 8,
+      "mean_area_frac": 0.132742,
+      "min_area_frac": 0.005714,
+      "max_area_frac": 0.802757
+    }
+  },
+  "preview_pages": [
+    "scaleedit_mask_preview_page_1.jpg"
+  ],
+  "selected_samples": [
+    {
+      "sample_id": "4.4_building_surface_text_editing/building_surface_text_editing_0002.parquet#15288",
+      "final_task": "building_surface_text_editing",
+      "shard": "part-00001.parquet",
+      "row_idx": 12
+    },
+    {
+      "sample_id": "4.2_gui_interface_text_editing/gui_interface_text_editing_0000.parquet#15388",
+      "final_task": "gui_interface_text_editing",
+      "shard": "part-00001.parquet",
+      "row_idx": 27
+    },
+    {
+      "sample_id": "4.1_movie_poster_text_editing/movie_poster_text_editing_0007.parquet#19381",
+      "final_task": "movie_poster_text_editing",
+      "shard": "part-00001.parquet",
+      "row_idx": 2
+    },
+    {
+      "sample_id": "2.3_object_replacement/object_replacement_0007.parquet#24857",
+      "final_task": "object_surface_text_editing",
+      "shard": "part-00004.parquet",
+      "row_idx": 19
+    },
+    {
+      "sample_id": "5.4_scientific_reasoning/scientific_reasoning_0000.parquet#3611",
+      "final_task": "symbolic_reasoning",
+      "shard": "part-00000.parquet",
+      "row_idx": 38
+    }
+  ]
+}
