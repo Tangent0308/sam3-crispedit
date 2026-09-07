@@ -25,6 +25,18 @@ source 坐标系下的二值 mask。流程不使用 pixel diff，也没有 crop/
 └── validation.json
 ```
 
+当前 200-case 评测使用的具体路径如下：
+
+| 内容 | 路径 |
+| --- | --- |
+| 输入数据集 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-200-v5` |
+| 当前结果根目录 | `/opt/tiger/tanyue/ScaleEdit-results/current` |
+| Grounding 结果 | `/opt/tiger/tanyue/ScaleEdit-results/current/grounding` |
+| Mask 结果 | `/opt/tiger/tanyue/ScaleEdit-results/current/masks` |
+| 完整可视化 | `/opt/tiger/tanyue/ScaleEdit-results/current/review-all` |
+| 重点 case 可视化 | `/opt/tiger/tanyue/ScaleEdit-results/current/review-key-cases` |
+| 校验报告 | `/opt/tiger/tanyue/ScaleEdit-results/current/validation.json` |
+
 ## 输入数据
 
 `--input-dir` 中的每个 parquet shard 必须至少包含以下字段：
@@ -221,8 +233,8 @@ cd /opt/tiger/tanyue/sam3-crispedit
 
 bash scripts/setup_env.sh \
   --python-bin python3.11 \
-  --qwen-model-path /path/to/Qwen3.5-35B-A3B \
-  --sam3-checkpoint-path /path/to/sam3.pt
+  --qwen-model-path /mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B \
+  --sam3-checkpoint-path /mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt
 
 source .venv-sam3-crispedit/bin/activate
 ```
@@ -230,10 +242,10 @@ source .venv-sam3-crispedit/bin/activate
 配置路径。以下变量名只作用于当前 shell，不依赖仓库外的默认配置：
 
 ```bash
-SCALEEDIT_DATASET=/path/to/scaleedit-parquet
-SCALEEDIT_RESULTS=/path/to/scaleedit-results/current
-SCALEEDIT_QWEN=/path/to/Qwen3.5-35B-A3B
-SCALEEDIT_SAM3=/path/to/sam3.pt
+SCALEEDIT_DATASET=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-200-v5
+SCALEEDIT_RESULTS=/opt/tiger/tanyue/ScaleEdit-results/current
+SCALEEDIT_QWEN=/mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B
+SCALEEDIT_SAM3=/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt
 ```
 
 依次运行 grounding、mask、校验和可视化：
