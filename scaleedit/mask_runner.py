@@ -33,6 +33,19 @@ INSTANCE_TYPE = pa.struct(
         ("ref", pa.string()),
         ("bbox_2d", pa.list_(pa.float64())),
         ("bbox_xyxy", pa.list_(pa.float64())),
+        ("sam_anchor_bbox_2d", pa.list_(pa.float64())),
+        ("sam_positive_bbox_2d", pa.list_(pa.float64())),
+        ("semantic_bbox_2d", pa.list_(pa.float64())),
+        ("raw_semantic_bbox_2d", pa.list_(pa.float64())),
+        ("output_guard_bbox_2d", pa.list_(pa.float64())),
+        ("sam_search_expand_frac", pa.float64()),
+        ("pvs_area", pa.int64()),
+        ("pcs_area", pa.int64()),
+        ("pvs_component_count", pa.int32()),
+        ("pcs_component_count", pa.int32()),
+        ("pvs_pcs_iou", pa.float64()),
+        ("pvs_boundary_contacts", pa.list_(pa.bool_())),
+        ("pcs_boundary_contacts", pa.list_(pa.bool_())),
         ("mask_method", pa.string()),
         ("mask_source", pa.string()),
         ("semantic_mask_source", pa.string()),
@@ -40,10 +53,23 @@ INSTANCE_TYPE = pa.struct(
         ("box_iou", pa.float64()),
         ("inside_ratio", pa.float64()),
         ("selection_reason", pa.string()),
+        ("raw_component_count", pa.int32()),
+        ("kept_component_count", pa.int32()),
+        ("removed_component_count", pa.int32()),
+        ("removed_area", pa.int64()),
         ("sam_prompt", pa.string()),
         ("region_mode", pa.string()),
         ("mask_density", pa.string()),
+        ("negative_space", pa.bool_()),
+        ("negative_space_carrier_ref", pa.string()),
+        ("negative_space_strategy", pa.string()),
+        ("negative_space_search_bbox_2d", pa.list_(pa.float64())),
+        ("negative_space_component_count", pa.int32()),
+        ("negative_space_boundary_radius", pa.int32()),
+        ("carrier_semantic_bbox_2d", pa.list_(pa.float64())),
         ("mapped_from_target", pa.bool_()),
+        ("target_map_dilate_frac", pa.float64()),
+        ("target_map_dilate_radius", pa.int32()),
         ("errors", pa.list_(pa.string())),
         ("area", pa.int64()),
         ("rle_size", pa.list_(pa.int32())),
@@ -236,15 +262,21 @@ def process_job(
     input_path = Path(job.input_path)
     output_path = Path(job.output_path)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    raw_rows = pq.read_table(input_path).slice(0, job.num_rows).to_pylist()
     ground_rows = pq.read_table(job.grounding_path).to_pylist()
-    if len(raw_rows) != len(ground_rows):
-        raise ValueError(f"row mismatch for {input_path.name}")
+    all_raw_rows = pq.read_table(input_path).to_pylist()
+    raw_rows = []
+    for ground_row in ground_rows:
+        row_idx = int(ground_row["row_idx"])
+        if row_idx < 0 or row_idx >= len(all_raw_rows):
+            raise IndexError(
+                f"grounding row_idx out of range in {input_path.name}: {row_idx}"
+            )
+        raw_rows.append(all_raw_rows[row_idx])
     output_rows = []
     summary = {"rows": 0, "errors": 0, "flags": {}, "sources": {}, "modes": {}, "tasks": {}}
     for raw_row, ground_row in zip(raw_rows, ground_rows):
         row_idx = int(ground_row["row_idx"])
-        if row_idx >= len(raw_rows) or str(raw_row.get("sample_id", "")) != str(
+        if str(raw_row.get("sample_id", "")) != str(
             ground_row.get("sample_id", "")
         ):
             raise ValueError(f"row identity mismatch in {input_path.name}:{row_idx}")

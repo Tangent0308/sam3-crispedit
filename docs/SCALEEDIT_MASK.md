@@ -1,426 +1,322 @@
-# ScaleEdit 图像编辑区域打标
+# ScaleEdit 当前 mask 标注流程
 
-本流程为 ScaleEdit 单独实现，不修改源数据，也不把 23 个 `final_task` 生硬映射到
-CrispEdit 的 7 类规则。输入只读扫描 `part-*.parquet`，输出写到显式指定的新目录。
+本文只描述仓库中当前使用的 ScaleEdit 实现。它从已经清洗并带有 `final_task` 的
+source/edited image pair 出发，先用 Qwen3.5-35B-A3B 生成编辑区域合同，再用 SAM3 生成
+source 坐标系下的二值 mask。流程不使用 pixel diff，也没有 crop/refinement 第三轮定位。
 
-## 为什么需要独立策略
+## 入口与代码位置
 
-ScaleEdit 的任务名不能直接决定 mask 形状：
+- `scaleedit_mllm_grounding.py`：MLLM grounding 入口。
+- `scaleedit_grounded_mask_runner.py`：SAM3 mask 入口。
+- `scaleedit/policy.py`：planner/locator prompt、严格 JSON 解析和少量确定性任务约束。
+- `scaleedit/grounding_runner.py`：Qwen 多卡调度、两阶段调用和 parquet 输出。
+- `scaleedit/mask_pipeline.py`：SAM/box/full-image/inverse/negative-space 路由及后处理。
+- `scaleedit/mask_runner.py`：SAM3 多卡调度和最终 parquet schema。
+- `scripts/validate_scaleedit_masks.py`：行对齐、PNG、RLE 和统计验证。
+- `scripts/visualize_scaleedit_masks.py`：bbox、mask 和实例信息的 review page。
 
-- `style_transfer` 同时包含全图风格化和只改变墙面、招牌、屏幕的局部风格；
-- `part_extraction` 同时包含“保留主体、背景变白”和局部去壳/显露内部；
-- `tone_adjustment` 既有全图滤镜，也有只改变天空或局部环境光；
-- `perceptual/scientific/social/symbolic_reasoning` 内部混合增、删、修复、属性和绘线；
-- 四类文字编辑需要覆盖实际字形块，SAM 的普通物体语义 mask 容易漏掉细笔画。
+当前版本标识定义在 `scaleedit/__init__.py`。本机唯一保留的完整结果目录是：
 
-因此第一阶段先比较 source/result 中实际发生的编辑，再决定下面三种合成契约：
-
-| `mask_mode` | 使用场景 | source 坐标系最终 mask |
-|---|---|---|
-| `regions` | 局部增删替换、属性、动作、文字、修复等 | source 区域 ∪ 映射后的 target 区域 |
-| `protect_foreground` | 背景替换且前景主体在原位稳定保留 | NOT(膨胀后的稳定前景) |
-| `full_image` | 真正的全图滤镜、全画面风格或相机视角变化 | 全图 |
-
-`regions` 中的连贯物体/表面使用 MLLM bbox + SAM3 双提示分割；文字、glyph、细线、
-路径、裂缝、点状小标记使用带小安全边距的直接框 mask，以召回优先避免细结构消失。
-target mask 按归一化坐标映射到 source；两图宽高比差异超过 2% 会写入 QC 标记。
-商品式 `part_extraction` 通常还会重新居中、缩放或重构主体，因此按全图重构处理；仅有
-原位去壳/揭示内部时才使用局部区域。
-
-`viewpoint_transformation` 还需区分两种几何：相机移动、站位改变或整幅场景换视角使用
-全图；明确命名的单个物体转到正面/背面/侧面必须使用 source/target 物体区域。若首轮
-误判为全图，grounding 会自动发起一次强约束复核，取得真实物体 bbox 后才交给 SAM3；
-复核仍失败时保留安全的全图契约，不使用可能把背景反选为前景的整图 bbox。迷宫路径类
-会强制搜索框覆盖起止端点，避免 MLLM 只框住路径中段。
+```text
+/opt/tiger/tanyue/ScaleEdit-results/current/
+├── grounding/
+├── masks/
+├── review-all/
+└── validation.json
+```
 
 ## 输入数据
 
-每个 `part-*.parquet` 的必需字段为：
+`--input-dir` 中的每个 parquet shard 必须至少包含以下字段：
 
-- `sample_id`；
-- `source_image` / `edited_image`（binary，亦兼容 Arrow image struct）；
-- `final_task`；
-- `final_instruction`。
+- `sample_id`：全数据集唯一的样本 ID；
+- `final_task`：规范化后的编辑任务类别；
+- `final_instruction`：最终编辑指令；
+- `source_image`：原图的二进制图片数据；
+- `edited_image`：编辑后图片的二进制图片数据。
 
-`source_relative_path`、`edit_task` 和 `original_instruction` 是可选审计字段；存在时原样传到
-输出，不参与实际 mask 决策。打标只使用清洗后的 `final_task` 和 `final_instruction`。输入发现
-逻辑只扫描 `part-*.parquet`；`matched_rows.parquet`、统计 JSON 和尚未落盘的下载内容都不会
-被当成图像 shard。所有输入图片均从 parquet 内存解码，不会回写源记录。
+grounding 和 mask 输出沿用输入 shard 文件名及行顺序。runner 会检查字段、样本 ID 和行对齐，
+因此不能把不同版本数据的 input、grounding 与 mask 目录混用。
 
-## 端到端数据流
-
-一次完整打标由两个独立的可恢复 stage 组成。第一个 stage 内含两轮固定的 MLLM 对话，
-少量满足条件的样本还会进入一次附加复核；第二个 stage 根据前一 stage 的空间契约生成
-最终 mask。校验和可视化只读 raw、grounding、mask 三类产物，不参与 mask 生成。
+## 总体流程
 
 ```text
-只读 ScaleEdit part-*.parquet
-  └─ Stage A: scaleedit_mllm_grounding.py
-       ├─ Round 1: 实际编辑审计（what changed）
-       ├─ Round 2: 空间打标契约（where/how to mask）
-       ├─ Round 2R: 条件式物体视角复核（仅命中时运行）
-       └─ deterministic post-policy
-            └─ grounding/part-*.parquet + run_config.json + run_summary.json
-                 └─ Stage B: scaleedit_grounded_mask_runner.py
-                      ├─ direct box，或 SAM3 PVS/PCS 候选生成与选择
-                      ├─ target mask 映射回 source 坐标系
-                      └─ 按 mask_mode 合成
-                           └─ masks/part-*.parquet + run_config.json + run_summary.json
-                                ├─ validate_scaleedit_masks.py -> validation.json
-                                └─ visualize_scaleedit_masks.py -> review JPG/summary/index
+source + edited image + final_task + final_instruction
+  -> Round 1: edit planner（语义与路由，不输出坐标）
+  -> Round 2: bbox locator（只做视觉定位）
+  -> candidate_id 确定性合并
+  -> full_image / protect_foreground / regions 路由
+  -> SAM3 或 direct box
+  -> 连通域清理、target->source 映射、union
+  -> PNG + instance RLE + audit metadata
 ```
 
-### Stage A：两轮 MLLM grounding
+### MLLM 调用次数
 
-入口为 `scaleedit_mllm_grounding.py`。它只扫描 `part-*.parquet`，按 shard 分配到 Qwen3.5
-worker，并保持输入 shard 名、原始 `row_idx` 和 `sample_id`。以下“轮”指同一个样本的模型
-对话轮次，不是重新读取或改写数据集。
+- 普通 `regions` / `protect_foreground`：2 次，planner 一次、locator 一次。
+- `full_image`：1 次，planner 已决定全图，不需要 bbox locator。
+- 明确的单物体旋转或视角编辑若被 planner 错判为 `full_image`：增加一次窄范围语义纠错，
+  随后再调用 locator，因此该少数路径共 3 次。
+- JSON 解析失败时，`--parse-retries` 可能重试同一轮；默认值为 1。这是异常恢复，不是正常
+  pipeline 的固定轮次。
 
-#### Round 1：实际编辑审计
+当前没有把首轮长 JSON、mask metadata 或历史回答交给第二轮，也没有额外 crop MLLM 调用。
+两轮 prompt 的完整实现分别位于 `scaleedit.policy.build_observation_prompt` 和
+`scaleedit.policy.build_grounding_prompt`；每行 grounding 的 `ground_json` 也保存实际 prompt、原始
+回复及解析结果，便于逐样本审计。
 
-目的不是立即画框，而是先回答“图中实际实现了什么编辑、它属于哪种 mask 路由”。
+## Round 1：edit planner
 
-每行输入：
+输入包含两张完整图片、`final_task`、修正后的 instruction 和该 task 的语义提示。模型负责：
 
-- `source_image`：标记为 `Image 1 (source, full image)`；
-- `edited_image`：标记为 `Image 2 (edited result, full image)`；
-- 归一化后的 `final_task`；
-- 清洗后的 `final_instruction`；
-- 当前 task 的专用指导，例如 `count_change` 只记录新增/消失实例，文字任务只记录实际
-  glyph block，不能直接照搬 CrispEdit 类别规则。
+1. 根据图片对确认实际发生的编辑；
+2. 选择 `mask_mode`；
+3. 列出第二轮需要定位的每个可见实例；
+4. 决定实例应使用 SAM 还是 filled box；
+5. 标记编辑区域是否为负空间。
 
-模型输出并解析为：
+当前输出合同为：
 
 ```json
 {
-  "realized_edit": "对实际编辑的一句描述",
-  "mask_mode": "regions | protect_foreground | full_image",
-  "changes": [
+  "realized_edit": "one precise sentence",
+  "mask_mode": "regions|protect_foreground|full_image",
+  "localization_items": [
     {
-      "source_ref": "source 中旧的或发生变化的实体；纯新增时为空",
-      "target_ref": "target 中新的或发生变化的实体；纯删除时为空",
-      "change": "before to after",
-      "geometry": "semantic_object | dense_region | sparse_marks",
-      "source_extent": "source 中的大致位置",
-      "target_extent": "target 中的大致位置"
+      "image_side": "source|target",
+      "role": "edit_region|protected_foreground",
+      "edit_op": "add|remove|change|protect",
+      "ref": "concrete visible entity",
+      "spatial_hint": "instance-disambiguating location",
+      "geometry": "semantic_object|dense_region|sparse_marks",
+      "mask_method": "sam|box",
+      "region_mode": "object|aggregate_region",
+      "mask_density": "object|dense|sparse",
+      "negative_space": false,
+      "carrier_ref": ""
     }
   ],
-  "protected_foreground": [
-    {"ref": "背景变化时保持不变的前景实体", "extent": "source 中的完整范围"}
-  ],
-  "confidence": "high | medium | low"
+  "confidence": "high|medium|low"
 }
 ```
 
-这一轮输出是语义审计，不含最终 bbox。prompt、模型原始文本、解析结果、`parse_ok` 和
-错误信息全部保存在最终 `ground_json.observation` 中。JSON 或 schema 解析失败时按
-`--parse-retries` 重试（默认 1 次）；该重试只保证可解析性，不保证语义或坐标准确。
+约束要点：
 
-#### Round 2：生成空间打标契约
+- `regions` 分别列出 source 上消失/改变的实例和 target 上出现/改变的实例。
+- 纯新增不列 source 的空桌面、展台或背景；纯删除不列 target 中露出的背景。
+- checklist 通常不超过 8 个 item。需要独立操作或彼此分离的重复物体应拆开并用
+  `spatial_hint` 区分；大量相邻、接受同一编辑且形成整体足迹的元素按紧凑空间 cluster 聚合，
+  使用 `region_mode=aggregate_region`，不能为了缩短输出而漏掉区域。
+- `protect_foreground` 只列稳定前景，最终取其 mask 的反集。
+- `full_image` 的 `localization_items` 必须为空。
+- 文字、细线、路径、裂纹、点状或稀疏标记使用 `mask_method=box`。
+- 洞、缺口、开口、咬痕等留白使用 `negative_space=true`，同时给出形成边界的
+  `carrier_ref`。
 
-Round 2 延续 Round 1 的完整对话，而不是启动一个无上下文请求。
+解析器只接受当前合同，不再兼容旧的 `changes`、`source/target bbox` 单轮输出格式。
 
-每行输入：
+## Round 2：bbox locator
 
-- 与 Round 1 相同的完整 source/edited 图片；
-- Round 1 的模型原始回答，以及解析后的 audit JSON；
-- `final_task`、`final_instruction`；
-- bbox、region 拆分、文字/稀疏区域、三种 `mask_mode` 的严格输出规则。
+第二轮是新的独立对话，仍看到 source 和 edited 两张完整图片，但文本只包含第一轮已经确认的：
 
-模型必须先复核 Round 1，再输出：
+```text
+candidate_id | Image 1/2 | ref + spatial_hint
+```
+
+它不再决定 `mask_mode`、edit operation 或 SAM 策略，只输出：
 
 ```json
-{
-  "prompt_version": "scaleedit_realized_edit_grounding_v2",
-  "mask_mode": "regions | protect_foreground | full_image",
-  "source": [
-    {
-      "ref": "SAM 可理解的 source 可见实体短语",
-      "bbox_2d": [100, 120, 600, 800],
-      "mask_method": "sam | box",
-      "region_mode": "object | aggregate_region",
-      "mask_density": "object | dense | sparse"
-    }
-  ],
-  "target": [],
-  "protected_foreground": []
-}
+[
+  {"candidate_id": 0, "bbox_2d": [x1, y1, x2, y2]}
+]
 ```
 
-`bbox_2d` 均为命名图片完整画布上的 `[x1,y1,x2,y2]`，范围归一化到 `0..1000`：
-`source` 项使用 source 坐标系，`target` 项使用 edited-result 坐标系，不能跨图复用像素坐标。
-parser 会裁剪越界值并拒绝非有限、退化或 schema 非法的框。
+`bbox_2d` 是相对于指定完整图片的 0–1000 归一化坐标。解析器要求 candidate 顺序和集合与
+planner 完全一致，再由代码按 `candidate_id` 合并坐标与首轮 metadata。对于 Qwen 偶发的
+`label: "3 | Image 2 | ..."` 输出，解析器也可从 label 开头恢复 ID。对于重复 `bbox_2d` JSON
+key，会先删除完全相同的重复框；只有剩余 bbox 数量恰好等于完整 checklist 时才按位置恢复。
+不完整或仍有歧义的回答会失败关闭，避免错位绑定实例。
 
-三种契约的列表约束如下：
+## mask 路由
 
-| `mask_mode` | `source` | `target` | `protected_foreground` |
-|---|---|---|---|
-| `regions` | 删除前、替换前、属性变化前等可见区域；纯新增可空 | 新增、替换后、属性变化后等可见区域；纯删除可空 | 强制清空 |
-| `protect_foreground` | 强制清空 | 强制清空 | source 图中需要从背景 mask 排除的完整稳定前景 |
-| `full_image` | 强制清空 | 强制清空 | 强制清空 |
+### `full_image`
 
-`mask_method=sam` 用于连贯物体和表面；`mask_method=box` 用于文字、glyph、线、路径、裂缝、
-点状小标记等容易被语义分割漏掉的结构。`region_mode=aggregate_region` 表示附近的重复小实体
-作为一个区域处理，`mask_density` 用于后续选择 sparse/dense/object 策略。
+直接生成与 source 同尺寸的全 1 mask，不调用 SAM3。产品摄影式主体提取如果包含重排、缩放或
+白底重构，也按全图处理，避免旧主体位置残留空洞。
 
-#### Round 2R：条件式物体视角复核
+### `protect_foreground`
 
-这不是固定的第三轮，只在以下条件同时成立时运行：
+在 source 上分割所有稳定前景，合并并做小幅膨胀，然后取反：
 
-1. task 为 `action_editing` 或 `viewpoint_transformation`，instruction 能提取出一个明确的
-   孤立物体；
-2. Round 2 却返回 `full_image`；
-3. instruction 不包含 camera、entire scene 等明确的相机/全场景视角表达。
+```text
+editable mask = 1 - dilate(union(protected foreground))
+```
 
-输入为前两轮完整对话、识别出的 `object_ref` 和强制 `regions` 的纠错要求；期望输出该物体
-在 source/target 中的真实局部框。只有复核结果为 `regions` 且至少一侧有框时才替换 Round 2
-契约，否则保留原来的安全 `full_image`。本轮 prompt、原始回答、是否接受和错误信息记录在
-`ground_json.grounding.route_retry`。
+### `regions`
 
-#### 确定性 post-policy 与 Stage A 输出
+source 实例直接在 source 上生成 mask；target 实例先在 target 上生成 mask，再按图像尺寸映射
+回 source 坐标系。若长宽比有差异会记录 `AR_MISMATCH`。所有实例最终取 union。
 
-模型轮次结束后，代码还会用 `final_task + final_instruction + grounding payload` 应用窄范围
-确定性规则；这里不再调用模型：
+## SAM3 与后处理
 
-- 商品摄影、product mockup 或“提取到白底”式 `part_extraction` 强制为 `full_image`，原合同
-  写入 `route_override`；
-- `symbolic_reasoning` 的 maze path/line 使用 `[50,100,950,900]` 的召回优先框覆盖两端，
-  原因写入 `box_override`。
+### 普通语义物体
 
-`scaleedit_mllm_grounding.py` 已经在内部执行该 post-policy，正常新运行不需要再调用
-`scripts/apply_scaleedit_grounding_policy.py`。后者只用于“模型结果不变、确定性 policy 更新”
-时，把旧 grounding 只读转换到一个新的输出目录。
+locator bbox 是实例锚点。SAM3 会在更宽的搜索区域内比较 PVS（phrase + visual bbox）和 PCS
+（phrase-conditioned semantic）候选，以补全被 bbox 轻微裁掉的头、脚、手柄或边缘；搜索框
+本身不会被填入输出。
 
-Stage A 为每个输入 shard 写一个同名 grounding parquet。每行主要输出：
+最终 mask 使用一个比 locator bbox 略大的 output guard，并只保留：
 
-| 字段 | 含义 |
-|---|---|
-| `row_idx`, `sample_id`, `source_relative_path` | 与原始行对齐和审计 |
-| `edit_task`, `final_task`, `original_instruction`, `final_instruction` | 原始和清洗后的任务信息 |
-| `ground_json` | 两轮原始/解析记录、最终 contract、条件复核和 policy override |
-| `ground_parse_ok`, `grounding_status`, `qc_flag` | contract 的结构状态 |
-| `source/target_width/height` | 两张输入图片的真实尺寸 |
-| `mllm_model`, `prompt_version`, `grounding_seconds` | 模型、prompt 和耗时版本信息 |
+- 与原 bbox 锚点相交且面积足够的连通域；
+- 若没有满足条件的连通域，则保留 guard 内最大连通域。
 
-`grounding_status` 可能为 `OK`、`FULL_IMAGE`、`PROTECT_FOREGROUND`、`PARSE_ERROR`、
-`RUNTIME_ERROR` 或 `GROUND_FAIL`。Stage A 的 `qc_flag=OK` 仅表示最终 contract 可以进入 mask
-stage；它不代表 bbox 已经经过人工检查。目录另含完整运行参数 `run_config.json` 和汇总
-`run_summary.json`。
+因此，SAM 搜索阶段可以适当扩大召回，但远处的小点、货架碎片和不相关区域不会因为位于宽
+搜索框内而自动进入最终 mask。`dense_region`、`aggregate_region` 和 `sparse` 不使用这套普通
+物体连通域过滤，因为其合法编辑可能本来就是不连续的。
 
-### Stage B：SAM3 mask 生成与 source 坐标合成
+target mask 映射到 source 后只使用小幅、按几何类型调整的 dilation：box/negative-space/sparse
+为 0.2%，细轮廓普通物体为 0.25%，dense/aggregate 为 0.4%，实体普通物体为 0.5%。
 
-入口为 `scaleedit_grounded_mask_runner.py`。它按同名 shard 读取原始 parquet 和 Stage A
-grounding parquet，首先核对行数、`row_idx` 和 `sample_id`，再在 source、target 各自原始
-分辨率上处理 contract 中的区域。
+### direct box
 
-每行输入：
+`mask_method=box` 直接填充 locator bbox，只增加极小的栅格边缘，用于文字、符号、细线和稀疏
+区域。这一路径不调用 SAM3。
 
-- 原始 `source_image`、`edited_image`；
-- 对齐的 Stage A `ground_json` 和状态字段；
-- SAM3 checkpoint；
-- 当前 `mask_policy_version`。
+### negative space
 
-本文沿用代码中的命名：PVS 指由 bbox 驱动的 `predict_inst` 候选，PCS 指由可见实体短语驱动
-并受 bbox 空间约束的候选。
+负空间不能用普通“前景分割”处理。当前实现会：
 
-单个 region 的生成方式：
+1. 使用 `carrier_ref` 在整张对应图片上获得 carrier 的 PCS mask；
+2. 选择与负空间 bbox 相邻的 carrier 实例；
+3. 对 carrier 建立凸包并减去真实前景，得到候选凹口/缺口；
+4. 只保留与负空间 bbox 相交的连通域；
+5. 做约 0.3% 的边界膨胀，并限制在扩展后的局部搜索区内。
 
-| contract | 处理 |
-|---|---|
-| `mask_method=box` | 不调用 SAM3；把归一化 bbox 转为该图像像素框，加极小栅格边距并填充矩形 |
-| `mask_method=sam` / PVS | 将 bbox 小幅扩张后作为 SAM3 box prompt，生成多个候选并检查 box IoU 与 containment |
-| `mask_method=sam` / PCS | 同时生成 text-only 和 text+box phrase 候选，按 bbox 空间约束过滤，再按 object/aggregate 与 sparse/dense 策略融合 |
-| 候选选择 | 根据语义细节、区域模式、候选填充率等在 PVS/PCS 间选择；两者均不可用时退化为 box mask |
+若 carrier 或局部反向区域不可用，才退化为 `negative_space_box`，并将 `BOX_FALLBACK` 写入 QC。
 
-每个语义实例都会记录 `mask_source`、`predicted_iou`、`box_iou`、`inside_ratio`、
-`selection_reason`、实际 `sam_prompt` 和异常列表，随后编码为 source 尺寸的 COCO RLE。
+## 输出与 QC
 
-各 `mask_mode` 的最终合成不同：
+grounding parquet 与输入 shard 同名，保留 `row_idx`、`sample_id`、原始字段、完整
+`ground_json`、model/prompt version、状态和耗时。`ground_json` 内含首轮 prompt/raw JSON、
+第二轮 prompt/raw JSON、解析结果以及确定性 route override audit。
 
-- `regions`：分别生成 source regions 和 target regions；target mask 先 resize 到 source
-  尺寸，再按 source 短边膨胀 1.5%（宽高比差异超过 2% 时再增加 2%），最终取
-  `union(source masks, mapped target masks)`；
-- `protect_foreground`：只在 source 上分割稳定前景，合并并按短边膨胀 1.5%，最终取反得到
-  可编辑背景；
-- `full_image`：不调用 SAM3，直接生成与 source 同尺寸的全 1 mask；
-- `GROUND_FAIL`：写出空的失败占位行，不调用 SAM3。
+mask parquet 同样逐行对齐，主要字段包括：
 
-target 到 source 的映射是分辨率归一化 resize 与安全膨胀，不是 optical flow 或像素级配准；
-因此所有最终 `mask_png` 和 `instance_masks` RLE 都严格位于 source 像素坐标系。
+- `mask_png`：source 分辨率的 0/255 PNG；
+- `instance_masks`：每个实例的 COCO RLE、bbox、实际语义轮廓框、PVS/PCS 选择信息、连通域
+  清理统计和 negative-space audit；
+- `mask_source`、`area_frac`、`mask_sum`；
+- `qc_flag`、`qc_flags_json`；
+- MLLM、SAM 和 mask policy version。
 
-Stage B 每行输出：
+主 QC 值包括 `OK`、`GROUND_FAIL`、`EMPTY_MASK`、`BOX_FALLBACK` 和 `AR_MISMATCH`。
+`DIRECT_BOX`、`FULL_IMAGE`、`INVERSE_FOREGROUND` 等正常生成路径记录在 `qc_flags_json`。
 
-| 字段 | 含义 |
-|---|---|
-| `mask_png` | source 原分辨率二值 union mask |
-| `instance_masks` | 各区域的 source 坐标 RLE、bbox、来源、质量指标和选择原因 |
-| `mask_source` | `pvs`, `pcs`, `hybrid`, `box`, `direct_box`, `full_image` 或 `inverse_foreground` |
-| `area_frac`, `mask_sum`, `mask_width/height` | union mask 面积与尺寸 |
-| `qc_flag`, `qc_flags_json`, `ar_delta` | 机器 QC 和宽高比差异 |
-| `mllm_model`, `prompt_version`, `sam_version`, `mask_policy_version` | 可复现实验版本 |
-| `mask_seconds` | 该行 mask 推理耗时 |
+## 完整运行命令
 
-`qc_flag` 的成功值为 `OK`，可见的异常值包括 `EMPTY_MASK`、`BOX_FALLBACK`、`AR_MISMATCH`、
-`GROUND_FAIL` 和 `ERROR`；更细的 `FULL_IMAGE`、`DIRECT_BOX`、`INVERSE_FOREGROUND` 等生成
-路径保存在 `qc_flags_json`。这些都是运行与结构信号，不是人工语义评分。
-
-输出目录同样含 `run_config.json` 和 `run_summary.json`。不加 `--overwrite` 时，已存在的完整
-shard 会被跳过；新 shard 先写 `.tmp`，完成后再原子替换为正式 parquet。
-
-### Stage C：结构校验与人工 review 产物
-
-`scripts/validate_scaleedit_masks.py` 同时读取 raw、grounding 和 mask 三套同名 shard，检查：
-
-- shard/行数、`sample_id`、`row_idx` 是否严格对齐，sample ID 是否重复；
-- `mask_png` 是否与 source 和记录尺寸一致，`mask_sum`、`area_frac` 是否可重算；
-- `full_image` 是否确实全 1，非全图成功行是否非空；
-- 每个 COCO RLE 是否可解码为 source 尺寸，RLE 面积是否与实例元数据一致。
-
-输出为 `validation.json`；存在任何结构错误时脚本以非零状态退出。它不判断“框中了正确
-对象”或“mask 是否泄漏到背景”，因此必须结合人工 review。
-
-`scripts/visualize_scaleedit_masks.py` 输入同样的三套目录，输出 source bbox、target bbox、
-source mask overlay 和二值 mask 四列 contact sheet，以及选样和面积统计 `summary.json`。
-`--coarse-category-groups` 会把 23 个任务分到本文的五个 review 目录，并额外输出根
-`index.json`。
-
-## 验证集运行
-
-以下命令将所有产物写到 workspace 中独立的 `ScaleEdit-results/validation-v1`，不会向验证集
-目录写入任何内容。
+首次使用先创建环境：
 
 ```bash
-cd /opt/tiger/tanyue/sam3-prefilter_improved
+cd /opt/tiger/tanyue/sam3-crispedit
 
+bash scripts/setup_env.sh \
+  --python-bin python3.11 \
+  --qwen-model-path /path/to/Qwen3.5-35B-A3B \
+  --sam3-checkpoint-path /path/to/sam3.pt
+
+source .venv-sam3-crispedit/bin/activate
+```
+
+配置路径。以下变量名只作用于当前 shell，不依赖仓库外的默认配置：
+
+```bash
+SCALEEDIT_DATASET=/path/to/scaleedit-parquet
+SCALEEDIT_RESULTS=/path/to/scaleedit-results/current
+SCALEEDIT_QWEN=/path/to/Qwen3.5-35B-A3B
+SCALEEDIT_SAM3=/path/to/sam3.pt
+```
+
+依次运行 grounding、mask、校验和可视化：
+
+```bash
 python -u scaleedit_mllm_grounding.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-200-v5 \
-  --output-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/grounding-v2 \
-  --model-path /mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B \
+  --input-dir "$SCALEEDIT_DATASET" \
+  --output-dir "$SCALEEDIT_RESULTS/grounding" \
+  --model-path "$SCALEEDIT_QWEN" \
   --devices 0,1,2,3,4,5,6,7 \
   --tensor-parallel-size 2 \
   --batch-size 8 \
   --request-batch-size 4 \
+  --max-new-tokens 1024 \
   --fail-fast
 
 python -u scaleedit_grounded_mask_runner.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-200-v5 \
-  --grounding-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/grounding-v2 \
-  --output-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/masks-v3 \
-  --checkpoint-path /mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt \
+  --input-dir "$SCALEEDIT_DATASET" \
+  --grounding-dir "$SCALEEDIT_RESULTS/grounding" \
+  --output-dir "$SCALEEDIT_RESULTS/masks" \
+  --checkpoint-path "$SCALEEDIT_SAM3" \
   --devices 0,1,2,3,4,5,6,7 \
   --fail-fast
 
-python scripts/visualize_scaleedit_masks.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-200-v5 \
-  --grounding-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/grounding-v2 \
-  --mask-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/masks-v3 \
-  --output-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/review-v2-v3 \
-  --coarse-category-groups
-
 python scripts/validate_scaleedit_masks.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-200-v5 \
-  --grounding-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/grounding-v2 \
-  --mask-dir /opt/tiger/tanyue/ScaleEdit-results/validation-v1/masks-v3 \
-  --report-json /opt/tiger/tanyue/ScaleEdit-results/validation-v1/validation-v2-v3.json
+  --input-dir "$SCALEEDIT_DATASET" \
+  --grounding-dir "$SCALEEDIT_RESULTS/grounding" \
+  --mask-dir "$SCALEEDIT_RESULTS/masks" \
+  --report-json "$SCALEEDIT_RESULTS/validation.json"
+
+python scripts/visualize_scaleedit_masks.py \
+  --input-dir "$SCALEEDIT_DATASET" \
+  --grounding-dir "$SCALEEDIT_RESULTS/grounding" \
+  --mask-dir "$SCALEEDIT_RESULTS/masks" \
+  --output-dir "$SCALEEDIT_RESULTS/review-all" \
+  --samples-per-task 1000 \
+  --rows-per-page 8
 ```
 
-## 恢复、定向复核与策略升级
+已有同名输出 shard 时默认跳过；确认需要重算时才对对应 runner 增加 `--overwrite`。定位单个问题
+样本时，grounding 支持重复传入 `--sample-id SAMPLE_ID`，无需重跑整个数据集。
 
-所有 stage 都以 shard 为恢复单位。不加 `--overwrite` 时会跳过已存在输出；prompt 或 mask
-策略升级后应使用带版本的新输出目录，避免把不同版本静默混合。全量数据仍在下载时不要
-启动生产运行，避免把尚未落稳的 parquet 当成完整分片。
+## 可视化结果
 
-人工 review 后只需修复少量 grounding 时，可重复传入 `--sample-id`，生成仅含指定样本、但
-保留原始 shard 名和 `row_idx` 的定向结果。该稀疏结果不能直接送入 mask runner，必须先用：
+下图是当前实现对讨论过的 9 个重点 case 的最新输出快照。每行从左到右依次为 source 与语义框、
+edited 与语义框、source 上的最终 mask overlay，以及二值 edit mask。标题同时展示 task、
+`mask_mode`、最终 `mask_source`、主 QC 和 mask 面积比例。
 
-```text
-scripts/merge_scaleedit_grounding.py
-  base complete grounding + targeted grounding updates
-  -> new complete grounding directory
+![Current ScaleEdit key-case visualization](../docs_assets/scaleedit/current/key_cases.jpg)
+
+这些样本覆盖负空间旋转、成组移动、局部颜色变化、多对象组合编辑、数量新增、物体移除、全图
+主体提取和物质转移。完整 200-case review page 保存在本机
+`/opt/tiger/tanyue/ScaleEdit-results/current/review-all/`；仓库只保留上面的重点快照，避免提交大量
+派生图片。
+
+`qc=OK` 表示文件结构、尺寸、面积、行对齐和路由执行均有效，不表示语义轮廓一定完美。框是否
+覆盖完整目标、SAM 是否包含应有细节以及是否残留不规则区域，仍应通过这类 review page 人工检查。
+
+## 验证
+
+代码回归：
+
+```bash
+python -m pytest -q
+python -m py_compile scaleedit/*.py scaleedit_*.py scripts/validate_scaleedit_masks.py scripts/visualize_scaleedit_masks.py
 ```
 
-merge 按 `sample_id + row_idx` 覆盖，拒绝重复 ID、错位行、未知样本和原地覆盖。合并后的完整
-grounding 再写入一个新的 mask 输出目录。若只修改了 deterministic post-policy，则使用
-`scripts/apply_scaleedit_grounding_policy.py` 将旧 grounding 转换到新目录，无需重跑 Qwen；
-之后仍需重新运行 Stage B，不能沿用旧 mask。
+当前 200-case 运行的机器校验统计保存在
+`/opt/tiger/tanyue/ScaleEdit-results/current/validation.json`；视觉结果保存在
+`/opt/tiger/tanyue/ScaleEdit-results/current/review-all/`。机器校验保证行数、sample id、图片尺寸、
+PNG/RLE 面积和 full-image 完整性，不替代对 bbox 与语义边界的人工视觉检查。
 
-## 200 条验证集结果
-
-归档结果来自 `ScaleEdit-filtered-balanced-final-task-200-v5`，共覆盖 23 个任务。最终运行目录
-使用 `grounding-final-v4` 和 `masks-final`；版本后缀记录验证期间的定向复核，不是生产路径的
-硬编码要求。该快照在人工复核过程中合并过 prompt v1 和定向修复后的 prompt v2 grounding，
-所有最终 mask 均为 `scaleedit_sam3_hybrid_mask_v3`；新生产运行应直接使用当前 prompt v2，
-不要把这种验证期的混合版本当成默认做法。机器校验结果归档在
-[`validation_summary.json`](../docs_assets/scaleedit/validation_v1/validation_summary.json)。
+当前结果的统计快照也保存在
+[`docs_assets/scaleedit/current/validation.json`](../docs_assets/scaleedit/current/validation.json)：
 
 | 指标 | 结果 |
-|---|---:|
-| 样本 / 唯一 sample ID | 200 / 200 |
-| 任务数 | 23 |
-| instance RLE 数 | 488 |
-| 结构校验错误 | 0 |
-| `regions` / `full_image` / `protect_foreground` | 178 / 17 / 5 |
-| PVS / PCS / hybrid | 81 / 15 / 33 |
-| direct box / full image / inverse foreground | 49 / 17 / 5 |
-| mask 面积比例，中位数 / 均值 | 0.1156 / 0.2725 |
+| --- | ---: |
+| 行数 / 唯一 sample | 200 / 200 |
+| task / instance | 23 / 425 |
+| `qc_flag=OK` | 200 |
+| 校验错误 / 空 mask | 0 / 0 |
+| mode: regions / full_image / protect_foreground | 178 / 18 / 4 |
+| area fraction: median / mean | 0.092314 / 0.249697 |
 
-这里的 `qc=OK` 表示输出对齐、JSON/RLE、尺寸、非空性和 fallback 等机器规则通过，不代表
-人工确认语义完全正确。人工抽查已经发现一个 `count_change` 样本中，MLLM 的两个 target
-bbox 明显向桌面方向下移；PVS 又接受了与错误框自洽但包含桌面的 mask。该问题应在 100k
-生产运行前通过 bbox 复核和语义质量阈值继续改进，不能把本次 200/200 `OK` 解读为
-200/200 人工验收通过。
-
-## 粗粒度分类可视化
-
-每个细任务选择一个代表样本。每行从左到右依次为 source 与 bbox、edited result 与 bbox、
-source 坐标系 mask overlay、二值 mask。图片和对应选样统计均保存在
-`docs_assets/scaleedit/validation_v1/`；五组的任务映射和相对产物路径见
-[`index.json`](../docs_assets/scaleedit/validation_v1/index.json)。
-
-### 1. 对象增删与构图
-
-包含 `object_addition`、`object_removal`、`object_replacement`、`count_change` 和
-`compositional_editing`。对应的
-[选样与统计](../docs_assets/scaleedit/validation_v1/01_object_composition/summary.json)。
-
-![ScaleEdit object and composition review](../docs_assets/scaleedit/validation_v1/01_object_composition/scaleedit_mask_preview_page_1.jpg)
-
-### 2. 属性、材质、尺度与动作
-
-包含 `action_editing`、`color_change`、`material_change` 和 `size_change`。对应的
-[选样与统计](../docs_assets/scaleedit/validation_v1/02_attribute_action/summary.json)。
-
-![ScaleEdit attribute and action review](../docs_assets/scaleedit/validation_v1/02_attribute_action/scaleedit_mask_preview_page_1.jpg)
-
-### 3. 文本与符号
-
-包含四类表面文字编辑和 `symbolic_reasoning`。对应的
-[选样与统计](../docs_assets/scaleedit/validation_v1/03_text_symbol/summary.json)。
-
-![ScaleEdit text and symbol review](../docs_assets/scaleedit/validation_v1/03_text_symbol/scaleedit_mask_preview_page_1.jpg)
-
-### 4. 推理、修复与美化
-
-包含 `perceptual_reasoning`、`scientific_reasoning`、`social_reasoning` 和
-`visual_beautification`。对应的
-[选样与统计](../docs_assets/scaleedit/validation_v1/04_reasoning_repair/summary.json)。
-
-![ScaleEdit reasoning and repair review](../docs_assets/scaleedit/validation_v1/04_reasoning_repair/scaleedit_mask_preview_page_1.jpg)
-
-### 5. 场景、全局变化与主体提取
-
-包含 `background_replacement`、`part_extraction`、`style_transfer`、`tone_adjustment` 和
-`viewpoint_transformation`。对应的
-[选样与统计](../docs_assets/scaleedit/validation_v1/05_scene_global_extraction/summary.json)。
-
-![ScaleEdit scene, global edit, and extraction review](../docs_assets/scaleedit/validation_v1/05_scene_global_extraction/scaleedit_mask_preview_page_1.jpg)
-
-## 全量切换
-
-100k 数据下载完成后，仅需将三个命令中的 `--input-dir` 换成：
-
-```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k
-```
-
-并使用新的输出目录。不要把任何输出放进源数据目录。
+`mask_source` 分布为 PCS 70、direct box 49、hybrid 28、PVS 30、full image 18、inverse
+foreground 4、negative-space inverse 1。

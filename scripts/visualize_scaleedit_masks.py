@@ -122,6 +122,27 @@ def _boxes(image: Image.Image, items: Sequence[Dict], color: str) -> Image.Image
     return canvas
 
 
+def _semantic_box_items(
+    grounded_items: Sequence[Dict], instances: Sequence[Dict], image_side: str
+) -> List[Dict]:
+    """Use the realized SAM contour box for review, with grounding fallback."""
+
+    by_id = {str(item.get("instance_id", "")): item for item in instances}
+    result = []
+    for index, grounded in enumerate(grounded_items):
+        item = dict(grounded)
+        semantic = by_id.get(f"{image_side}_{index}", {}).get("semantic_bbox_2d")
+        if (
+            isinstance(semantic, (list, tuple))
+            and len(semantic) == 4
+            and float(semantic[2]) > float(semantic[0])
+            and float(semantic[3]) > float(semantic[1])
+        ):
+            item["bbox_2d"] = semantic
+        result.append(item)
+    return result
+
+
 def _overlay(image: Image.Image, mask: np.ndarray) -> Image.Image:
     if mask.shape != (image.height, image.width):
         mask = np.asarray(
@@ -143,19 +164,30 @@ def _decode_mask(payload: bytes) -> np.ndarray:
 
 def _load_rows(args: argparse.Namespace) -> List[Dict]:
     result = []
-    for raw_path in discover_shards(args.input_dir):
-        ground_path = args.grounding_dir / raw_path.name
-        mask_path = args.mask_dir / raw_path.name
-        if not ground_path.is_file() or not mask_path.is_file():
-            raise FileNotFoundError(f"missing aligned output for {raw_path.name}")
-        raw_rows = pq.read_table(raw_path).to_pylist()
+    raw_by_name = {path.name: path for path in discover_shards(args.input_dir)}
+    for ground_path in sorted(args.grounding_dir.glob("part-*.parquet")):
+        raw_path = raw_by_name.get(ground_path.name)
+        if raw_path is None:
+            raise FileNotFoundError(f"missing source shard for {ground_path.name}")
+        mask_path = args.mask_dir / ground_path.name
+        if not mask_path.is_file():
+            raise FileNotFoundError(f"missing mask output for {ground_path.name}")
         ground_rows = pq.read_table(ground_path).to_pylist()
         mask_rows = pq.read_table(mask_path).to_pylist()
-        if not (len(raw_rows) == len(ground_rows) == len(mask_rows)):
+        if len(ground_rows) != len(mask_rows):
             raise ValueError(
                 f"row mismatch for {raw_path.name}: "
-                f"raw={len(raw_rows)} ground={len(ground_rows)} mask={len(mask_rows)}"
+                f"ground={len(ground_rows)} mask={len(mask_rows)}"
             )
+        all_raw_rows = pq.read_table(raw_path).to_pylist()
+        raw_rows = []
+        for ground in ground_rows:
+            row_idx = int(ground["row_idx"])
+            if row_idx < 0 or row_idx >= len(all_raw_rows):
+                raise IndexError(
+                    f"grounding row_idx out of range in {raw_path.name}: {row_idx}"
+                )
+            raw_rows.append(all_raw_rows[row_idx])
         for raw, ground, mask in zip(raw_rows, ground_rows, mask_rows):
             identities = {str(raw["sample_id"]), str(ground["sample_id"]), str(mask["sample_id"])}
             if len(identities) != 1:
@@ -196,12 +228,15 @@ def _render_sample(item: Dict, panel_width: int, panel_height: int) -> Image.Ima
     source_items = payload.get("source", [])
     if mode == "protect_foreground":
         source_items = payload.get("protected_foreground", [])
+    instances = mask_row.get("instance_masks", []) or []
+    source_items = _semantic_box_items(source_items, instances, "source")
+    target_items = _semantic_box_items(payload.get("target", []), instances, "target")
     mask = _decode_mask(mask_row["mask_png"])
     source_boxes = _boxes(source, source_items, "#00b050" if mode != "protect_foreground" else "#ff8c00")
-    target_boxes = _boxes(target, payload.get("target", []), "#008cff")
+    target_boxes = _boxes(target, target_items, "#008cff")
     panels = [
-        ("source + boxes", source_boxes),
-        ("edited + boxes", target_boxes),
+        ("source + semantic boxes", source_boxes),
+        ("edited + semantic boxes", target_boxes),
         ("source mask overlay", _overlay(source, mask)),
         ("binary edit mask", Image.fromarray(mask * 255, mode="L").convert("RGB")),
     ]

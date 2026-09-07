@@ -1,151 +1,79 @@
-# Image-edit mask labeling
+# ScaleEdit mask labeling
 
-本仓库提供 CrispEdit-2M 和 ScaleEdit 的图像编辑区域打标流程。两套数据集共享底层
-SAM3 能力，但保留独立的输入、prompt、任务策略和输出契约，不通过类别名强行互相映射。
-当前生产方法不使用 pixel diff。
+本分支实现 ScaleEdit 图像编辑区域打标：Qwen3.5 先通过 planner → bbox locator 两阶段确定
+编辑对象和位置，SAM3 再生成 source 坐标系下的最终二值 mask。普通局部样本调用 MLLM 2 次，
+全图编辑调用 1 次；流程不使用 pixel diff，也没有 crop refinement。
 
-CrispEdit 完整流程：
+完整方法、数据格式、mask 后处理和当前 200-case 可视化结果见
+[ScaleEdit 详细文档](docs/SCALEEDIT_MASK.md)。
 
-```text
-raw parquet
-  -> fact prefilter (Qwen3-VL + deterministic rules)
-  -> keep manifest
-  -> two-pass grounding (Qwen3.5)
-  -> dual-prompt mask (SAM3)
-```
+## 快速开始
 
-ScaleEdit 从已经清洗并分配 `final_task` 的 source/result pair 开始：
-
-```text
-ScaleEdit parquet
-  -> paired-image edit audit and grounding (Qwen3.5)
-  -> task-aware mask routing and segmentation (SAM3)
-  -> aligned parquet, validation report, and visual review
-```
-
-详细设计见 [CrispEdit prefilter 文档](docs/CRISPEDIT_PREFILTER.md)、
-[CrispEdit mask 文档](docs/CRISPEDIT_MASK.md) 和
-[ScaleEdit mask 文档与验证结果](docs/SCALEEDIT_MASK.md)。
-
-## 代码组织
-
-```text
-crispedit/
-├── prefilter/
-│   ├── runner.py              # Qwen3-VL 推理、调度与 parquet I/O
-│   └── policy.py              # 事实归一化和确定性 keep/drop 裁决
-├── mask/
-│   ├── grounding_runner.py    # Qwen3.5 两轮定位与多卡调度
-│   ├── grounding.py           # 类别路由、prompt、bbox 与 JSON 解析
-│   ├── runner.py              # SAM3 多卡 shard runner
-│   └── pipeline.py            # bbox/phrase 候选与最终 mask 融合
-└── legacy/                    # 旧 pixel-diff 流程，仅用于回归对照
-```
-
-根目录的三个脚本是稳定的生产入口：
-
-- `crispedit_mllm_prefilter.py`
-- `crispedit_mllm_grounding.py`
-- `crispedit_grounded_mask_runner.py`
-
-`scripts/` 保存评测、导出和可视化工具，`tests/` 保存单元测试。
-
-ScaleEdit 的独立实现位于 `scaleedit/`，稳定入口为：
-
-- `scaleedit_mllm_grounding.py`
-- `scaleedit_grounded_mask_runner.py`
-- `scripts/visualize_scaleedit_masks.py`
-- `scripts/validate_scaleedit_masks.py`
-
-验证集的统计、粗粒度分类和可视化结果已归档在
-[`docs/SCALEEDIT_MASK.md`](docs/SCALEEDIT_MASK.md)，原始预览图位于
-`docs_assets/scaleedit/validation_v1/`。
-
-## CrispEdit 当前打标方式
-
-1. **Prefilter**：Qwen3-VL 分别提取 source、target 和盲对比事实；代码按编辑类别检查
-   change、主体一致性、构图和无关区域保持情况。模型不直接决定 keep/drop，最终采用
-   fail-closed 裁决并输出逐行对齐的 audit 与 manifest。
-2. **Grounding**：Qwen3.5 第一轮根据两张图和 instruction 描述实际编辑，第二轮输出
-   SAM-friendly 短语和 recall-first bbox；小目标会在高清 crop 中复核。background 改为
-   审计稳定前景：有前景时分割后取反，无稳定前景时显式生成全图 mask。style 直接使用
-   全图 mask。
-3. **Mask**：SAM3 同时生成 bbox-only、phrase-only 和 phrase+bbox 候选，再按区域密度、
-   空间约束和语义一致性融合。输出 mask 始终映射回 source 坐标系。
-
-Prefilter drop 行保留 `PREFILTER_SKIP` 占位，不调用后续模型；所有输出 parquet 与原始
-shard 同名、逐行对齐。
-
-## CrispEdit 运行
-
-要求 Python 3.11、CUDA GPU，以及本地 Qwen3-VL、Qwen3.5 和 SAM3 checkpoint。
-
-### 1. 安装环境
+要求 Python 3.11、CUDA GPU、本地 Qwen3.5-35B-A3B 模型和 SAM3 checkpoint。
 
 ```bash
-cd /opt/tiger/tanyue/sam3-prefilter_improved
+cd /opt/tiger/tanyue/sam3-crispedit
+
 bash scripts/setup_env.sh \
   --python-bin python3.11 \
-  --sam3-checkpoint-path /mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt
+  --qwen-model-path /path/to/Qwen3.5-35B-A3B \
+  --sam3-checkpoint-path /path/to/sam3.pt
+
 source .venv-sam3-crispedit/bin/activate
 ```
 
-### 2. Prefilter
+设置本次运行路径：
 
 ```bash
-python -u crispedit_mllm_prefilter.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
-  --audit-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit \
-  --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest \
-  --model-path /mnt/bn/strategy-mllm-train/common/models/Qwen3-VL-8B-Instruct \
-  --devices 0,1,2,3,4,5,6,7 \
-  --batch-size 16 \
-  --max-new-tokens 512 \
-  --slot-cache-size 20000 \
-  --confidence-threshold 0.6 \
-  --boundary-review-fraction 0.05 \
-  --fail-fast
+SCALEEDIT_DATASET=/path/to/scaleedit-parquet
+SCALEEDIT_RESULTS=/path/to/scaleedit-results/current
+SCALEEDIT_QWEN=/path/to/Qwen3.5-35B-A3B
+SCALEEDIT_SAM3=/path/to/sam3.pt
 ```
 
-### 3. MLLM grounding
+运行 grounding 和 mask：
 
 ```bash
-python -u crispedit_mllm_grounding.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
-  --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding \
-  --model-path /mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B \
+python -u scaleedit_mllm_grounding.py \
+  --input-dir "$SCALEEDIT_DATASET" \
+  --output-dir "$SCALEEDIT_RESULTS/grounding" \
+  --model-path "$SCALEEDIT_QWEN" \
   --devices 0,1,2,3,4,5,6,7 \
   --tensor-parallel-size 2 \
-  --grounding-mode two-pass \
-  --background-observation-mode foreground-audit \
-  --bbox-refinement small \
-  --batch-size 16 \
-  --request-batch-size 8 \
-  --max-images-per-generate 20 \
-  --max-new-tokens 512 \
+  --batch-size 8 \
+  --request-batch-size 4 \
+  --max-new-tokens 1024 \
+  --fail-fast
+
+python -u scaleedit_grounded_mask_runner.py \
+  --input-dir "$SCALEEDIT_DATASET" \
+  --grounding-dir "$SCALEEDIT_RESULTS/grounding" \
+  --output-dir "$SCALEEDIT_RESULTS/masks" \
+  --checkpoint-path "$SCALEEDIT_SAM3" \
+  --devices 0,1,2,3,4,5,6,7 \
   --fail-fast
 ```
 
-### 4. SAM3 mask
+校验并生成可视化：
 
 ```bash
-python -u crispedit_grounded_mask_runner.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
-  --grounding-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask \
-  --checkpoint-path /mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt \
-  --devices 0,1,2,3,4,5,6,7 \
-  --preview-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-previews \
-  --fail-fast
+python scripts/validate_scaleedit_masks.py \
+  --input-dir "$SCALEEDIT_DATASET" \
+  --grounding-dir "$SCALEEDIT_RESULTS/grounding" \
+  --mask-dir "$SCALEEDIT_RESULTS/masks" \
+  --report-json "$SCALEEDIT_RESULTS/validation.json"
+
+python scripts/visualize_scaleedit_masks.py \
+  --input-dir "$SCALEEDIT_DATASET" \
+  --grounding-dir "$SCALEEDIT_RESULTS/grounding" \
+  --mask-dir "$SCALEEDIT_RESULTS/masks" \
+  --output-dir "$SCALEEDIT_RESULTS/review-all" \
+  --samples-per-task 1000 \
+  --rows-per-page 8
 ```
 
-不加 `--overwrite` 时会跳过已完成 shard；策略或 prompt 改变后应使用新输出目录，避免混合
-不同版本的结果。运行前可用 `python <入口脚本> --help` 查看抽样和类别过滤参数。
-
-## 验证
+运行测试：
 
 ```bash
 python -m pytest -q
-python -m py_compile crispedit/**/*.py crispedit_*.py scripts/*.py
 ```

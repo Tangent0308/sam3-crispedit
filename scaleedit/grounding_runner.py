@@ -20,14 +20,16 @@ from tqdm import tqdm
 from scaleedit import PROMPT_VERSION
 from scaleedit.io import decode_image, discover_shards, image_size, iter_row_batches
 from scaleedit.policy import (
+    BBOX_LOCALIZATION_PROMPT_VERSION,
     apply_task_post_policy,
     build_grounding_prompt,
     build_object_viewpoint_retry_prompt,
     build_observation_prompt,
     canonical_task,
+    grounding_from_localization,
     grounding_status,
     object_viewpoint_ref,
-    parse_grounding,
+    parse_bbox_localization,
     parse_observation,
 )
 
@@ -252,27 +254,6 @@ class Qwen35ScaleEditGrounder:
             }
         ]
 
-    @classmethod
-    def _followup(
-        cls,
-        source: Image.Image,
-        target: Image.Image,
-        observation_prompt: str,
-        observation_text: str,
-        grounding_prompt: str,
-    ) -> List[Dict]:
-        return [
-            cls._conversation(source, target, observation_prompt)[0],
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": observation_text}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": grounding_prompt}],
-            },
-        ]
-
     def _generate_once(self, conversations: Sequence[List[Dict]]) -> List[str]:
         inputs = self.processor.apply_chat_template(
             list(conversations),
@@ -348,7 +329,6 @@ class Qwen35ScaleEditGrounder:
             observation_texts.extend(self.generate([item[1] for item in chunk]))
 
         observations = []
-        grounding_jobs = []
         for sample, (prompt, conversation), initial_text in zip(
             samples, observation_jobs, observation_texts
         ):
@@ -363,67 +343,153 @@ class Qwen35ScaleEditGrounder:
                 "error": error,
             }
             observations.append(observation)
-            context = parsed if parsed is not None else {"unparsed_observation": text}
-            grounding_prompt = build_grounding_prompt(
-                sample["final_task"], sample["instruction"], context
-            )
-            grounding_conversation = self._followup(
-                sample["source"],
-                sample["target"],
-                prompt,
-                text,
-                grounding_prompt,
-            )
-            grounding_jobs.append((grounding_prompt, grounding_conversation))
 
-        grounding_texts: List[str] = []
-        for start in range(0, len(grounding_jobs), self.args.request_batch_size):
-            chunk = grounding_jobs[start : start + self.args.request_batch_size]
-            grounding_texts.extend(self.generate([item[1] for item in chunk]))
-
-        payloads = []
-        for sample_index, (observation, (prompt, conversation), initial_text) in enumerate(
-            zip(observations, grounding_jobs, grounding_texts)
-        ):
-            text, parsed, error = self._parse_with_retry(
-                conversation, initial_text, parse_grounding
-            )
-            route_retry = None
+        # Keep the rare viewpoint correction semantic-only. It repairs the
+        # first-pass plan and leaves all coordinate work to the bbox locator.
+        route_retry_jobs = []
+        for sample_index, observation in enumerate(observations):
+            parsed = observation.get("parsed") if observation.get("parse_ok") else None
             route_ref = object_viewpoint_ref(
                 samples[sample_index]["final_task"], samples[sample_index]["instruction"]
             )
-            if not error and parsed is not None and parsed.get("mask_mode") == "full_image" and route_ref:
+            if parsed is not None and parsed.get("mask_mode") == "full_image" and route_ref:
                 retry_prompt = build_object_viewpoint_retry_prompt(
                     samples[sample_index]["final_task"],
                     samples[sample_index]["instruction"],
-                    observation["parsed"],
+                    parsed,
                     route_ref,
                 )
-                retry_conversation = conversation + [
-                    {"role": "assistant", "content": [{"type": "text", "text": text}]},
-                    {"role": "user", "content": [{"type": "text", "text": retry_prompt}]},
-                ]
-                retry_text, retry_parsed, retry_error = self._parse_with_retry(
-                    retry_conversation,
-                    self.generate([retry_conversation])[0],
-                    parse_grounding,
+                route_retry_jobs.append(
+                    {
+                        "sample_index": sample_index,
+                        "object_ref": route_ref,
+                        "prompt": retry_prompt,
+                        "conversation": self._conversation(
+                            samples[sample_index]["source"],
+                            samples[sample_index]["target"],
+                            retry_prompt,
+                        ),
+                    }
                 )
-                accepted = bool(
-                    not retry_error
-                    and retry_parsed is not None
-                    and retry_parsed.get("mask_mode") == "regions"
-                    and (retry_parsed.get("source") or retry_parsed.get("target"))
-                )
-                route_retry = {
-                    "object_ref": route_ref,
-                    "prompt": retry_prompt,
-                    "raw_text": retry_text,
-                    "parse_ok": not retry_error,
-                    "accepted": accepted,
-                    "error": retry_error or ("retry did not return regions" if not accepted else ""),
+
+        route_retry_texts: List[str] = []
+        for start in range(0, len(route_retry_jobs), self.args.request_batch_size):
+            chunk = route_retry_jobs[start : start + self.args.request_batch_size]
+            route_retry_texts.extend(self.generate([job["conversation"] for job in chunk]))
+        route_retries: Dict[int, Dict] = {}
+        for job, initial_text in zip(route_retry_jobs, route_retry_texts):
+            retry_text, retry_parsed, retry_error = self._parse_with_retry(
+                job["conversation"], initial_text, parse_observation
+            )
+            accepted = bool(
+                not retry_error
+                and retry_parsed is not None
+                and retry_parsed.get("mask_mode") == "regions"
+                and retry_parsed.get("localization_items")
+            )
+            route_retries[job["sample_index"]] = {
+                "object_ref": job["object_ref"],
+                "prompt": job["prompt"],
+                "raw_text": retry_text,
+                "parse_ok": not retry_error,
+                "accepted": accepted,
+                "error": retry_error
+                or ("retry did not return a regions plan" if not accepted else ""),
+            }
+            if accepted:
+                observations[job["sample_index"]]["parsed"] = retry_parsed
+
+        # Round 2 starts a fresh conversation and sees only the canonical item
+        # checklist. The first prompt and raw first-pass JSON are deliberately
+        # absent, so the model has one task: candidate_id -> complete bbox.
+        localization_jobs = []
+        for sample_index, (sample, observation) in enumerate(zip(samples, observations)):
+            plan = observation.get("parsed") if observation.get("parse_ok") else None
+            if not plan or plan.get("mask_mode") == "full_image":
+                continue
+            locator_prompt = build_grounding_prompt(
+                sample["final_task"], sample["instruction"], plan
+            )
+            localization_jobs.append(
+                {
+                    "sample_index": sample_index,
+                    "plan": plan,
+                    "prompt": locator_prompt,
+                    "conversation": self._conversation(
+                        sample["source"], sample["target"], locator_prompt
+                    ),
                 }
-                if accepted:
-                    parsed = retry_parsed
+            )
+
+        localization_texts: List[str] = []
+        for start in range(0, len(localization_jobs), self.args.request_batch_size):
+            chunk = localization_jobs[start : start + self.args.request_batch_size]
+            localization_texts.extend(self.generate([job["conversation"] for job in chunk]))
+
+        localization_results: Dict[int, Dict] = {}
+        for job, initial_text in zip(localization_jobs, localization_texts):
+            expected_ids = [
+                int(item["candidate_id"])
+                for item in job["plan"].get("localization_items", [])
+            ]
+
+            def locator_parser(
+                value: str, *, plan=job["plan"], ids=expected_ids
+            ) -> Dict:
+                boxes = parse_bbox_localization(value, ids)
+                return grounding_from_localization(plan, boxes)
+
+            text, parsed, error = self._parse_with_retry(
+                job["conversation"], initial_text, locator_parser
+            )
+            localization_results[job["sample_index"]] = {
+                "prompt": job["prompt"],
+                "raw_text": text,
+                "parsed": parsed,
+                "error": error,
+            }
+
+        payloads = []
+        for sample_index, observation in enumerate(observations):
+            plan = observation.get("parsed") if observation.get("parse_ok") else None
+            localization = localization_results.get(sample_index)
+            if plan is None:
+                parsed = None
+                error = observation.get("error") or "observation plan unavailable"
+                grounding_audit = {
+                    "prompt_version": BBOX_LOCALIZATION_PROMPT_VERSION,
+                    "prompt": "",
+                    "raw_text": "",
+                    "parse_ok": False,
+                    "error": error,
+                    "skipped_reason": "observation_parse_failed",
+                }
+            elif plan.get("mask_mode") == "full_image":
+                parsed = grounding_from_localization(plan, [])
+                error = ""
+                grounding_audit = {
+                    "prompt_version": BBOX_LOCALIZATION_PROMPT_VERSION,
+                    "prompt": "",
+                    "raw_text": "",
+                    "parse_ok": True,
+                    "error": "",
+                    "skipped_reason": "full_image_has_no_boxes",
+                }
+            else:
+                parsed = localization.get("parsed") if localization else None
+                error = (
+                    localization.get("error", "")
+                    if localization
+                    else "bbox localization result unavailable"
+                )
+                grounding_audit = {
+                    "prompt_version": BBOX_LOCALIZATION_PROMPT_VERSION,
+                    "prompt": localization.get("prompt", "") if localization else "",
+                    "raw_text": localization.get("raw_text", "") if localization else "",
+                    "parse_ok": not error,
+                    "error": error,
+                }
+            parse_ok = bool(parsed is not None and observation.get("parse_ok") and not error)
             parsed = parsed or {
                 "prompt_version": PROMPT_VERSION,
                 "mask_mode": "unresolved",
@@ -434,23 +500,17 @@ class Qwen35ScaleEditGrounder:
             payload = {
                 "schema_version": 1,
                 **parsed,
-                "ground_parse_ok": not error,
+                "ground_parse_ok": parse_ok,
                 "observation": observation,
-                "grounding": {
-                    "prompt": prompt,
-                    "raw_text": text,
-                    "parse_ok": not error,
-                    "error": error,
-                },
+                "grounding": grounding_audit,
             }
-            if route_retry is not None:
-                payload["grounding"]["route_retry"] = route_retry
-            payload = apply_task_post_policy(
-                samples[sample_index]["final_task"],
-                samples[sample_index]["instruction"],
-                payload,
-            )
+            if sample_index in route_retries:
+                payload["grounding"]["route_retry"] = route_retries[sample_index]
             payloads.append(payload)
+        payloads = [
+            apply_task_post_policy(sample["final_task"], sample["instruction"], payload)
+            for sample, payload in zip(samples, payloads)
+        ]
         return payloads
 
 

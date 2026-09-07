@@ -19,6 +19,15 @@ from crispedit.mask.grounding import canonicalize_type
 @dataclass(frozen=True)
 class MaskConfig:
     box_expand_frac: float = 0.025
+    # Coherent objects use the MLLM box as an instance anchor rather than a
+    # hard contour.  A wider *internal* SAM search region can recover a head,
+    # handle, limb, or other extremity omitted by the noisy box.  The expanded
+    # rectangle is never unioned into the output mask.
+    object_search_expand_frac: float = 0.35
+    # Whole people, walls, and other already-large regions should not be turned
+    # into near-full-image prompts.  The rescue margin is for localized object
+    # proposals only.
+    object_search_max_side_frac: float = 0.40
     # A deterministic image-relative safety margin is applied only along a
     # genuinely tiny box dimension.  Applying it to normal face/limb boxes can
     # change SAM's semantic proposal, while tiny earrings, fingers and petals
@@ -27,6 +36,10 @@ class MaskConfig:
     min_box_expand_max_dimension_frac: float = 0.05
     pvs_box_iou: float = 0.60
     pvs_inside_ratio: float = 0.90
+    # SAM's box proposal can be geometrically contained yet semantically
+    # nonsensical (for example a blocky hourglass-sand mask with predicted IoU
+    # close to zero).  Geometry gates alone therefore are not sufficient.
+    pvs_min_predicted_iou: float = 0.50
     pvs_containment_expand_frac: float = 0.05
     pcs_inside_ratio: float = 0.80
     pcs_containment_expand_frac: float = 0.05
@@ -55,7 +68,7 @@ class MaskConfig:
 
 
 CFG = MaskConfig()
-MASK_POLICY_VERSION = "sam3-dual-prompt-region-fusion-v5-surface-aware"
+MASK_POLICY_VERSION = "sam3-dual-prompt-region-fusion-v10-fragment-aware-selection"
 
 
 # A box is not a sufficient semantic prompt for these targets: it commonly
@@ -243,6 +256,21 @@ def _norm_cxcywh(box: Sequence[float], shape: Tuple[int, int]) -> List[float]:
     ]
 
 
+def _pixel_box_to_normalized(
+    box: Optional[Sequence[float]], shape: Tuple[int, int]
+) -> List[float]:
+    if box is None:
+        return [0.0, 0.0, 0.0, 0.0]
+    height, width = shape
+    x1, y1, x2, y2 = [float(value) for value in box]
+    return [
+        round(1000.0 * x1 / max(width, 1), 3),
+        round(1000.0 * y1 / max(height, 1), 3),
+        round(1000.0 * x2 / max(width, 1), 3),
+        round(1000.0 * y2 / max(height, 1), 3),
+    ]
+
+
 def _pvs_mask(processor, state: Dict, box: np.ndarray, shape: Tuple[int, int]) -> Tuple[Optional[np.ndarray], Dict]:
     masks, predicted_ious, _ = processor.model.predict_inst(
         inference_state=state,
@@ -259,18 +287,50 @@ def _pvs_mask(processor, state: Dict, box: np.ndarray, shape: Tuple[int, int]) -
         candidate_box_iou = box_iou(candidate_box, box)
         inside_ratio = 1.0 - _outside_ratio(mask, containment_box, shape)
         predicted_iou = float(np.asarray(predicted_ious[index]).item())
+        geometry_ok = (
+            candidate_box_iou >= CFG.pvs_box_iou
+            and inside_ratio >= CFG.pvs_inside_ratio
+        )
+        confidence_ok = (
+            math.isfinite(predicted_iou)
+            and predicted_iou >= CFG.pvs_min_predicted_iou
+        )
         candidates.append(
             {
                 "mask": mask,
                 "predicted_iou": predicted_iou,
                 "box_iou": candidate_box_iou,
                 "inside_ratio": inside_ratio,
-                "accepted": candidate_box_iou >= CFG.pvs_box_iou and inside_ratio >= CFG.pvs_inside_ratio,
+                "geometry_ok": geometry_ok,
+                "confidence_ok": confidence_ok,
+                "accepted": geometry_ok and confidence_ok,
             }
         )
     accepted = [item for item in candidates if item["accepted"]]
     if not accepted:
-        return None, {"candidate_count": len(candidates), "reason": "PVS_INCONSISTENT"}
+        geometrically_consistent = [item for item in candidates if item["geometry_ok"]]
+        best_audit = max(
+            geometrically_consistent or candidates,
+            key=lambda item: (item["predicted_iou"], item["box_iou"]),
+            default={},
+        )
+        reason = (
+            "PVS_LOW_CONFIDENCE"
+            if geometrically_consistent
+            else "PVS_INCONSISTENT"
+        )
+        return None, {
+            "candidate_count": len(candidates),
+            "reason": reason,
+            "rejected_predicted_iou": float(
+                best_audit.get("predicted_iou", math.nan)
+            ),
+            "rejected_box_iou": float(best_audit.get("box_iou", math.nan)),
+            "rejected_inside_ratio": float(
+                best_audit.get("inside_ratio", math.nan)
+            ),
+            "min_predicted_iou": CFG.pvs_min_predicted_iou,
+        }
     best = max(accepted, key=lambda item: (item["predicted_iou"], item["box_iou"]))
     mask = best.pop("mask")
     best["candidate_count"] = len(candidates)
@@ -285,13 +345,23 @@ def _pcs_mask(
     box: np.ndarray,
     shape: Tuple[int, int],
     use_geometric_prompt: bool = False,
+    geometric_box: Optional[np.ndarray] = None,
 ) -> Tuple[Optional[np.ndarray], Dict]:
-    """Return phrase-grounded instances spatially contained by the MLLM box."""
+    """Return phrase-grounded instances spatially contained by ``box``.
+
+    ``box`` may be a deliberately generous search/containment window.  A
+    text+box query must still use the tighter MLLM instance anchor as its
+    positive geometric prompt; feeding the expanded search window back to SAM
+    encourages support surfaces and shadows to become part of the object.
+    """
 
     processor.reset_all_prompts(state)
     output = processor.set_text_prompt(prompt=ref, state=state)
     if use_geometric_prompt:
-        output = processor.add_geometric_prompt(_norm_cxcywh(box, shape), True, state=state)
+        positive_box = box if geometric_box is None else geometric_box
+        output = processor.add_geometric_prompt(
+            _norm_cxcywh(positive_box, shape), True, state=state
+        )
     if "masks" not in output or int(output["masks"].shape[0]) == 0:
         return None, {
             "candidate_count": 0,
@@ -342,6 +412,31 @@ def _mask_iou(first: np.ndarray, second: np.ndarray) -> float:
     intersection = int(((first > 0) & (second > 0)).sum())
     union = int(((first > 0) | (second > 0)).sum())
     return float(intersection / max(union, 1))
+
+
+def _mask_containment(first: np.ndarray, second: np.ndarray) -> float:
+    """Intersection over the smaller mask, used to recognize the same object."""
+
+    intersection = int(((first > 0) & (second > 0)).sum())
+    smaller = min(int((first > 0).sum()), int((second > 0).sum()))
+    return float(intersection / max(smaller, 1))
+
+
+def _box_boundary_contacts(mask: np.ndarray, box: Sequence[float]) -> Tuple[bool, ...]:
+    """Return left/top/right/bottom contacts with a SAM search box."""
+
+    mask_box = mask_to_box(mask)
+    if mask_box is None:
+        return (False, False, False, False)
+    x1, y1, x2, y2 = [float(value) for value in box]
+    mx1, my1, mx2, my2 = [float(value) for value in mask_box]
+    tolerance = max(2.0, 0.04 * min(x2 - x1, y2 - y1))
+    return (
+        mx1 <= x1 + tolerance,
+        my1 <= y1 + tolerance,
+        mx2 >= x2 - tolerance,
+        my2 >= y2 - tolerance,
+    )
 
 
 def _fuse_pcs_prompts(
@@ -612,6 +707,10 @@ def _prefer_pcs_candidate(
     pvs_mask: Optional[np.ndarray],
     pcs_mask: Optional[np.ndarray],
     region_mode: str = "object",
+    expanded_object_search: bool = False,
+    pvs_predicted_iou: Optional[float] = None,
+    pvs_component_count: Optional[int] = None,
+    pcs_component_count: Optional[int] = None,
 ) -> Tuple[bool, str]:
     if pcs_mask is None:
         return False, "PCS_UNAVAILABLE"
@@ -624,6 +723,52 @@ def _prefer_pcs_candidate(
         return True, "AGGREGATE_REGION"
     if _semantic_detail_target(ref):
         return True, "SEMANTIC_DETAIL"
+    # A coherent object (including a pair) should not arrive as dozens of
+    # disconnected box-prompt fragments.  Those fragments are commonly shelf
+    # edges, lettering, reflections, or texture specks.  Prefer a materially
+    # more connected semantic proposal when its area is still comparable; the
+    # aggregate/sparse routes above deliberately bypass this object-only rule.
+    if (
+        pvs_component_count is not None
+        and pcs_component_count is not None
+        and int(pvs_component_count) >= 12
+        and int(pcs_component_count) <= max(4, int(pvs_component_count) // 4)
+        and 0.25 * float(pvs_mask.sum())
+        <= float(pcs_mask.sum())
+        <= 2.0 * float(pvs_mask.sum())
+    ):
+        return True, "PVS_FRAGMENTED"
+    if expanded_object_search:
+        pvs_contacts = _box_boundary_contacts(pvs_mask, prompt_box)
+        pcs_contacts = _box_boundary_contacts(pcs_mask, prompt_box)
+        pvs_area = max(int(pvs_mask.sum()), 1)
+        pcs_area = max(int(pcs_mask.sum()), 1)
+        same_object = _mask_containment(pvs_mask, pcs_mask) >= 0.60
+        pcs_resolves_contact = any(
+            pvs_contact and not pcs_contact
+            for pvs_contact, pcs_contact in zip(pvs_contacts, pcs_contacts)
+        )
+        if same_object and pcs_resolves_contact and pcs_area <= 1.25 * pvs_area:
+            return True, "PVS_SEARCH_BOUNDARY_LEAK"
+        # A weak PVS that touches several sides of the deliberately enlarged
+        # search window is usually a shelf/background proposal rather than the
+        # anchored object.  Requiring high PVS/PCS containment in this case
+        # previously kept badly fragmented masks simply because the cleaner
+        # semantic proposal disagreed with them.  This gate is deliberately
+        # limited to low-confidence PVS proposals and a smaller, less leaky PCS.
+        weak_pvs = bool(
+            pvs_predicted_iou is not None
+            and math.isfinite(float(pvs_predicted_iou))
+            and float(pvs_predicted_iou) < 0.65
+        )
+        if (
+            weak_pvs
+            and sum(bool(value) for value in pvs_contacts) >= 2
+            and sum(bool(value) for value in pcs_contacts)
+            < sum(bool(value) for value in pvs_contacts)
+            and pcs_area <= 1.50 * pvs_area
+        ):
+            return True, "PVS_WEAK_BOUNDARY_LEAK"
     if pvs_fill < CFG.pvs_sparse_fill_ratio and pcs_fill > pvs_fill / CFG.semantic_area_ratio:
         return True, "PVS_SPARSE"
     if pvs_fill > CFG.pvs_dense_fill_ratio and pcs_fill < pvs_fill * CFG.semantic_area_ratio:
@@ -640,14 +785,29 @@ def segment_grounded_box(
     edit_type: Optional[str] = None,
     region_mode: str = "object",
     mask_density: str = "object",
+    anchor_box_2d: Optional[Sequence[float]] = None,
 ) -> Tuple[np.ndarray, Dict]:
     region_mode = "aggregate_region" if region_mode == "aggregate_region" else "object"
     mask_density = mask_density if mask_density in {"sparse", "dense", "object"} else "object"
     raw_box = normalized_box_to_pixels(box_2d, shape)
+    anchor_box = normalized_box_to_pixels(
+        anchor_box_2d if anchor_box_2d is not None else box_2d, shape
+    )
+    anchor_width_frac = float(anchor_box[2] - anchor_box[0]) / max(shape[1], 1)
+    anchor_height_frac = float(anchor_box[3] - anchor_box[1]) / max(shape[0], 1)
+    localized_object = (
+        region_mode == "object"
+        and mask_density == "object"
+        and max(anchor_width_frac, anchor_height_frac)
+        <= CFG.object_search_max_side_frac
+    )
+    search_expand_frac = (
+        CFG.object_search_expand_frac if localized_object else CFG.box_expand_frac
+    )
     prompt_box = expand_box(
-        raw_box,
+        anchor_box,
         shape,
-        CFG.box_expand_frac,
+        search_expand_frac,
         CFG.min_box_expand_image_frac,
         CFG.min_box_expand_max_dimension_frac,
     )
@@ -685,6 +845,7 @@ def segment_grounded_box(
             prompt_box,
             shape,
             use_geometric_prompt=True,
+            geometric_box=anchor_box,
         )
     except Exception as exc:
         errors.append(f"pcs_text_box:{exc!r}")
@@ -697,9 +858,39 @@ def segment_grounded_box(
         region_mode,
         mask_density,
     )
+    pvs_component_count = (
+        max(
+            0,
+            cv2.connectedComponents(
+                (pvs_mask > 0).astype(np.uint8), connectivity=8
+            )[0]
+            - 1,
+        )
+        if pvs_mask is not None
+        else 0
+    )
+    pcs_component_count = (
+        max(
+            0,
+            cv2.connectedComponents(
+                (pcs_mask > 0).astype(np.uint8), connectivity=8
+            )[0]
+            - 1,
+        )
+        if pcs_mask is not None
+        else 0
+    )
 
     use_pcs, selection_reason = _prefer_pcs_candidate(
-        ref, prompt_box, pvs_mask, pcs_mask, region_mode
+        ref,
+        prompt_box,
+        pvs_mask,
+        pcs_mask,
+        region_mode,
+        expanded_object_search=localized_object,
+        pvs_predicted_iou=pvs_metadata.get("predicted_iou"),
+        pvs_component_count=pvs_component_count,
+        pcs_component_count=pcs_component_count,
     )
     if use_pcs:
         source = "pcs"
@@ -720,7 +911,10 @@ def segment_grounded_box(
     # The adaptive box expansion is only a SAM prompt aid.  Coverage is audited
     # against the original MLLM box; requiring the expanded margin itself caused
     # otherwise correct limb masks to become large rectangles.
-    x_cover, y_cover = _directional_coverage(mask, raw_box)
+    # Audit coverage against the anchor seen by SAM.  ``box_2d`` can be a bad
+    # crop-refinement result retained only for provenance, whereas the initial
+    # box remains the more reliable instance identifier.
+    x_cover, y_cover = _directional_coverage(mask, anchor_box)
     misses_coverage = (
         x_cover < CFG.min_directional_box_coverage
         or y_cover < CFG.min_directional_box_coverage
@@ -735,11 +929,35 @@ def segment_grounded_box(
     coverage_suppressed = bool(misses_coverage and source != "box")
     coverage_union = False
     semantic_source = source
+    semantic_box = mask_to_box(mask)
     metadata.update(
         {
             "mask_source": source,
             "semantic_mask_source": semantic_source,
             "bbox_xyxy": [round(float(value), 2) for value in prompt_box],
+            "sam_anchor_bbox_2d": _pixel_box_to_normalized(anchor_box, shape),
+            "sam_positive_bbox_2d": _pixel_box_to_normalized(anchor_box, shape),
+            "semantic_bbox_2d": _pixel_box_to_normalized(semantic_box, shape),
+            "sam_search_expand_frac": float(search_expand_frac),
+            "pvs_area": int(pvs_mask.sum()) if pvs_mask is not None else 0,
+            "pcs_area": int(pcs_mask.sum()) if pcs_mask is not None else 0,
+            "pvs_component_count": int(pvs_component_count),
+            "pcs_component_count": int(pcs_component_count),
+            "pvs_pcs_iou": (
+                _mask_iou(pvs_mask, pcs_mask)
+                if pvs_mask is not None and pcs_mask is not None
+                else 0.0
+            ),
+            "pvs_boundary_contacts": (
+                list(_box_boundary_contacts(pvs_mask, prompt_box))
+                if pvs_mask is not None
+                else [False, False, False, False]
+            ),
+            "pcs_boundary_contacts": (
+                list(_box_boundary_contacts(pcs_mask, prompt_box))
+                if pcs_mask is not None
+                else [False, False, False, False]
+            ),
             "directional_coverage": [round(x_cover, 4), round(y_cover, 4)],
             "coverage_box_union": coverage_union,
             "coverage_suppressed_for_sparse_semantics": coverage_suppressed,
@@ -749,6 +967,12 @@ def segment_grounded_box(
             "selection_reason": selection_reason,
             "sam_prompt": sam_prompt,
             "errors": errors,
+            "pvs_rejection_reason": (
+                str(pvs_metadata.get("reason", "")) if pvs_mask is None else ""
+            ),
+            "pvs_rejected_predicted_iou": float(
+                pvs_metadata.get("rejected_predicted_iou", math.nan)
+            ),
         }
     )
     return mask.astype(np.uint8), metadata

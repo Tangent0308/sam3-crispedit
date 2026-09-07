@@ -52,6 +52,7 @@ MASK_MODES = {"regions", "protect_foreground", "full_image"}
 MASK_METHODS = {"sam", "box"}
 REGION_MODES = {"object", "aggregate_region"}
 MASK_DENSITIES = {"object", "dense", "sparse"}
+BBOX_LOCALIZATION_PROMPT_VERSION = "scaleedit_qwen_grounding_locator_current"
 
 
 def canonical_task(value: object) -> str:
@@ -81,7 +82,9 @@ def _task_guidance(task: str) -> str:
         ),
         "style_transfer": (
             "Do not assume style means full image. A wall, sign, facade, display, or phone-screen "
-            "style change is local; only an explicit whole-image transformation is full_image."
+            "style change is local; only an explicit whole-image transformation is full_image. "
+            "When many adjacent wall/pillar panels share one style edit, describe the complete "
+            "architectural surface as one dense aggregate per image side instead of enumerating panels."
         ),
         "tone_adjustment": (
             "A whole-image filter, grayscale conversion, or relighting of the entire visible scene "
@@ -96,10 +99,15 @@ def _task_guidance(task: str) -> str:
         ),
         "compositional_editing": (
             "Decompose every realized addition, removal, replacement, and recolor; do not merge "
-            "far-apart or semantically different regions."
+            "far-apart or semantically different regions. A shelf, stand, table, wall, or ground "
+            "does not become edited source content merely because an added object is placed on it; "
+            "a pure addition sub-edit must keep source_ref empty."
         ),
         "count_change": (
-            "Ground only instances that appear or disappear, not unchanged comparison instances."
+            "Ground only instances that appear or disappear, not unchanged comparison instances. "
+            "Return one object item per changed instance. For each bbox, verify the top, bottom, "
+            "left, and right visible contour; center the box on that instance and exclude the "
+            "table, shelf, ground, shadow, and unchanged neighboring instances."
         ),
         "symbolic_reasoning": (
             "Ground the edited cells, symbols, lines, or path. Use box masks for glyphs, thin "
@@ -118,7 +126,9 @@ def _task_guidance(task: str) -> str:
         ),
         "social_reasoning": (
             "The category does not determine geometry. Resolve the actual action into local, "
-            "background, or global changes using the image pair."
+            "background, or global changes using the image pair. When material is transferred "
+            "between two locations, list only the portion removed at the origin and the portion "
+            "added at the destination; do not mark retained material as newly added or removed."
         ),
         "visual_beautification": (
             "Face/skin restoration is local to the complete affected faces or people; object "
@@ -126,14 +136,17 @@ def _task_guidance(task: str) -> str:
         ),
         "action_editing": (
             "Use source+target regions for the moved/rotated object, body part, expression, drawer, "
-            "or interaction object. Avoid unrelated reconstruction drift."
+            "or interaction object. Avoid unrelated reconstruction drift. If the edited footprint "
+            "is an empty cutout used as the rotation cue (for example a cookie bite moving around "
+            "the cookie edge), label that cutout as negative_space and name its carrier object."
         ),
         "size_change": (
             "Use both the old and resized footprints of only the resized instance."
         ),
         "color_change": (
             "Use the complete recolored object or explicitly recolored sub-part on both sides, "
-            "including every clearly changed repeated instance."
+            "including every clearly changed repeated instance. Nearby repeated sub-parts with "
+            "the same edit, such as a stack of book spines, may be one complete aggregate cluster."
         ),
         "material_change": (
             "Use the complete surface/object whose material changes on both sides, including thin "
@@ -157,8 +170,9 @@ Final task: {task}
 Corrected edit instruction: {str(instruction or '').strip()}
 
 The images are the source of truth. Ignore resizing/JPEG noise and unrelated generative drift.
-Describe every intentional realized edit, not merely the nouns in the instruction. Decide the
-spatial mask route from actual geometry; ScaleEdit task names are not reliable route aliases.
+Describe every intentional realized edit, decide the spatial mask route, and produce the FINAL
+list of visible entities that a separate bbox-only pass must locate. That later pass will not
+reinterpret the edit, add entities, or repair this plan, so make the item list complete and exact.
 
 Task-specific guidance: {_task_guidance(task)}
 
@@ -175,54 +189,100 @@ Geometry choices:
 - dense_region: an irregular but spatially dense footprint.
 - sparse_marks: text, glyphs, dots, cracks, thin lines/paths, tiny repeated marks. These later use a
   conservative filled box so mask recall is not lost.
+- negative_space=true only when the intended pixels are an empty hole, gap, opening, cutout, or
+  missing bite defined by a foreground object's contour. Set carrier_ref to that concrete foreground
+  object. Dark marks, shadows, transparent material, and ordinary pale objects are not negative space.
 
-Return compact JSON only:
-{{"realized_edit":"one precise sentence","mask_mode":"regions|protect_foreground|full_image","changes":[{{"source_ref":"visible old/changed entity or empty","target_ref":"visible new/changed entity or empty","change":"before to after","geometry":"semantic_object|dense_region|sparse_marks","source_extent":"source location/extent or empty","target_extent":"target location/extent or empty"}}],"protected_foreground":[{{"ref":"retained concrete entity","extent":"complete source location/extent"}}],"confidence":"high|medium|low"}}
+Planning rules:
+- regions: emit one localization item for every source-side old/changed entity and every target-side
+  new/changed entity. Pure additions emit target items only; pure removals emit source items only.
+- A stand, shelf, table, wall, floor, ground, platform, shadow, or empty space is not a source edit
+  merely because an added object is placed there. Put that information only in spatial_hint.
+- A transfer or move from one location to another uses remove items for content disappearing at the
+  origin and add items for content appearing at the destination. Do not mechanically list the
+  unchanged/retained content at both locations as edited entities.
+- Keep localization_items concise, normally at most 8 items total. Repeated objects that must be
+  addressed independently (especially count changes or separated instances) must be separate items
+  with left/right/top/bottom discriminators. If many adjacent elements receive the same edit and form
+  one collective footprint, use one complete item per compact spatial cluster with
+  region_mode=aggregate_region; never omit pixels merely to shorten the list.
+- protect_foreground: emit only complete stable foreground entities, on image_side=source with
+  role=protected_foreground and edit_op=protect.
+- full_image: localization_items must be empty.
+- mask_method=box for exact text/glyph blocks, thin paths/lines/cracks, dots and sparse marks;
+  otherwise use sam. Use aggregate_region only for a nearby group that should share one box.
+- For negative space, ref names the empty region, carrier_ref names the foreground object whose
+  silhouette defines it, geometry=dense_region, mask_method=sam, region_mode=object, and
+  mask_density=dense. The bbox-only pass will locate the empty region rather than the whole carrier.
+
+Return compact JSON only. Do not output coordinates in this pass:
+{{"realized_edit":"one precise sentence","mask_mode":"regions|protect_foreground|full_image","localization_items":[{{"image_side":"source|target","role":"edit_region|protected_foreground","edit_op":"add|remove|change|protect","ref":"concrete visible entity, 2-10 words","spatial_hint":"concise instance-disambiguating location","geometry":"semantic_object|dense_region|sparse_marks","mask_method":"sam|box","region_mode":"object|aggregate_region","mask_density":"object|dense|sparse","negative_space":false,"carrier_ref":"empty unless negative_space is true"}}],"confidence":"high|medium|low"}}
 """
 
 
 def build_grounding_prompt(
     final_task: object, instruction: object, observation: Dict[str, Any] | str
 ) -> str:
-    task = canonical_task(final_task)
-    observation_text = (
-        json.dumps(observation, ensure_ascii=False, separators=(",", ":"))
-        if isinstance(observation, dict)
-        else str(observation)
-    )
-    return f"""Convert the paired-image audit below into the final ScaleEdit mask contract.
+    """Build a Qwen-style visual-grounding-only request from the semantic plan.
 
-Image 1 is the source. Image 2 is the edited result. All coordinates are [x1,y1,x2,y2] on a
-0..1000 scale in the NAMED full image. The two images can have different pixel dimensions.
-Final task: {task}
-Corrected instruction: {str(instruction or '').strip()}
-Prior audit: {observation_text}
+    Deliberately keep routing and mask metadata out of this pass.  Qwen only
+    needs a short referring expression, an image index, and a stable id to do
+    the coordinate prediction; the caller deterministically joins the boxes
+    back to the richer first-pass items.
+    """
 
-First verify the audit against both images. Then obey these rules:
-1. Preserve its mask_mode unless direct visual evidence proves it wrong.
-2. regions: source contains each visible old/changed footprint; target contains each visible
-   new/changed footprint. Recolor/material/size/pose/repair/text generally need both sides. Pure
-   addition needs target only; pure removal needs source only. Cover every realized sub-edit.
-3. protect_foreground: source and target must be empty. protected_foreground contains complete
-   SOURCE-image boxes for all stable foreground subjects, including thin limbs/edges. Do not protect
-   sky, water, terrain, road, generic vegetation, or environmental content being replaced.
-4. full_image: all three item lists must be empty.
-5. Each ref is a concrete 2-10 word visible noun phrase suitable for SAM, never an action or absence.
-6. Bboxes are conservative recall-first search regions with a small margin. Do not use a whole-image
-   box to hide uncertainty. Split distant or semantically different entities; combine a nearby group
-   of repeated tiny elements into one aggregate_region bbox.
-7. mask_method=box for exact text/glyph blocks, thin lines/paths/cracks, dots, tiny marks, and other
-   sparse content SAM could erase. The box must tightly cover the complete changed block, not its
-   carrier sign/screen/object. A path bbox must include the entire path from its start endpoint to
-   its destination endpoint, not merely its center. Use mask_method=sam for coherent objects and
-   surfaces.
-8. mask_density=sparse for separated marks; dense for a filled local area; object for normal objects.
-9. For text tasks ({', '.join(sorted(TEXT_TASKS))}), locate the changed old and new text itself and
-   use box. For a local style edit, box/segment only the styled surface, never default to full_image.
-10. Output JSON only. Do not include commentary or markdown.
+    del final_task, instruction
+    if not isinstance(observation, dict):
+        raise ValueError("bbox localization requires a parsed edit plan")
+    queries = []
+    for item in observation.get("localization_items", []):
+        candidate_id = int(item["candidate_id"])
+        image_side = str(item["image_side"])
+        image_number = 1 if image_side == "source" else 2
+        ref = " ".join(str(item["ref"]).split())
+        spatial_hint = " ".join(str(item.get("spatial_hint", "")).split())
+        geometry = str(item.get("geometry", "semantic_object"))
+        negative_space = bool(item.get("negative_space", False))
+        carrier_ref = " ".join(str(item.get("carrier_ref", "")).split())
+        location = "" if not spatial_hint else f"; location: {spatial_hint}"
+        if negative_space:
+            description = (
+                f'complete visible empty/white negative-space region of "{ref}"{location}; '
+                f'its boundary is defined by the foreground carrier "{carrier_ref}". '
+                "Box the full cutout or concavity from its deepest interior edge through its open "
+                "mouth at the carrier's expected outer contour, even when it blends into the "
+                "surrounding background; exclude carrier material"
+            )
+        elif geometry == "dense_region":
+            description = (
+                f'complete visible material/region pixels of "{ref}"{location}; '
+                "exclude its container, support, and surrounding background"
+            )
+        elif geometry == "sparse_marks":
+            description = (
+                f'complete visible marks of "{ref}"{location}; '
+                "exclude the carrier object or surface"
+            )
+        else:
+            description = f'complete visible object "{ref}"{location}'
+        queries.append(f"{candidate_id} | Image {image_number} | {description}")
+    if not queries:
+        raise ValueError("bbox localization requires at least one candidate")
+    query_text = "\n".join(queries)
+    return f"""Visual grounding only. The edit analysis is complete. Do not reinterpret the edit.
+Image 1 is the source. Image 2 is the edited result.
 
-Required schema:
-{{"prompt_version":"{PROMPT_VERSION}","mask_mode":"regions|protect_foreground|full_image","source":[{{"ref":"old or changed visible entity","bbox_2d":[x1,y1,x2,y2],"mask_method":"sam|box","region_mode":"object|aggregate_region","mask_density":"object|dense|sparse"}}],"target":[{{"ref":"new or changed visible entity","bbox_2d":[x1,y1,x2,y2],"mask_method":"sam|box","region_mode":"object|aggregate_region","mask_density":"object|dense|sparse"}}],"protected_foreground":[{{"ref":"stable foreground entity","bbox_2d":[x1,y1,x2,y2],"mask_method":"sam","region_mode":"object","mask_density":"object"}}]}}
+Detect and locate exactly these referred entities in their named full image:
+{query_text}
+
+For each line, output one tight bounding box around the complete visible entity. Include all visible
+parts (such as head, ears, limbs, handles, edges, and thin extensions) with a small margin. Exclude
+support surfaces, shadows, and neighboring objects.
+
+Return only a JSON array with exactly {len(queries)} objects in the same candidate order. Every
+object must retain the candidate_id at the start of its input line:
+[{{"candidate_id": 0, "bbox_2d": [x1, y1, x2, y2]}}]
+bbox_2d is the normalized 0-1000 top-left and bottom-right coordinates on the named full image.
 """
 
 
@@ -232,15 +292,21 @@ def build_object_viewpoint_retry_prompt(
     observation: Dict[str, Any] | str,
     object_ref: str,
 ) -> str:
-    """Request real object boxes after a false full-image viewpoint route."""
+    """Correct a false global route while preserving bbox-only pass separation."""
 
-    base = build_grounding_prompt(final_task, instruction, observation)
-    return f"""{base}
+    del final_task, observation
+    return f"""Correct the edit plan for this paired source/target image.
 
-MANDATORY ROUTE CORRECTION: `{object_ref}` is one isolated transformed object, not a camera or
-whole-scene transformation. mask_mode MUST be regions. Return a conservative source bbox around
-the complete old `{object_ref}` footprint and a target bbox around the complete new `{object_ref}`
-footprint. The boxes must be real object-localized coordinates; do not use [0,0,1000,1000].
+Instruction: {str(instruction or '').strip()}
+`{object_ref}` is one isolated transformed object, not a camera or whole-scene transformation.
+Return mask_mode=regions with exactly two localization_items: the complete old `{object_ref}` on
+image_side=source and the complete new `{object_ref}` on image_side=target. Use edit_op=change,
+role=edit_region, mask_method=sam, region_mode=object and mask_density=object. Include a concise
+spatial_hint that distinguishes the intended instance. Do not output coordinates; a separate
+bbox-only pass will localize the two items.
+
+Return compact JSON only:
+{{"realized_edit":"one precise sentence","mask_mode":"regions","localization_items":[{{"image_side":"source","role":"edit_region","edit_op":"change","ref":"{object_ref}","spatial_hint":"source location","geometry":"semantic_object","mask_method":"sam","region_mode":"object","mask_density":"object"}},{{"image_side":"target","role":"edit_region","edit_op":"change","ref":"{object_ref}","spatial_hint":"target location","geometry":"semantic_object","mask_method":"sam","region_mode":"object","mask_density":"object"}}],"confidence":"high|medium|low"}}
 """
 
 
@@ -266,25 +332,290 @@ def _first_json_object(text: str) -> Dict[str, Any]:
     raise ValueError("no JSON object found")
 
 
+def _plan_defaults(geometry: object) -> tuple[str, str, str]:
+    geometry_value = str(geometry or "semantic_object").strip().lower()
+    if geometry_value == "sparse_marks":
+        return "box", "aggregate_region", "sparse"
+    if geometry_value == "dense_region":
+        return "sam", "object", "dense"
+    return "sam", "object", "object"
+
+
+def _boolean_field(value: object, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return False
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    raise ValueError(f"{field} must be a boolean")
+
+
+def _normalize_localization_items(
+    raw_items: object, mode: str
+) -> List[Dict[str, Any]]:
+    if not isinstance(raw_items, list):
+        raise ValueError("localization_items must be a list")
+    result: List[Dict[str, Any]] = []
+    seen = set()
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ValueError(f"localization item must be an object: {raw!r}")
+        side = str(raw.get("image_side", "")).strip().lower()
+        role = str(raw.get("role", "edit_region")).strip().lower()
+        edit_op = str(raw.get("edit_op", "change")).strip().lower()
+        ref = str(raw.get("ref", "")).strip()
+        spatial_hint = str(raw.get("spatial_hint", raw.get("extent", ""))).strip()
+        geometry = str(raw.get("geometry", "semantic_object")).strip().lower()
+        default_method, default_region_mode, default_density = _plan_defaults(geometry)
+        method = str(raw.get("mask_method", default_method)).strip().lower()
+        region_mode = str(raw.get("region_mode", default_region_mode)).strip().lower()
+        density = str(raw.get("mask_density", default_density)).strip().lower()
+        negative_space = _boolean_field(
+            raw.get("negative_space", False), "negative_space"
+        )
+        carrier_ref = str(raw.get("carrier_ref", "")).strip()
+        if side not in {"source", "target"}:
+            raise ValueError(f"invalid localization image_side: {side!r}")
+        if role not in {"edit_region", "protected_foreground"}:
+            raise ValueError(f"invalid localization role: {role!r}")
+        if edit_op not in {"add", "remove", "change", "protect"}:
+            raise ValueError(f"invalid localization edit_op: {edit_op!r}")
+        if not ref:
+            raise ValueError("localization ref must be non-empty")
+        if method not in MASK_METHODS:
+            raise ValueError(f"invalid localization mask_method: {method!r}")
+        if region_mode not in REGION_MODES:
+            raise ValueError(f"invalid localization region_mode: {region_mode!r}")
+        if density not in MASK_DENSITIES:
+            raise ValueError(f"invalid localization mask_density: {density!r}")
+        if negative_space and not carrier_ref:
+            raise ValueError("negative-space localization item requires carrier_ref")
+
+        if mode == "full_image":
+            continue
+        if mode == "protect_foreground":
+            if role != "protected_foreground" or side != "source":
+                continue
+            edit_op, method, region_mode, density = "protect", "sam", "object", "object"
+            negative_space, carrier_ref = False, ""
+        else:
+            if role != "edit_region":
+                continue
+            # Item-level edit semantics prevent an unchanged support/revealed
+            # background from reaching the locator in mixed compositional edits.
+            if (edit_op == "add" and side == "source") or (
+                edit_op == "remove" and side == "target"
+            ):
+                continue
+        if negative_space:
+            geometry, method, region_mode, density = (
+                "dense_region",
+                "sam",
+                "object",
+                "dense",
+            )
+        else:
+            carrier_ref = ""
+        identity = (
+            side,
+            role,
+            edit_op,
+            ref.lower(),
+            spatial_hint.lower(),
+            negative_space,
+            carrier_ref.lower(),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(
+            {
+                "candidate_id": len(result),
+                "image_side": side,
+                "role": role,
+                "edit_op": edit_op,
+                "ref": ref,
+                "spatial_hint": spatial_hint,
+                "geometry": geometry,
+                "mask_method": method,
+                "region_mode": region_mode,
+                "mask_density": density,
+                "negative_space": negative_space,
+                "carrier_ref": carrier_ref,
+            }
+        )
+    return result
+
+
 def parse_observation(text: str) -> Dict[str, Any]:
     value = _first_json_object(text)
     mode = str(value.get("mask_mode", "")).strip().lower()
     if mode not in MASK_MODES:
         raise ValueError(f"invalid mask_mode: {mode!r}")
-    changes = value.get("changes", [])
-    protected = value.get("protected_foreground", [])
-    if not isinstance(changes, list) or not isinstance(protected, list):
-        raise ValueError("changes and protected_foreground must be lists")
+    localization_items = _normalize_localization_items(
+        value.get("localization_items"), mode
+    )
+    if mode != "full_image" and not localization_items:
+        raise ValueError(f"{mode} observation requires localization_items")
     return {
         "realized_edit": str(value.get("realized_edit", "")).strip(),
         "mask_mode": mode,
-        "changes": [item for item in changes if isinstance(item, dict)],
-        "protected_foreground": [item for item in protected if isinstance(item, dict)],
+        "localization_items": localization_items,
         "confidence": str(value.get("confidence", "")).strip().lower(),
     }
 
 
+def parse_bbox_localization(
+    text: str, expected_candidate_ids: Sequence[int] | None = None
+) -> List[Dict[str, Any]]:
+    """Parse the compact full-image candidate_id-to-bbox response."""
+
+    parse_error: ValueError | None = None
+    try:
+        for value in _json_candidates(text):
+            if not isinstance(value, list):
+                continue
+            result = []
+            seen = set()
+            for raw in value:
+                if not isinstance(raw, dict):
+                    raise ValueError(f"bbox localization item must be an object: {raw!r}")
+                candidate_value = raw.get("candidate_id")
+                if candidate_value is None:
+                    label_match = re.match(
+                        r"\s*(\d+)\s*\|", str(raw.get("label", ""))
+                    )
+                    if label_match:
+                        candidate_value = label_match.group(1)
+                candidate_id = int(candidate_value)
+                if candidate_id in seen:
+                    raise ValueError(f"duplicate bbox candidate_id: {candidate_id}")
+                seen.add(candidate_id)
+                result.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "ref": str(raw.get("ref", "")).strip(),
+                        "bbox_2d": _normalize_box(raw.get("bbox_2d")),
+                    }
+                )
+            if expected_candidate_ids is not None:
+                expected = [int(item) for item in expected_candidate_ids]
+                actual = [item["candidate_id"] for item in result]
+                if actual != expected:
+                    raise ValueError(
+                        f"bbox candidate mismatch: expected={expected} actual={actual}"
+                    )
+            return result
+        raise ValueError("no JSON bbox array found")
+    except (TypeError, ValueError) as exc:
+        parse_error = ValueError(str(exc))
+
+    try:
+        # Qwen occasionally emits the requested boxes in order but collapses
+        # them into one JSON object with repeated ``bbox_2d`` keys.  A normal
+        # JSON decoder keeps only the last key.  Since the locator contract is
+        # explicitly positional, recover only when the raw box count matches
+        # the full expected checklist exactly; otherwise preserve the failure.
+        if expected_candidate_ids is None:
+            raise parse_error
+        raw_boxes = []
+        for match in re.finditer(r'"bbox_2d"\s*:\s*(\[[^\]]+\])', str(text or "")):
+            try:
+                raw_boxes.append(_normalize_box(json.loads(match.group(1))))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+        # Some malformed answers repeat one of the same boxes under another
+        # duplicate key. Collapse only exact repeats; recovery is still
+        # accepted only when the remaining count exactly matches the complete
+        # positional checklist.
+        unique_boxes = []
+        for bbox in raw_boxes:
+            if bbox not in unique_boxes:
+                unique_boxes.append(bbox)
+        expected = [int(value) for value in expected_candidate_ids]
+        if len(unique_boxes) != len(expected):
+            raise parse_error
+        return [
+            {"candidate_id": candidate_id, "ref": "", "bbox_2d": bbox}
+            for candidate_id, bbox in zip(expected, unique_boxes)
+        ]
+    except ValueError:
+        raise parse_error
+
+
+def grounding_from_localization(
+    observation: Dict[str, Any], localized_boxes: Sequence[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Join first-pass semantics with second-pass boxes deterministically."""
+
+    mode = str(observation.get("mask_mode", "")).strip().lower()
+    if mode not in MASK_MODES:
+        raise ValueError(f"invalid planned mask_mode: {mode!r}")
+    items = list(observation.get("localization_items", []))
+    if mode == "full_image":
+        if localized_boxes:
+            raise ValueError("full_image plan cannot have localized boxes")
+        return {
+            "prompt_version": PROMPT_VERSION,
+            "mask_mode": mode,
+            "source": [],
+            "target": [],
+            "protected_foreground": [],
+        }
+    box_by_id = {int(item["candidate_id"]): item["bbox_2d"] for item in localized_boxes}
+    expected = {int(item["candidate_id"]) for item in items}
+    if set(box_by_id) != expected:
+        raise ValueError(
+            f"bbox localization candidate mismatch: expected={sorted(expected)} "
+            f"actual={sorted(box_by_id)}"
+        )
+    source: List[Dict[str, Any]] = []
+    target: List[Dict[str, Any]] = []
+    protected: List[Dict[str, Any]] = []
+    for plan in items:
+        output = {
+            "ref": str(plan["ref"]),
+            "bbox_2d": _normalize_box(box_by_id[int(plan["candidate_id"])]),
+            "mask_method": str(plan.get("mask_method", "sam")),
+            "region_mode": str(plan.get("region_mode", "object")),
+            "mask_density": str(plan.get("mask_density", "object")),
+            "negative_space": bool(plan.get("negative_space", False)),
+            "carrier_ref": str(plan.get("carrier_ref", "")),
+        }
+        if mode == "protect_foreground":
+            protected.append({**output, "mask_method": "sam", "region_mode": "object", "mask_density": "object"})
+        elif plan.get("image_side") == "source":
+            source.append(output)
+        else:
+            target.append(output)
+    payload = {
+        "prompt_version": PROMPT_VERSION,
+        "mask_mode": mode,
+        "source": source,
+        "target": target,
+        "protected_foreground": protected,
+    }
+    if mode == "regions" and not (source or target):
+        raise ValueError("regions plan produced no grounded items")
+    if mode == "protect_foreground" and not protected:
+        raise ValueError("protect_foreground plan produced no protected items")
+    return payload
+
+
 def _normalize_box(value: Any) -> List[float]:
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(part, str) for part in value)
+    ):
+        coordinate_pairs = [part.split(",") for part in value]
+        if all(len(pair) == 2 for pair in coordinate_pairs):
+            value = [
+                coordinate.strip()
+                for pair in coordinate_pairs
+                for coordinate in pair
+            ]
     if not isinstance(value, (list, tuple)) or len(value) != 4:
         raise ValueError(f"invalid bbox_2d: {value!r}")
     box = [float(number) for number in value]
@@ -295,66 +626,6 @@ def _normalize_box(value: Any) -> List[float]:
     if x2 <= x1 or y2 <= y1:
         raise ValueError(f"degenerate bbox_2d: {box!r}")
     return [round(number, 3) for number in box]
-
-
-def _normalize_items(value: Any, *, protected: bool = False) -> List[Dict[str, Any]]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("grounding item collection must be a list")
-    result = []
-    for raw in value:
-        if not isinstance(raw, dict):
-            raise ValueError(f"grounding item must be an object: {raw!r}")
-        ref = str(raw.get("ref", "")).strip()
-        if not ref:
-            raise ValueError("grounding ref must be non-empty")
-        method = "sam" if protected else str(raw.get("mask_method", "sam")).strip().lower()
-        if method not in MASK_METHODS:
-            raise ValueError(f"invalid mask_method: {method!r}")
-        region_mode = str(raw.get("region_mode", "object")).strip().lower()
-        if region_mode not in REGION_MODES:
-            raise ValueError(f"invalid region_mode: {region_mode!r}")
-        density = str(raw.get("mask_density", "object")).strip().lower()
-        if density not in MASK_DENSITIES:
-            raise ValueError(f"invalid mask_density: {density!r}")
-        result.append(
-            {
-                "ref": ref,
-                "bbox_2d": _normalize_box(raw.get("bbox_2d")),
-                "mask_method": method,
-                "region_mode": region_mode,
-                "mask_density": density,
-            }
-        )
-    return result
-
-
-def parse_grounding(text: str) -> Dict[str, Any]:
-    value = _first_json_object(text)
-    mode = str(value.get("mask_mode", "")).strip().lower()
-    if mode not in MASK_MODES:
-        raise ValueError(f"invalid mask_mode: {mode!r}")
-    source = _normalize_items(value.get("source", []))
-    target = _normalize_items(value.get("target", []))
-    protected = _normalize_items(value.get("protected_foreground", []), protected=True)
-    if mode == "regions" and not (source or target):
-        raise ValueError("regions mode requires at least one source or target box")
-    if mode == "protect_foreground" and not protected:
-        raise ValueError("protect_foreground mode requires a protected foreground box")
-    if mode == "full_image":
-        source, target, protected = [], [], []
-    elif mode == "regions":
-        protected = []
-    else:
-        source, target = [], []
-    return {
-        "prompt_version": PROMPT_VERSION,
-        "mask_mode": mode,
-        "source": source,
-        "target": target,
-        "protected_foreground": protected,
-    }
 
 
 def grounding_status(payload: Dict[str, Any]) -> str:
@@ -405,6 +676,28 @@ def apply_task_post_policy(
         result["target"] = []
         result["protected_foreground"] = []
         return result
+
+    # Do not let an MLLM reinterpret a pure add/remove task as a replacement by
+    # labeling the unchanged support or the revealed background on the opposite
+    # image side.  Keep a non-empty fallback side when the expected side is
+    # missing so a model error cannot turn the contract into an empty mask.
+    pure_side = {
+        "object_addition": ("target", "source"),
+        "object_removal": ("source", "target"),
+    }.get(task)
+    if payload.get("mask_mode") == "regions" and pure_side is not None:
+        keep_side, drop_side = pure_side
+        kept_items = payload.get(keep_side, [])
+        dropped_items = payload.get(drop_side, [])
+        if kept_items and dropped_items:
+            result = dict(payload)
+            result[drop_side] = []
+            result["side_override"] = {
+                "rule": f"pure_{task}_uses_{keep_side}_only_v1",
+                "dropped_side": drop_side,
+                "dropped_items": dropped_items,
+            }
+            return result
 
     if task == "symbolic_reasoning" and "maze" in instruction_text and "path" in instruction_text:
         # A recurrent ScaleEdit failure mode is a bbox around only the central
