@@ -40,29 +40,38 @@ def main() -> None:
     areas = []
     instances = 0
     flags, sources, modes, tasks = Counter(), Counter(), Counter(), Counter()
-    for raw_path in discover_shards(args.input_dir):
-        ground_path = args.grounding_dir / raw_path.name
-        mask_path = args.mask_dir / raw_path.name
-        if not ground_path.is_file() or not mask_path.is_file():
-            errors.append(f"missing aligned output for {raw_path.name}")
+    raw_by_name = {path.name: path for path in discover_shards(args.input_dir)}
+    for ground_path in sorted(args.grounding_dir.glob("part-*.parquet")):
+        raw_path = raw_by_name.get(ground_path.name)
+        if raw_path is None:
+            errors.append(f"missing source shard for {ground_path.name}")
             continue
-        raw_rows = pq.read_table(raw_path).to_pylist()
+        mask_path = args.mask_dir / ground_path.name
+        if not mask_path.is_file():
+            errors.append(f"missing mask output for {ground_path.name}")
+            continue
+        all_raw_rows = pq.read_table(raw_path).to_pylist()
         ground_rows = pq.read_table(ground_path).to_pylist()
         mask_rows = pq.read_table(mask_path).to_pylist()
-        if not (len(raw_rows) == len(ground_rows) == len(mask_rows)):
+        if len(ground_rows) != len(mask_rows):
             errors.append(
                 f"row count mismatch {raw_path.name}: "
-                f"{len(raw_rows)}/{len(ground_rows)}/{len(mask_rows)}"
+                f"{len(ground_rows)}/{len(mask_rows)}"
             )
             continue
-        for position, (raw, ground, row) in enumerate(zip(raw_rows, ground_rows, mask_rows)):
+        for position, (ground, row) in enumerate(zip(ground_rows, mask_rows)):
+            row_idx = int(ground["row_idx"])
+            if row_idx < 0 or row_idx >= len(all_raw_rows):
+                errors.append(f"grounding row_idx out of range {raw_path.name}:{row_idx}")
+                continue
+            raw = all_raw_rows[row_idx]
             identity = str(raw.get("sample_id", ""))
             if {identity, str(ground.get("sample_id", "")), str(row.get("sample_id", ""))} != {
                 identity
             }:
                 errors.append(f"sample_id mismatch {raw_path.name}:{position}")
-            if int(ground["row_idx"]) != position or int(row["row_idx"]) != position:
-                errors.append(f"row_idx mismatch {raw_path.name}:{position}")
+            if int(row["row_idx"]) != row_idx:
+                errors.append(f"row_idx mismatch {raw_path.name}:{row_idx}")
             sample_ids.append(identity)
             source = decode_image(raw["source_image"])
             mask = Image.open(io.BytesIO(row["mask_png"])).convert("L")

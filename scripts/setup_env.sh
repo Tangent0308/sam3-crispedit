@@ -176,6 +176,8 @@ mods = [
     'crispedit.mask.grounding_runner',
     'crispedit.mask.runner',
     'crispedit.legacy.pipeline',
+    'scaleedit.grounding_runner',
+    'scaleedit.mask_runner',
     'sam3',
 ]
 for name in mods:
@@ -241,15 +243,18 @@ Direct interpreter:
 
 Recommended environment variables:
   export CRISPEDIT_QWEN_MODEL_PATH="$QWEN_MODEL_PATH"
+  export SCALEEDIT_QWEN_MODEL_PATH="$QWEN_MODEL_PATH"
 EOF
 
 if [[ -n "$SAM3_CHECKPOINT_PATH" ]]; then
   cat <<EOF
   export CRISPEDIT_SAM3_CHECKPOINT_PATH="$SAM3_CHECKPOINT_PATH"
+  export SCALEEDIT_SAM3_CHECKPOINT_PATH="$SAM3_CHECKPOINT_PATH"
 EOF
 else
   cat <<'EOF'
   # Optional: export CRISPEDIT_SAM3_CHECKPOINT_PATH=/path/to/sam3_checkpoint.pt
+  # Optional: export SCALEEDIT_SAM3_CHECKPOINT_PATH=/path/to/sam3_checkpoint.pt
 EOF
 fi
 
@@ -258,14 +263,13 @@ cat <<'EOF'
 Next steps:
   1) Verify HF auth if needed:
        huggingface-cli whoami
-  2) Run the smoke prefilter:
-       python crispedit_mllm_prefilter.py --help
-  3) Inspect the grounding and mask stages:
-       python crispedit_mllm_grounding.py --help
-       python crispedit_grounded_mask_runner.py --help
+  2) Inspect the ScaleEdit stages:
+       python scaleedit_mllm_grounding.py --help
+       python scaleedit_grounded_mask_runner.py --help
+  3) Run the regression tests:
+       python -m pytest -q
 
 Production docs:
   - README.md
-  - docs/CRISPEDIT_PREFILTER.md
-  - docs/CRISPEDIT_MASK.md
+  - docs/SCALEEDIT_MASK.md
 EOF
