@@ -67,6 +67,7 @@ Step 5 仅用于预算选中的边界样本。source/target 仍是独立对话�
 - 重复 instruction 复用 slot cache，不复用图像证据；
 - source 与不需要引导 crop 的 target 合并 generation；
 - 只对 remove/color/motion 串行生成 source-guided target crop；
+- 格式不合法的 JSON 单独追加纠错回合重试一次，不重复正常样本；
 - 高置信 add/replace no-op 在 Step 2 后提前结束；
 - 明确的离散物体状态由代码生成 text match；
 - Step 5 的 source/target 对话合并成一个 generation；
@@ -116,6 +117,7 @@ tmux new-session -d -s crispedit_fact_prefilter \
      --devices 0,1,2,3,4,5,6,7 \
      --batch-size 16 \
      --max-new-tokens 512 \
+     --parse-retries 1 \
      --slot-cache-size 20000 \
      --confidence-threshold 0.6 \
      --boundary-review-fraction 0.05 \
@@ -247,11 +249,11 @@ verdict 为 PASS 42,639、FAIL 75,937、UNSURE 31,259、ERROR 586。共执行 60
 
 ## 6. 已知边界
 
-1. 全量有 586 行（0.39%）在图像预处理或 JSON 解析阶段 fail-closed：step1/source 130、step2/target 282、step3/pair 172、step4/text match 2。建议隔离 batch、增加极端长宽比保护和 JSON retry 后定向重跑。
+1. 2026-08-28 的历史全量运行有 586 行（0.39%）在图像预处理或 JSON 解析阶段 fail-closed：step1/source 130、step2/target 282、step3/pair 172、step4/text match 2。当前实现会对格式不合法的 JSON 逐条追加纠错回合重试一次；重试仍失败或图像无法解码时继续 fail-closed。生产全量运行不应启用 `--fail-fast`。
 2. add/replace no-op fast path 只比较存在性和数量。`add_00046.parquet:84` 中 source 的小花束与 target 新增的中央大花瓶被视为同一类对象且数量相同，导致 false drop；位置敏感或多实例 add 应补充 bbox/位置对应后再提前结束。
 3. background/style 对全局重生成采用严格策略：即使文字目标实现，主体构图或无关内容明显改变仍会 drop。
 4. batch size 会影响边界样本生成；目前人工 anchors 数量有限，旧高置信标签只能用于漂移诊断，不能当作 ground truth。
-5. 586 条 error 和人工发现的 add false drop 说明“产物完整”不等同于“决策完全无误”；开始 mask 前应优先定向修复并重跑这些行。
+5. 历史 error 和人工发现的 add false drop 说明“产物完整”不等同于“决策完全无误”；开始 mask 前仍应检查 error 计数和定向回归样本。
 
 ## 7. 验证
 
