@@ -155,11 +155,58 @@ def extract_json(text: str) -> Dict:
     text = (text or "").strip()
     try:
         return json.loads(text)
-    except Exception:
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        if not match:
-            raise ValueError(f"No JSON found in model output: {text[:200]!r}")
-        return json.loads(match.group(0))
+    except Exception as direct_error:
+        # Models occasionally wrap an otherwise valid object in a code fence or
+        # add a short explanation after it. raw_decode accepts the first complete
+        # object without greedily consuming later prose/braces.
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", text):
+            try:
+                parsed, _ = decoder.raw_decode(text[match.start() :])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        if not text:
+            raise ValueError("No JSON found in empty model output") from direct_error
+        raise direct_error
+
+
+JSON_CORRECTION_PROMPT = """Your previous response was not valid, complete JSON.
+Return a corrected response that preserves the requested schema and observed facts.
+Output exactly one JSON object and nothing else. Use double-quoted keys and strings,
+include every required key, and do not use comments or trailing commas. Keep free-text
+descriptions concise so the complete object fits within the response limit."""
+
+
+def build_json_retry_conversation(
+    conversation: Sequence[Dict], raw_text: str, error: str
+) -> List[Dict]:
+    """Add a focused correction turn while retaining the original image context."""
+
+    messages = list(conversation)
+    if raw_text.strip():
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": raw_text}],
+            }
+        )
+        correction = JSON_CORRECTION_PROMPT
+    else:
+        correction = (
+            "The previous generation failed before returning an answer. "
+            + JSON_CORRECTION_PROMPT
+        )
+    if error:
+        correction += f"\nParser error: {error[:300]}"
+    messages.append(
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": correction}],
+        }
+    )
+    return messages
 
 
 SLOT_PROMPT = """You extract factual slots from one image-editing instruction.
@@ -333,6 +380,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compression", type=str, default="zstd")
     parser.add_argument("--progress-mininterval", type=float, default=2.0)
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument(
+        "--parse-retries",
+        type=int,
+        default=1,
+        help="Retry malformed MLLM JSON responses individually before failing closed",
+    )
     parser.add_argument(
         "--slot-cache-size",
         type=int,
@@ -752,6 +805,7 @@ class QwenFactPrefilterRunner:
         confidence_threshold: float,
         boundary_review_fraction: float,
         slot_cache_size: int,
+        parse_retries: int,
     ):
         import torch
         from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
@@ -762,6 +816,7 @@ class QwenFactPrefilterRunner:
         self.confidence_threshold = max(0.0, min(1.0, confidence_threshold))
         self.boundary_review_fraction = max(0.0, min(1.0, boundary_review_fraction))
         self.slot_cache_size = max(0, int(slot_cache_size))
+        self.parse_retries = max(0, int(parse_retries))
         self.slot_cache: OrderedDict[Tuple[str, str], Dict] = OrderedDict()
         self.generation_calls = 0
         self.mllm_conversations = 0
@@ -861,7 +916,11 @@ class QwenFactPrefilterRunner:
             )
         return conversations
 
-    def _generate_json(self, conversations: Sequence[List[Dict]]) -> List[Dict]:
+    def _generate_json_once(
+        self,
+        conversations: Sequence[List[Dict]],
+        max_new_tokens: Optional[int] = None,
+    ) -> List[Dict]:
         if not conversations:
             return []
         self.generation_calls += 1
@@ -880,7 +939,7 @@ class QwenFactPrefilterRunner:
             with self._torch.inference_mode():
                 generated_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=self.max_new_tokens,
+                    max_new_tokens=max_new_tokens or self.max_new_tokens,
                     do_sample=False,
                 )
             trimmed = generated_ids[:, prompt_length:]
@@ -914,6 +973,37 @@ class QwenFactPrefilterRunner:
                 }
                 for _ in conversations
             ]
+        return results
+
+    def _generate_json(self, conversations: Sequence[List[Dict]]) -> List[Dict]:
+        if not conversations:
+            return []
+        results = self._generate_json_once(conversations)
+        for attempt in range(1, self.parse_retries + 1):
+            failed_indices = [
+                index for index, result in enumerate(results) if not result.get("parse_ok")
+            ]
+            if not failed_indices:
+                break
+            print(
+                f"JSON parse retry {attempt}/{self.parse_retries}: "
+                f"{len(failed_indices)} response(s)",
+                flush=True,
+            )
+            retry_conversations = [
+                build_json_retry_conversation(
+                    conversations[index],
+                    str(results[index].get("raw_text", "")),
+                    str(results[index].get("error", "")),
+                )
+                for index in failed_indices
+            ]
+            retry_results = self._generate_json_once(
+                retry_conversations,
+                max_new_tokens=max(self.max_new_tokens, 768),
+            )
+            for index, retry_result in zip(failed_indices, retry_results):
+                results[index] = retry_result
         return results
 
     @staticmethod
@@ -1660,6 +1750,7 @@ def worker_main(
             args.confidence_threshold,
             args.boundary_review_fraction,
             args.slot_cache_size,
+            args.parse_retries,
         )
         for job in jobs:
             audit_path, manifest_path = Path(job.audit_path), Path(job.manifest_path)

@@ -1,9 +1,12 @@
 from crispedit.prefilter.runner import (
+    QwenFactPrefilterRunner,
     _make_audit_and_manifest_rows,
+    build_json_retry_conversation,
     build_questionnaire,
     build_review_state_prompt,
     build_single_image_prompt,
     crop_normalized_bbox,
+    extract_json,
     needs_source_guided_target_crop,
     parse_simple_instruction_slots,
     select_focus_bbox,
@@ -19,6 +22,69 @@ from crispedit.prefilter.policy import (
     normalize_text_match,
 )
 from PIL import Image
+
+
+def test_extract_json_accepts_fenced_object_with_trailing_text():
+    assert extract_json('```json\n{"answer": true}\n```\nDone {not json}') == {
+        "answer": True
+    }
+
+
+def test_generate_json_retries_only_failed_responses_with_correction_turn():
+    runner = object.__new__(QwenFactPrefilterRunner)
+    runner.parse_retries = 1
+    runner.max_new_tokens = 512
+    calls = []
+
+    def fake_generate(conversations, max_new_tokens=None):
+        calls.append((conversations, max_new_tokens))
+        if len(calls) == 1:
+            return [
+                {
+                    "parse_ok": True,
+                    "parsed": {"id": 0},
+                    "raw_text": '{"id": 0}',
+                    "error": "",
+                },
+                {
+                    "parse_ok": False,
+                    "parsed": {},
+                    "raw_text": '{"id": 1',
+                    "error": "missing delimiter",
+                },
+            ]
+        return [
+            {
+                "parse_ok": True,
+                "parsed": {"id": 1},
+                "raw_text": '{"id": 1}',
+                "error": "",
+            }
+        ]
+
+    runner._generate_json_once = fake_generate
+    conversations = [
+        [{"role": "user", "content": [{"type": "text", "text": "first"}]}],
+        [{"role": "user", "content": [{"type": "text", "text": "second"}]}],
+    ]
+    results = runner._generate_json(conversations)
+
+    assert [result["parsed"]["id"] for result in results] == [0, 1]
+    assert len(calls) == 2
+    assert len(calls[1][0]) == 1
+    assert calls[1][1] == 768
+    retry = calls[1][0][0]
+    assert retry[0] == conversations[1][0]
+    assert retry[1]["role"] == "assistant"
+    assert retry[2]["role"] == "user"
+    assert "valid, complete JSON" in retry[2]["content"][0]["text"]
+
+
+def test_json_retry_without_raw_output_reissues_original_context():
+    original = [{"role": "user", "content": [{"type": "text", "text": "prompt"}]}]
+    retry = build_json_retry_conversation(original, "", "generation error")
+    assert retry[0] == original[0]
+    assert [message["role"] for message in retry] == ["user", "user"]
 
 
 def _slots(subgoals):
