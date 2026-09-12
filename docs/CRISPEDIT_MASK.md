@@ -132,23 +132,28 @@ grounding 和最终 mask parquet 都与原始 shard 的 `row_idx` 对齐。最�
 
 ### 2. 8 卡生成 realized edit 与 region bbox
 
-Qwen3.5-35B-A3B 使用四个 TP=2 replica：
+Qwen3.5-35B-A3B 使用 vLLM 启动四个 TP=2 replica：
 
 ```bash
-python -u crispedit_mllm_grounding.py \
+.venv-vllm/bin/python -u crispedit_mllm_grounding.py \
   --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
   --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest \
   --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding \
   --model-path /mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B \
   --devices 0,1,2,3,4,5,6,7 \
   --tensor-parallel-size 2 \
+  --inference-backend vllm \
   --grounding-mode two-pass \
   --background-observation-mode foreground-audit \
   --bbox-refinement small \
-  --batch-size 16 \
-  --request-batch-size 8 \
-  --max-images-per-generate 20 \
+  --batch-size 32 \
+  --request-batch-size 32 \
+  --max-images-per-generate 0 \
   --max-new-tokens 512 \
+  --vllm-gpu-memory-utilization 0.90 \
+  --vllm-max-model-len 32768 \
+  --vllm-max-images-per-prompt 16 \
+  --vllm-mm-encoder-tp-mode data \
   --fail-fast
 ```
 
@@ -159,9 +164,9 @@ bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine
 `--background-observation-mode foreground-audit` 是默认背景策略。仅在复现旧输出时使用
 `legacy`；两种模式不应写入同一个新实验目录。
 
-生产配置在 shard 内积累多条 keep 样本，并把同一轮请求批量送入模型。runner 同时按照
-`--max-images-per-generate` 限制每次 generate 的总视觉负载：普通双图请求可以充分合批，
-color/material 的四组局部 crop 会自动拆成较小 batch；若仍触发 CUDA OOM，则自动二分
+生产配置在 shard 内积累多条 keep 样本，并把同一轮请求批量送入模型。当前 vLLM 路径由
+`request-batch-size` 控制提交批次，服务端继续动态调度；transformers 后端仍可用
+`--max-images-per-generate` 限制每次 generate 的总视觉负载，并在 CUDA OOM 时自动二分
 重试。style 的最终策略本来就是 full-image mask，因此 grounding 阶段直接写入
 `STYLE_FULL_IMAGE` 契约，不再执行不会影响 mask 的 MLLM observation。
 
@@ -204,7 +209,9 @@ python scripts/build_category_previews.py \
 
 ## 全量运行结果
 
-2026-09-01 完成了 prefilter keep 数据的全量 grounding 与 SAM3 mask 生成。路径如下：
+### 首批 150,421 行
+
+2026-09-01 完成了首批 prefilter keep 数据的全量 grounding 与 SAM3 mask 生成。路径如下：
 
 ```text
 原始数据       /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
@@ -240,7 +247,109 @@ SAM3 阶段约 2 小时 39 分。
 策略改为本文前述的 `foreground-audit`，但尚未回灌到以上全量路径；正式发布数据前应只对
 background 类使用新目录定向重跑并重新做完整性检查。
 
-### 全量结果代表性可视化
+### 新增 100,000 行
+
+2026-09-08 至 2026-09-10 对不与首批重复的 100,000 行完成了 prefilter、Qwen3.5
+grounding 和 SAM3 mask。新增数据只包含 `add/remove/replace/motion change`；grounding
+使用 vLLM，SAM3 使用 8 个单卡 worker。输入和最终产物路径为：
+
+```text
+新增输入视图    /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-additional-100k-input
+prefilter audit /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit
+keep manifest   /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest
+grounding       /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding
+mask            /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask
+run directory   /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-run-additional-100k-20260908
+```
+
+394/394 个新增 input、audit、manifest、grounding 和 mask shard 均存在且逐行对齐，共
+100,000 行，没有 `.tmp` 残留。以下数字由这 394 个 shard 的最终 parquet 逐行重算，避免
+断点续跑时 summary 只累计本轮新处理状态的问题：
+
+| 类型 | 原始行 | prefilter keep | 非空 mask | OK | GROUND_FAIL | BOX_FALLBACK | AR_MISMATCH |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| add | 29,763 | 14,244 | 14,242 | 14,229 | 2 | 13 | 0 |
+| motion change | 10,755 | 1,264 | 1,232 | 1,229 | 32 | 3 | 0 |
+| remove | 29,786 | 8,269 | 8,269 | 8,265 | 0 | 4 | 0 |
+| replace | 29,696 | 2,363 | 2,363 | 2,359 | 0 | 3 | 1 |
+| **总计** | **100,000** | **26,140** | **26,106** | **26,082** | **34** | **23** | **1** |
+
+保留行的非空 mask 率为 99.870%。26,106 个非空结果中，mask source 为 PCS 14,494、
+PVS 11,492、connected group 97、box fallback 23。面积占比统计如下；面积是在 source
+坐标系中计算，仅用于分布审计，不代表像素级准确率：
+
+| 类型 | 非空 mask | min | median | mean | max |
+|---|---:|---:|---:|---:|---:|
+| add | 14,242 | 0.000730 | 0.086893 | 0.131046 | 1.000000 |
+| motion change | 1,232 | 0.003090 | 0.066429 | 0.084846 | 0.486873 |
+| remove | 8,269 | 0.000013 | 0.048720 | 0.085013 | 0.997082 |
+| replace | 2,363 | 0.005134 | 0.085660 | 0.120780 | 0.998969 |
+| **总计** | **26,106** | **0.000013** | **0.073021** | **0.113355** | **1.000000** |
+
+grounding 与 SAM3 均为 0 runtime error、0 worker error。34 个 `GROUND_FAIL` 会输出空 mask：
+其中 32 个原始类型为 motion，但图片中的实际变化是单侧可见的新增/移入（22 个仅 target
+box）或移除/移出（10 个仅 source box）；现有完整性规则要求 motion 同时具有 source 和
+target box，因此将它们判为失败。另一个 add 的补充 grounding 请求在重试后仍为非法
+JSON；最后一个 add 的 instruction 声称加回蛋糕切片，但图片对实际呈现移除，类别与
+realized edit 冲突后没有得到可用框。23 个 `BOX_FALLBACK` 均为非空矩形兜底，不计为硬
+失败但应优先抽检。
+
+prefilter 另有 617 个 fail-closed ERROR，因此没有进入 grounding；其数量和已定位的 batch
+级局部 crop 根因见 [CRISPEDIT_PREFILTER.md](CRISPEDIT_PREFILTER.md#55-新增-100k-运行)。
+vLLM 断点续跑阶段耗时 1 小时 14 分 43 秒；这是接续已有 grounding shard 的时间，不是从
+空目录重跑 100k 的基准。完整 SAM3 阶段耗时 2 小时 15 分 55 秒。
+
+### 当前统一结果目录
+
+首批与新增批次均写入同一组最终目录。当前 mask 目录有 985 个 shard、250,421 行；
+prefilter 保留 68,779 行，其中 68,548 行具有非空 mask：
+
+| 类型 | 原始行 | prefilter keep | 非空 mask | 空 mask | GROUND_FAIL | BOX_FALLBACK |
+|---|---:|---:|---:|---:|---:|---:|
+| add | 51,267 | 20,041 | 20,023 | 18 | 18 | 19 |
+| background change | 21,504 | 10,059 | 9,978 | 81 | 24 | 7 |
+| color | 21,294 | 8,154 | 8,133 | 21 | 21 | 2 |
+| motion change | 32,314 | 3,761 | 3,653 | 108 | 108 | 7 |
+| remove | 51,290 | 10,778 | 10,775 | 3 | 3 | 6 |
+| replace | 51,200 | 3,079 | 3,079 | 0 | 0 | 6 |
+| style | 21,552 | 12,907 | 12,907 | 0 | 0 | 0 |
+| **总计** | **250,421** | **68,779** | **68,548** | **231** | **174** | **47** |
+
+统一目录的 231 个空 mask 包括 174 个显式 `GROUND_FAIL`，以及首批 legacy background
+路线遗留的 57 个 `qc_flag=OK` 空 mask；后者是前景分割覆盖全图后取反为空，但旧 QC 没有
+检查最终 `mask_sum`。因此发布口径应使用“prefilter keep 且 `mask_sum > 0`”，不能只依据
+`qc_flag=OK`。另有 1 个非空 replace mask 标记为 `AR_MISMATCH`。
+
+### 新增 100k 均匀随机抽样
+
+下列预览使用固定 seed `20260910`，从每个新增类别的非空 `qc_flag=OK` 结果中均匀随机
+抽取 8 条，共 32 条，并从原始图像重新渲染。每行依次展示 source + MLLM bbox、target +
+MLLM bbox、source 坐标系的最终 mask overlay 和二值 mask。选择清单保存在
+[`additional_100k_selection.json`](../docs_assets/mask_pipeline/additional_100k_selection.json)，
+这是一组非人工挑选的随机样本，不替代像素级评测。
+
+人工浏览这组随机样本时，大部分结果能定位到目标对象或动作区域；同时也能看到
+`add_00690.parquet row=195` 的细小牙签覆盖不足，以及 `remove_00845.parquet row=64` 的
+花瓣区域过分割。这说明 `qc_flag=OK` 只代表流程正常且未触发结构性告警，不等同于人工
+质量验收通过。
+
+#### Add
+
+![additional-100k add masks](../docs_assets/mask_pipeline/additional_100k/add.jpg)
+
+#### Motion change
+
+![additional-100k motion masks](../docs_assets/mask_pipeline/additional_100k/motion.jpg)
+
+#### Remove
+
+![additional-100k remove masks](../docs_assets/mask_pipeline/additional_100k/remove.jpg)
+
+#### Replace
+
+![additional-100k replace masks](../docs_assets/mask_pipeline/additional_100k/replace.jpg)
+
+### 首批结果代表性可视化
 
 以下样本直接从全量 mask parquet 和原始图片重建。每张依次展示 source + bbox、target +
 bbox、source 坐标系 mask overlay 和二值 mask；具体选择记录在

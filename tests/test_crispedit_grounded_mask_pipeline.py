@@ -1,7 +1,11 @@
+import argparse
 import json
+from pathlib import Path
 
 import cv2
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 from PIL import Image
 
 from crispedit.mask.pipeline import (
@@ -39,10 +43,11 @@ from crispedit.mask.grounding import (
 from crispedit.mask.grounding_runner import (
     GROUND_SCHEMA,
     conversation_image_count,
+    conversations_for_vllm,
     prefilter_fields,
     split_conversations_by_image_budget,
 )
-from crispedit.mask.runner import MASK_SCHEMA, _copy_metadata
+from crispedit.mask.runner import MASK_SCHEMA, _copy_metadata, build_jobs
 from scripts.build_mask_bad_case_selection import extract_mask_cases
 
 
@@ -159,6 +164,60 @@ def test_visual_load_batching_preserves_order_and_single_large_request():
     oversized = split_conversations_by_image_budget([conversation(12)], max_images=10)
     assert len(oversized) == 1
     assert [conversation_image_count(item) for item in oversized[0]] == [12]
+
+
+def test_vllm_conversation_conversion_preserves_turns_and_image_order():
+    source = Image.new("RGB", (3, 2), "red")
+    target = Image.new("RGB", (3, 2), "blue")
+    conversations = [
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "source"},
+                    {"type": "image", "image": source},
+                    {"type": "text", "text": "target"},
+                    {"type": "image", "image": target},
+                ],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": "observed"}]},
+            {"role": "user", "content": [{"type": "text", "text": "ground it"}]},
+        ]
+    ]
+
+    converted = conversations_for_vllm(conversations)
+    assert [part["type"] for part in converted[0][0]["content"]] == [
+        "text",
+        "image_pil",
+        "text",
+        "image_pil",
+    ]
+    assert converted[0][0]["content"][1]["image_pil"] is source
+    assert converted[0][0]["content"][3]["image_pil"] is target
+    assert converted[0][1:] == conversations[0][1:]
+    assert conversations[0][0]["content"][1]["type"] == "image"
+
+
+def test_mask_jobs_are_scoped_by_input_directory(tmp_path):
+    input_dir = tmp_path / "raw"
+    grounding_dir = tmp_path / "grounding"
+    output_dir = tmp_path / "mask"
+    input_dir.mkdir()
+    grounding_dir.mkdir()
+    pq.write_table(pa.table({"value": [1]}), input_dir / "new.parquet")
+    pq.write_table(pa.table({"raw_type": ["add"]}), grounding_dir / "new.parquet")
+    pq.write_table(pa.table({"raw_type": ["add"]}), grounding_dir / "old.parquet")
+    args = argparse.Namespace(
+        input_dir=input_dir,
+        grounding_dir=grounding_dir,
+        output_dir=output_dir,
+        include_types=None,
+    )
+
+    jobs = build_jobs(args)
+
+    assert [Path(job.input_path).name for job in jobs] == ["new.parquet"]
+    assert [Path(job.grounding_path).name for job in jobs] == ["new.parquet"]
 
 
 def test_latest_prefilter_manifest_metadata_survives_grounding_and_mask():

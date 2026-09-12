@@ -139,10 +139,14 @@ def build_jobs(args: argparse.Namespace) -> List[MaskJob]:
     include = {part.strip() for part in args.include_types.split(",")} if args.include_types else None
     args.output_dir.mkdir(parents=True, exist_ok=True)
     jobs = []
-    for grounding_path in sorted(args.grounding_dir.glob("*.parquet")):
-        input_path = args.input_dir / grounding_path.name
-        if not input_path.exists():
-            raise FileNotFoundError(f"raw shard for grounding output is missing: {input_path}")
+    # The input directory defines this run's scope.  The production grounding
+    # directory can contain results from several disjoint source-data batches.
+    for input_path in sorted(args.input_dir.glob("*.parquet")):
+        grounding_path = args.grounding_dir / input_path.name
+        if not grounding_path.exists():
+            raise FileNotFoundError(
+                f"grounding output for raw shard is missing: {grounding_path}"
+            )
         ground_file = pq.ParquetFile(grounding_path)
         if ground_file.metadata.num_rows == 0:
             continue

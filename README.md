@@ -1,77 +1,52 @@
-# ScaleEdit mask labeling
+# CrispEdit and ScaleEdit mask labeling
 
-本分支实现 ScaleEdit 图像编辑区域打标：Qwen3.5 先通过 planner → bbox locator 两阶段确定
-编辑对象和位置，SAM3 再生成 source 坐标系下的最终二值 mask。Qwen 推理由 vLLM 批处理加速，
-普通局部样本调用 MLLM 2 次，全图编辑调用 1 次；仅在解析失败时做一次带错误反馈的纠错重试。
-第二轮只接收精简候选描述并使用 Qwen 原生 `bbox_2d` JSON；损坏图片按行记录并跳过。
+本分支汇总两条已经完成全量运行的图像编辑 mask 打标流程，不共享 prompt、
+路由策略或后处理逻辑：
 
-完整方法、数据格式、mask 后处理、生产数据路径以及当前 66-case 回归结果见
-[ScaleEdit 详细文档](docs/SCALEEDIT_MASK.md)。
+- **CrispEdit-2M**：fact prefilter → Qwen3.5/vLLM grounding → SAM3 mask。
+- **ScaleEdit**：Qwen3.5/vLLM planner → bbox locator → SAM3 mask。
 
-## 快速开始
+详细方法、代码入口、安装、完整运行命令、生产路径和可视化样例分别见：
 
-要求 CUDA GPU、本地 Qwen3.5-35B-A3B 模型和 SAM3 checkpoint。以下脚本从零创建一个同时支持
-Qwen/vLLM grounding、SAM3 mask 和校验的 CUDA 12.9 环境；若目标路径已存在会直接退出，不会复用。
+- [CrispEdit-2M 打标文档](docs/CRISPEDIT_MASK.md)
+- [ScaleEdit 打标文档](docs/SCALEEDIT_MASK.md)
+
+## 环境安装
 
 ```bash
 cd /opt/tiger/tanyue/sam3-crispedit
 
-# Qwen/vLLM grounding: fresh Python 3.12 + CUDA 12.9 environment
+# CrispEdit：一次创建 prefilter/SAM3 环境和 Qwen3.5/vLLM grounding 环境
+bash scripts/setup_crispedit_envs.sh
+
+# ScaleEdit：一次创建同时支持 vLLM grounding 和 SAM3 mask 的环境
 bash scripts/setup_scaleedit_vllm_env.sh
 ```
 
-设置本次运行路径：
+两套安装默认使用不同的 virtualenv，避免互相覆盖。模型权重和数据不会由安装脚本
+下载或修改。
 
-```bash
-SCALEEDIT_DATASET=/path/to/scaleedit-parquet
-SCALEEDIT_RESULTS=/path/to/scaleedit-results/current
-SCALEEDIT_QWEN=/path/to/Qwen3.5-35B-A3B
-SCALEEDIT_SAM3=/path/to/sam3.pt
+## 生产入口
+
+```text
+CrispEdit
+  crispedit_mllm_prefilter.py
+  crispedit_mllm_grounding.py
+  crispedit_grounded_mask_runner.py
+
+ScaleEdit
+  scaleedit_mllm_grounding.py
+  scaleedit_grounded_mask_runner.py
 ```
 
-运行 grounding 和 mask：
+这些入口的参数和 pipeline 代码保持各自生产版本。请勿把 CrispEdit 的 grounding/
+manifest 与 ScaleEdit 的输入混用。
 
-```bash
-.venv-scaleedit-vllm/bin/python -u scaleedit_mllm_grounding.py \
-  --input-dir "$SCALEEDIT_DATASET" \
-  --output-dir "$SCALEEDIT_RESULTS/grounding" \
-  --model-path "$SCALEEDIT_QWEN" \
-  --inference-backend vllm \
-  --devices 0,1,2,3,4,5,6,7 \
-  --tensor-parallel-size 2 \
-  --batch-size 8 \
-  --request-batch-size 4 \
-  --planner-max-new-tokens 2048 \
-  --locator-max-new-tokens 1024
-
-.venv-scaleedit-vllm/bin/python -u scaleedit_grounded_mask_runner.py \
-  --input-dir "$SCALEEDIT_DATASET" \
-  --grounding-dir "$SCALEEDIT_RESULTS/grounding" \
-  --output-dir "$SCALEEDIT_RESULTS/masks" \
-  --checkpoint-path "$SCALEEDIT_SAM3" \
-  --devices 0,1,2,3,4,5,6,7
-```
-
-校验并生成可视化：
-
-```bash
-.venv-scaleedit-vllm/bin/python scripts/validate_scaleedit_masks.py \
-  --input-dir "$SCALEEDIT_DATASET" \
-  --grounding-dir "$SCALEEDIT_RESULTS/grounding" \
-  --mask-dir "$SCALEEDIT_RESULTS/masks" \
-  --report-json "$SCALEEDIT_RESULTS/validation.json"
-
-.venv-scaleedit-vllm/bin/python scripts/visualize_scaleedit_masks.py \
-  --input-dir "$SCALEEDIT_DATASET" \
-  --grounding-dir "$SCALEEDIT_RESULTS/grounding" \
-  --mask-dir "$SCALEEDIT_RESULTS/masks" \
-  --output-dir "$SCALEEDIT_RESULTS/review-all" \
-  --samples-per-task 1000 \
-  --rows-per-page 8
-```
-
-运行测试：
+## 验证
 
 ```bash
 .venv-scaleedit-vllm/bin/python -m pytest -q
 ```
+
+最终 ScaleEdit 与 CrispEdit mask 的严格 QC、统一 schema 和自包含训练集导出见
+[UNIFIED_MASK_DATASET.md](docs/UNIFIED_MASK_DATASET.md)。

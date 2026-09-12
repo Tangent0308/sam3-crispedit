@@ -1,8 +1,9 @@
 """Stage 1: Qwen3.5 grounding for the CrispEdit mask pipeline.
 
 The default 8-GPU layout is four independent BF16 replicas with tensor/model
-parallel size 2.  Each worker makes one request per routed grounding image and
-writes all raw responses and validated boxes before SAM3 is loaded.
+parallel size 2.  The production backend uses vLLM continuous batching while
+retaining a Transformers fallback.  Each worker writes all raw responses and
+validated boxes before SAM3 is loaded.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import multiprocessing as mp
 import os
 import queue
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -148,6 +150,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--devices", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--tensor-parallel-size", type=int, default=2)
     parser.add_argument(
+        "--inference-backend",
+        choices=("transformers", "vllm"),
+        default="transformers",
+        help="Qwen inference engine; production full runs should use vllm",
+    )
+    parser.add_argument(
         "--grounding-mode",
         choices=("two-pass", "single"),
         default="two-pass",
@@ -192,6 +200,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bbox-safety-padding-min", type=float, default=12.0)
     parser.add_argument("--bbox-safety-padding-max", type=float, default=24.0)
     parser.add_argument("--gpu-memory-gib", type=int, default=74)
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.90)
+    parser.add_argument("--vllm-max-model-len", type=int, default=32768)
+    parser.add_argument("--vllm-max-images-per-prompt", type=int, default=16)
+    parser.add_argument(
+        "--vllm-mm-encoder-tp-mode",
+        choices=("weights", "data"),
+        default="data",
+        help="Replicate the vision encoder across TP ranks to process image batches in parallel",
+    )
+    parser.add_argument(
+        "--vllm-enforce-eager",
+        action="store_true",
+        help="Disable CUDA graphs (debugging only; slower)",
+    )
     parser.add_argument("--compression", default="zstd")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
@@ -345,6 +367,37 @@ def split_conversations_by_image_budget(
     return chunks
 
 
+def conversations_for_vllm(
+    conversations: Sequence[List[Dict]],
+) -> List[List[Dict]]:
+    """Convert internal PIL chat parts to vLLM's in-memory image schema.
+
+    Keeping this conversion at the engine boundary means both backends use the
+    exact same messages, prompt versions, image ordering, and multi-turn
+    observation context.
+    """
+
+    converted: List[List[Dict]] = []
+    for conversation in conversations:
+        converted_messages = []
+        for message in conversation:
+            content = message.get("content", "")
+            if not isinstance(content, list):
+                converted_messages.append(dict(message))
+                continue
+            converted_content = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image":
+                    converted_content.append(
+                        {"type": "image_pil", "image_pil": part["image"]}
+                    )
+                else:
+                    converted_content.append(dict(part) if isinstance(part, dict) else part)
+            converted_messages.append({**message, "content": converted_content})
+        converted.append(converted_messages)
+    return converted
+
+
 def _selected_batches(path: Path, indices: Sequence[int], batch_size: int) -> Iterable[List[Tuple[int, Dict]]]:
     pf = pq.ParquetFile(path)
     wanted = sorted(indices)
@@ -426,21 +479,30 @@ def prefilter_fields(row: Optional[Dict]) -> Dict:
 
 class Qwen35Grounder:
     def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.backend = args.inference_backend
+        self.prompt_version = prompt_version_for_mode(args.grounding_mode)
+        if self.backend == "vllm":
+            self._init_vllm()
+        else:
+            self._init_transformers()
+
+    def _init_transformers(self) -> None:
         import torch
         from transformers import AutoProcessor, Qwen3_5MoeForConditionalGeneration
 
         self.torch = torch
-        self.args = args
-        self.prompt_version = prompt_version_for_mode(args.grounding_mode)
         visible_count = torch.cuda.device_count()
-        if visible_count != args.tensor_parallel_size:
+        if visible_count != self.args.tensor_parallel_size:
             raise RuntimeError(
-                f"worker sees {visible_count} GPUs, expected TP={args.tensor_parallel_size}; "
+                f"worker sees {visible_count} GPUs, expected TP={self.args.tensor_parallel_size}; "
                 "CUDA_VISIBLE_DEVICES must be set before importing torch"
             )
-        max_memory = {index: f"{args.gpu_memory_gib}GiB" for index in range(visible_count)}
+        max_memory = {
+            index: f"{self.args.gpu_memory_gib}GiB" for index in range(visible_count)
+        }
         self.model = Qwen3_5MoeForConditionalGeneration.from_pretrained(
-            args.model_path,
+            self.args.model_path,
             dtype=torch.bfloat16,
             device_map="balanced",
             max_memory=max_memory,
@@ -448,17 +510,70 @@ class Qwen35Grounder:
             local_files_only=True,
         ).eval()
         self.processor = AutoProcessor.from_pretrained(
-            args.model_path, trust_remote_code=True, local_files_only=True
+            self.args.model_path, trust_remote_code=True, local_files_only=True
         )
         if hasattr(self.processor, "tokenizer"):
             self.processor.tokenizer.padding_side = "left"
         image_processor = getattr(self.processor, "image_processor", None)
         if image_processor is not None and hasattr(image_processor, "size"):
-            image_processor.size.longest_edge = int(args.max_pixels)
+            image_processor.size.longest_edge = int(self.args.max_pixels)
         self.input_device = next(
             parameter.device
             for parameter in self.model.parameters()
             if parameter.device.type != "meta"
+        )
+
+    def _init_vllm(self) -> None:
+        # vLLM/FlashInfer may JIT-compile optimized kernels in child processes.
+        # A direct ``.venv/bin/python`` invocation does not necessarily place
+        # companion tools such as ``ninja`` on PATH, so propagate that location
+        # before the engine forks its workers.
+        # Do not resolve the venv's Python symlink: resolving it would collapse
+        # back to /usr/bin and hide the venv-local ``ninja`` executable.
+        executable_dir = str(Path(sys.executable).parent)
+        path_entries = os.environ.get("PATH", "").split(os.pathsep)
+        if executable_dir not in path_entries:
+            os.environ["PATH"] = os.pathsep.join([executable_dir, *path_entries])
+        try:
+            from vllm import LLM, SamplingParams
+        except ImportError as exc:
+            raise RuntimeError(
+                "vLLM backend requested but vllm is not installed; run "
+                "scripts/setup_vllm_env.sh"
+            ) from exc
+
+        if not 0.0 < self.args.vllm_gpu_memory_utilization < 1.0:
+            raise ValueError("vllm_gpu_memory_utilization must be between 0 and 1")
+        if self.args.vllm_max_images_per_prompt < 1:
+            raise ValueError("vllm_max_images_per_prompt must be positive")
+
+        # Each outer worker sees exactly one physical TP group through
+        # CUDA_VISIBLE_DEVICES. vLLM then owns scheduling and KV-cache management
+        # within that isolated group.
+        self.model = LLM(
+            model=self.args.model_path,
+            trust_remote_code=True,
+            tensor_parallel_size=self.args.tensor_parallel_size,
+            dtype="bfloat16",
+            gpu_memory_utilization=self.args.vllm_gpu_memory_utilization,
+            max_model_len=self.args.vllm_max_model_len,
+            max_num_seqs=max(1, self.args.request_batch_size),
+            limit_mm_per_prompt={
+                "image": self.args.vllm_max_images_per_prompt,
+            },
+            mm_processor_kwargs={"max_pixels": int(self.args.max_pixels)},
+            mm_encoder_tp_mode=self.args.vllm_mm_encoder_tp_mode,
+            enable_prefix_caching=True,
+            enable_chunked_prefill=True,
+            performance_mode="throughput",
+            enforce_eager=self.args.vllm_enforce_eager,
+            generation_config="vllm",
+            disable_log_stats=True,
+            seed=0,
+        )
+        self.sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=self.args.max_new_tokens,
         )
 
     @staticmethod
@@ -579,6 +694,23 @@ class Qwen35Grounder:
         return views
 
     def _generate_once(self, conversations: Sequence[List[Dict]]) -> List[str]:
+        if self.backend == "vllm":
+            for conversation in conversations:
+                image_count = conversation_image_count(conversation)
+                if image_count > self.args.vllm_max_images_per_prompt:
+                    raise ValueError(
+                        f"request has {image_count} images, exceeding "
+                        f"--vllm-max-images-per-prompt="
+                        f"{self.args.vllm_max_images_per_prompt}"
+                    )
+            outputs = self.model.chat(
+                messages=conversations_for_vllm(conversations),
+                sampling_params=self.sampling_params,
+                use_tqdm=False,
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            return [output.outputs[0].text for output in outputs]
+
         inputs = self.processor.apply_chat_template(
             list(conversations),
             tokenize=True,
@@ -607,6 +739,10 @@ class Qwen35Grounder:
     def _generate_with_oom_backoff(
         self, conversations: Sequence[List[Dict]]
     ) -> List[str]:
+        if self.backend == "vllm":
+            # vLLM schedules the submitted requests against its profiled KV and
+            # multimodal caches, so manual recursive microbatching is unnecessary.
+            return self._generate_once(conversations)
         try:
             return self._generate_once(conversations)
         except self.torch.cuda.OutOfMemoryError:
