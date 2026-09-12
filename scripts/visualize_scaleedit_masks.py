@@ -112,13 +112,28 @@ def _pixel_box(box: Sequence[float], image: Image.Image) -> Tuple[float, float, 
 def _boxes(image: Image.Image, items: Sequence[Dict], color: str) -> Image.Image:
     canvas = image.convert("RGB").copy()
     draw = ImageDraw.Draw(canvas)
-    width = max(2, min(canvas.size) // 250)
-    font = _font(max(12, min(canvas.size) // 60))
+    # Boxes are drawn before the image is reduced to the contact-sheet panel.
+    # A dark halo and thick colored stroke keep target boxes visible after
+    # reduction, including over bright edited-image backgrounds.
+    width = max(6, min(canvas.size) // 90)
+    halo_width = width + max(3, width // 2)
+    font = _font(max(18, min(canvas.size) // 38))
     for item in items:
         box = _pixel_box(item["bbox_2d"], canvas)
+        draw.rectangle(box, outline="#101010", width=halo_width)
         draw.rectangle(box, outline=color, width=width)
         label = f"{item.get('ref', '')} [{item.get('mask_method', 'sam')}]"
-        draw.text((box[0] + width, box[1] + width), label, fill=color, font=font)
+        text_x, text_y = box[0] + halo_width, box[1] + halo_width
+        text_box = draw.textbbox((text_x, text_y), label, font=font, stroke_width=1)
+        draw.rectangle(text_box, fill="#101010")
+        draw.text(
+            (text_x, text_y),
+            label,
+            fill=color,
+            font=font,
+            stroke_width=1,
+            stroke_fill="#101010",
+        )
     return canvas
 
 
@@ -131,7 +146,13 @@ def _semantic_box_items(
     result = []
     for index, grounded in enumerate(grounded_items):
         item = dict(grounded)
-        semantic = by_id.get(f"{image_side}_{index}", {}).get("semantic_bbox_2d")
+        candidate_id = int(grounded.get("candidate_id", index))
+        member_index = int(grounded.get("member_index", 0))
+        instance = by_id.get(
+            f"{image_side}_c{candidate_id}_m{member_index}",
+            by_id.get(f"{image_side}_{index}", {}),
+        )
+        semantic = instance.get("semantic_bbox_2d")
         if (
             isinstance(semantic, (list, tuple))
             and len(semantic) == 4
@@ -158,7 +179,11 @@ def _overlay(image: Image.Image, mask: np.ndarray) -> Image.Image:
     return Image.alpha_composite(base, Image.fromarray(rgba, mode="RGBA")).convert("RGB")
 
 
-def _decode_mask(payload: bytes) -> np.ndarray:
+def _decode_mask(payload: bytes, shape: Tuple[int, int] | None = None) -> np.ndarray:
+    if not payload:
+        if shape is None or min(shape) <= 0:
+            raise ValueError("empty mask payload has no valid fallback shape")
+        return np.zeros(shape, dtype=np.uint8)
     return (np.asarray(Image.open(io.BytesIO(payload)).convert("L")) > 0).astype(np.uint8)
 
 
@@ -231,12 +256,33 @@ def _render_sample(item: Dict, panel_width: int, panel_height: int) -> Image.Ima
     instances = mask_row.get("instance_masks", []) or []
     source_items = _semantic_box_items(source_items, instances, "source")
     target_items = _semantic_box_items(payload.get("target", []), instances, "target")
-    mask = _decode_mask(mask_row["mask_png"])
-    source_boxes = _boxes(source, source_items, "#00b050" if mode != "protect_foreground" else "#ff8c00")
-    target_boxes = _boxes(target, target_items, "#008cff")
+    mask = _decode_mask(
+        mask_row["mask_png"],
+        (
+            int(mask_row["mask_height"]) or source.height,
+            int(mask_row["mask_width"]) or source.width,
+        ),
+    )
+    source_boxes = _boxes(
+        source,
+        source_items,
+        "#39ff72" if mode != "protect_foreground" else "#ffb000",
+    )
+    target_boxes = _boxes(target, target_items, "#00e5ff")
+    source_label = "source + SOURCE boxes (green)"
+    if mode == "protect_foreground":
+        source_label = "source + PROTECTED boxes (orange)"
+    target_label = (
+        "edited + TARGET boxes (cyan)"
+        if target_items
+        else (
+            "edited | no target boxes "
+            f"({'full-image route' if mode == 'full_image' else 'source-only route'})"
+        )
+    )
     panels = [
-        ("source + semantic boxes", source_boxes),
-        ("edited + semantic boxes", target_boxes),
+        (source_label, source_boxes),
+        (target_label, target_boxes),
         ("source mask overlay", _overlay(source, mask)),
         ("binary edit mask", Image.fromarray(mask * 255, mode="L").convert("RGB")),
     ]

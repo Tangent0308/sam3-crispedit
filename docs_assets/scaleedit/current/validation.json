@@ -1,33 +1,33 @@
 {
-  "rows": 200,
-  "unique_sample_ids": 200,
+  "rows": 66,
+  "unique_sample_ids": 66,
   "task_count": 23,
-  "instances": 425,
+  "instances": 161,
   "validation_error_count": 0,
   "validation_errors": [],
   "qc_flags": {
-    "OK": 200
+    "OK": 66
   },
   "mask_sources": {
-    "direct_box": 49,
-    "full_image": 18,
-    "hybrid": 28,
-    "inverse_foreground": 4,
+    "direct_box": 11,
+    "full_image": 9,
+    "hybrid": 11,
+    "inverse_foreground": 1,
     "negative_space_inverse": 1,
-    "pcs": 70,
-    "pvs": 30
+    "pcs": 25,
+    "pvs": 8
   },
   "mask_modes": {
-    "full_image": 18,
-    "protect_foreground": 4,
-    "regions": 178
+    "full_image": 9,
+    "protect_foreground": 1,
+    "regions": 56
   },
   "area_frac": {
-    "min": 0.0018408181413961762,
-    "median": 0.09231358465463144,
-    "mean": 0.24969692429091223,
+    "min": 0.0011196136474609375,
+    "median": 0.05519484870628075,
+    "mean": 0.22196815586849722,
     "max": 1.0,
     "empty": 0,
-    "full": 18
+    "full": 9
   }
 }
