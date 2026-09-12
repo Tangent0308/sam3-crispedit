@@ -247,6 +247,41 @@ verdict 为 PASS 42,639、FAIL 75,937、UNSURE 31,259、ERROR 586。共执行 60
 
 ![representative examples](../docs_assets/prefilter/representative_examples.png)
 
+### 5.5 新增 100k 运行
+
+2026-09-08 对新增且不与上一批重复的 `add/remove/replace/motion change` 数据运行了同一
+prefilter。输入是 394 个 shard 的符号链接视图，audit 和 keep manifest 继续写入统一目录：
+
+```text
+input          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-additional-100k-input
+audit          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit
+keep manifest  /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest
+run directory  /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-run-additional-100k-20260908
+```
+
+以下统计从这 394 个输入 shard 对应的最终 audit 逐行重算，而不是直接使用断点续跑阶段的
+局部 summary：
+
+| 类型 | 行数 | keep | drop | keep 率 | error |
+|---|---:|---:|---:|---:|---:|
+| add | 29,763 | 14,244 | 15,519 | 47.86% | 6 |
+| motion change | 10,755 | 1,264 | 9,491 | 11.75% | 0 |
+| remove | 29,786 | 8,269 | 21,517 | 27.76% | 611 |
+| replace | 29,696 | 2,363 | 27,333 | 7.96% | 0 |
+| **总计** | **100,000** | **26,140** | **73,860** | **26.14%** | **617** |
+
+verdict 为 PASS 26,140、FAIL 53,259、UNSURE 19,984、ERROR 617。input/audit/manifest
+均为 394/394 个同名 shard，逐行对齐且没有临时文件。两批不重复数据合计 250,421 行，
+prefilter 共保留 68,779 行、跳过 181,642 行。
+
+这 617 条 ERROR 会 fail-closed 为 drop，其中 608 条不是内容判定，而是同一批处理缺陷：
+source observation 偶尔返回 `[0,1000]` bbox，而局部 crop 代码按 `[0,1]` 使用，产生 1
+像素宽或高的极端 crop；Qwen 图像处理器以 `absolute aspect ratio must be smaller than 200`
+拒绝整批输入。batch size 为 16，38 个异常 batch 因而连带产生 608 条错误。剩余 9 条为
+一次纠错重试后仍不合法的 JSON（step1/source 2、step2/target 6、step3/pair 1）。这些错误
+不应解释为数据被模型判定为低质量；发布前应修复 bbox 坐标归一化并逐条隔离失败输入，再
+定向重跑这 617 条。
+
 ## 6. 已知边界
 
 1. 2026-08-28 的历史全量运行有 586 行（0.39%）在图像预处理或 JSON 解析阶段 fail-closed：step1/source 130、step2/target 282、step3/pair 172、step4/text match 2。当前实现会对格式不合法的 JSON 逐条追加纠错回合重试一次；重试仍失败或图像无法解码时继续 fail-closed。生产全量运行不应启用 `--fail-fast`。
@@ -254,6 +289,8 @@ verdict 为 PASS 42,639、FAIL 75,937、UNSURE 31,259、ERROR 586。共执行 60
 3. background/style 对全局重生成采用严格策略：即使文字目标实现，主体构图或无关内容明显改变仍会 drop。
 4. batch size 会影响边界样本生成；目前人工 anchors 数量有限，旧高置信标签只能用于漂移诊断，不能当作 ground truth。
 5. 历史 error 和人工发现的 add false drop 说明“产物完整”不等同于“决策完全无误”；开始 mask 前仍应检查 error 计数和定向回归样本。
+6. 2026-09-08 增量运行暴露了局部 crop 的 bbox 坐标尺度和 batch 级故障隔离问题；修复并
+   回灌前，新增批次的 617 条 `ERROR` 仍保留在 audit 中且按 fail-closed 跳过。
 
 ## 7. 验证
 
