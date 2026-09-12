@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Dict, List, Sequence, Tuple
 
 import cv2
@@ -29,6 +30,113 @@ _OBJECT_OUTPUT_GUARD_MIN_IMAGE_FRAC = 0.004
 _OBJECT_COMPONENT_MIN_LARGEST_FRAC = 0.025
 _NEGATIVE_SPACE_SEARCH_EXPAND_FRAC = 0.50
 _NEGATIVE_SPACE_BOUNDARY_DILATE_FRAC = 0.003
+_COMPACT_INTERACTION_RE = re.compile(
+    r"\b(?:hand|hands|finger|fingers|phone|smartphone|cellphone|cell phone|"
+    r"mobile phone)\b",
+    re.IGNORECASE,
+)
+
+
+def _component_count(mask: np.ndarray) -> int:
+    return max(
+        0,
+        cv2.connectedComponents(
+            (mask > 0).astype(np.uint8), connectivity=8
+        )[0]
+        - 1,
+    )
+
+
+def _compact_completion_audit(component_count: int) -> Dict:
+    return {
+        "completion_applied": False,
+        "completion_rule": "",
+        "completion_radius": 0,
+        "completion_added_area": 0,
+        "completion_filled_hole_area": 0,
+        "completion_component_count_before": int(component_count),
+        "completion_component_count_after": int(component_count),
+    }
+
+
+def _complete_compact_interaction_mask(
+    mask: np.ndarray,
+    item: Dict,
+    shape: Tuple[int, int],
+    metadata: Dict,
+    output_guard_bbox_2d: Sequence[float],
+) -> Tuple[np.ndarray, Dict]:
+    """Conservatively close PCS holes in hands and handheld phones.
+
+    Text-conditioned PCS masks can contain small holes or adjacent fragments
+    where fingers occlude a phone, or where a steering wheel occludes a hand.
+    Closing every SAM object would damage legitimate negative space such as a
+    mug handle or mirror frame, so this completion is restricted to an explicit
+    compact-interaction vocabulary and PCS-selected masks.  Growth is clipped
+    to the already trusted output guard and the radius is capped at six pixels.
+    """
+
+    original = (mask > 0).astype(np.uint8)
+    before_components = _component_count(original)
+    audit = _compact_completion_audit(before_components)
+    ref = str(item.get("ref", ""))
+    if (
+        not original.any()
+        or str(metadata.get("mask_source", "")) != "pcs"
+        or str(item.get("region_mode", "object"))
+        not in {"object", "multi_instance"}
+        or str(item.get("mask_density", "object")) != "object"
+        or not _COMPACT_INTERACTION_RE.search(ref)
+    ):
+        return original, audit
+
+    anchor = normalized_box_to_pixels(item["bbox_2d"], shape)
+    anchor_width = max(float(anchor[2] - anchor[0]), 1.0)
+    anchor_height = max(float(anchor[3] - anchor[1]), 1.0)
+    radius = max(2, min(6, int(round(min(anchor_width, anchor_height) * 0.025))))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+    )
+    completed = cv2.morphologyEx(original, cv2.MORPH_CLOSE, kernel)
+
+    # Fill only small enclosed holes. The exterior background is connected to
+    # an image edge and is never filled; the cap prevents filling a meaningful
+    # opening even if SAM accidentally encloses one.
+    inverse = (1 - completed).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        inverse, connectivity=8
+    )
+    hole_cap = min(
+        max(64, int(math.ceil(float(completed.sum()) * 0.03))),
+        max(64, int(math.ceil(float(shape[0] * shape[1]) * 0.001))),
+    )
+    filled_hole_area = 0
+    for label in range(1, count):
+        x, y, width, height, area = [int(value) for value in stats[label]]
+        enclosed = (
+            x > 0
+            and y > 0
+            and x + width < shape[1]
+            and y + height < shape[0]
+        )
+        if enclosed and area <= hole_cap:
+            completed[labels == label] = 1
+            filled_hole_area += area
+
+    guard = mask_from_box(
+        normalized_box_to_pixels(output_guard_bbox_2d, shape), shape
+    )
+    completed &= guard
+    after_components = _component_count(completed)
+    return completed.astype(np.uint8), {
+        **audit,
+        "completion_applied": True,
+        "completion_rule": "compact_interaction_pcs_closing_v1",
+        "completion_radius": int(radius),
+        "completion_added_area": int(completed.sum() - original.sum()),
+        "completion_filled_hole_area": int(filled_hole_area),
+        "completion_component_count_after": int(after_components),
+    }
 
 
 def _pixel_box_to_normalized(
@@ -75,11 +183,11 @@ def _clean_semantic_object_mask(
     }
     ordinary_object = (
         str(item.get("mask_method", "sam")) == "sam"
-        and str(item.get("region_mode", "object")) == "object"
+        and str(item.get("region_mode", "object")) in {"object", "multi_instance"}
         and str(item.get("mask_density", "object")) == "object"
     )
     if not ordinary_object or not raw.any():
-        return raw, cleanup
+        return raw, {**cleanup, **_compact_completion_audit(raw_components)}
 
     anchor = normalized_box_to_pixels(item["bbox_2d"], shape)
     guard = expand_box(
@@ -97,18 +205,26 @@ def _clean_semantic_object_mask(
     guarded[:, :x1] = 0
     guarded[:, x2:] = 0
     if not guarded.any():
-        return raw, cleanup
+        return raw, {**cleanup, **_compact_completion_audit(raw_components)}
 
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
         guarded, connectivity=8
     )
     if count <= 1:
-        return guarded, {
+        cleaned_audit = {
             **cleanup,
             "kept_component_count": int(guarded.any()),
             "removed_component_count": int(raw_components - int(guarded.any())),
             "removed_area": int(raw.sum() - guarded.sum()),
         }
+        completed, completion = _complete_compact_interaction_mask(
+            guarded,
+            item,
+            shape,
+            metadata,
+            cleaned_audit["output_guard_bbox_2d"],
+        )
+        return completed, {**cleaned_audit, **completion}
 
     areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
     largest_label = int(np.argmax(areas)) + 1
@@ -132,13 +248,25 @@ def _clean_semantic_object_mask(
     cleaned = np.isin(labels, list(keep)).astype(np.uint8)
     cleaned_box = mask_to_box(cleaned)
     removed_components = max(0, raw_components - len(keep))
-    return cleaned, {
+    cleaned_audit = {
         **cleanup,
         "semantic_bbox_2d": _pixel_box_to_normalized(cleaned_box, shape),
         "kept_component_count": len(keep),
         "removed_component_count": int(removed_components),
         "removed_area": int(raw.sum() - cleaned.sum()),
     }
+    completed, completion = _complete_compact_interaction_mask(
+        cleaned,
+        item,
+        shape,
+        metadata,
+        cleaned_audit["output_guard_bbox_2d"],
+    )
+    completed_box = mask_to_box(completed)
+    cleaned_audit["semantic_bbox_2d"] = _pixel_box_to_normalized(
+        completed_box, shape
+    )
+    return completed, {**cleaned_audit, **completion}
 
 
 def _target_map_dilate_frac(item: Dict, mask: np.ndarray) -> float:
@@ -431,6 +559,13 @@ def _segment_items(
         else:
             if state is None:
                 raise RuntimeError("SAM image state is unavailable for a semantic item")
+            item_region_mode = str(item.get("region_mode", "object"))
+            # Multi-instance candidates are expanded to one item per member
+            # before this point. Segment each member as an ordinary anchored
+            # object instead of asking SAM to interpret an unsupported mode.
+            sam_region_mode = (
+                "object" if item_region_mode == "multi_instance" else item_region_mode
+            )
             mask, metadata = segment_grounded_box(
                 processor,
                 state,
@@ -438,7 +573,7 @@ def _segment_items(
                 item["bbox_2d"],
                 shape,
                 edit_type=sam_edit_type,
-                region_mode=str(item.get("region_mode", "object")),
+                region_mode=sam_region_mode,
                 mask_density=str(item.get("mask_density", "object")),
                 anchor_box_2d=item.get("sam_anchor_bbox_2d"),
             )
@@ -446,15 +581,24 @@ def _segment_items(
                 mask, item, shape, metadata
             )
             metadata.update(cleanup)
+            metadata["region_mode"] = item_region_mode
         metadata_rows.append(
             {
-                "instance_id": f"{grounding_image}_{index}",
+                "instance_id": (
+                    f"{grounding_image}_c{int(item.get('candidate_id', index))}"
+                    f"_m{int(item.get('member_index', 0))}"
+                ),
+                "candidate_id": int(item.get("candidate_id", index)),
+                "member_index": int(item.get("member_index", 0)),
                 "role": role,
                 "grounding_image": grounding_image,
                 "ref": str(item["ref"]),
                 "bbox_2d": [float(value) for value in item["bbox_2d"]],
                 "mask_method": method,
                 "region_mode": str(item.get("region_mode", "object")),
+                "selection_mode": str(item.get("selection_mode", "single")),
+                "mask_extent": str(item.get("mask_extent", "whole_object")),
+                "expected_count": item.get("expected_count"),
                 "mask_density": str(item.get("mask_density", "object")),
                 "negative_space": bool(item.get("negative_space", False)),
                 "negative_space_carrier_ref": str(item.get("carrier_ref", "")),
@@ -585,6 +729,7 @@ def annotate_sample(processor, sample: Dict, ground_row: Dict, sam_version: str)
     _finalize_instances(all_masks, all_instances)
     sources = {str(item.get("mask_source", "")) for item in all_instances}
     flags: List[str] = []
+    flags.extend(str(value) for value in payload.get("semantic_qc_flags", []))
     if any(
         item.get("mask_source") in {"box", "negative_space_box"}
         for item in all_instances
@@ -612,6 +757,19 @@ def annotate_sample(processor, sample: Dict, ground_row: Dict, sam_version: str)
         qc_flag = "BOX_FALLBACK"
     elif "AR_MISMATCH" in flags:
         qc_flag = "AR_MISMATCH"
+    elif any(
+        value.startswith(
+            (
+                "COUNT_MISMATCH",
+                "MULTI_INSTANCE_SINGLETON",
+                "SPATIAL_ORDER_MISMATCH",
+                "BBOX_PARTIAL_JSON_RECOVERY",
+                "BBOX_SINGLE_QUERY_UNION_RECOVERY",
+            )
+        )
+        for value in flags
+    ):
+        qc_flag = "SEMANTIC_QC"
 
     return {
         "mask": mask,
