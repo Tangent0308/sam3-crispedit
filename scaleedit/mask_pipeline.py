@@ -10,7 +10,7 @@ from typing import Dict, List, Sequence, Tuple
 import cv2
 import numpy as np
 
-from crispedit.mask.pipeline import (
+from scaleedit.sam3_backend import (
     _pcs_mask,
     aspect_ratio_delta,
     dilate_mask,

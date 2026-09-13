@@ -10,6 +10,7 @@ VENV_DIR="${VENV_DIR:-${REPO_ROOT}/.venv-sam3-crispedit}"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.23.0}"
+TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-5.15.1}"
 QWEN_MODEL_PATH="${CRISPEDIT_QWEN_MODEL_PATH:-/mnt/bn/strategy-mllm-train/common/models/Qwen3-VL-8B-Instruct}"
 SAM3_CHECKPOINT_PATH="${CRISPEDIT_SAM3_CHECKPOINT_PATH:-}"
 PREFETCH_SAM3=0
@@ -25,6 +26,7 @@ Options:
   --torch-index-url URL        PyTorch wheel index URL (default: cu128 wheels)
   --torch-version VERSION      Torch version (default: 2.8.0)
   --torchvision-version VER    Torchvision version (default: 0.23.0)
+  --transformers-version VER   Transformers version (default: 5.15.1)
   --qwen-model-path PATH       Local Qwen3-VL model path to validate
   --sam3-checkpoint-path PATH  Optional local SAM3 checkpoint path to validate
   --prefetch-sam3              Try a lightweight HF checkpoint prefetch check
@@ -33,7 +35,8 @@ Options:
 
 Environment overrides:
   PYTHON_BIN, VENV_DIR, TORCH_INDEX_URL, TORCH_VERSION, TORCHVISION_VERSION,
-  CRISPEDIT_QWEN_MODEL_PATH, CRISPEDIT_SAM3_CHECKPOINT_PATH
+  TRANSFORMERS_VERSION, CRISPEDIT_QWEN_MODEL_PATH,
+  CRISPEDIT_SAM3_CHECKPOINT_PATH
 EOF
 }
 
@@ -57,6 +60,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --torchvision-version)
       TORCHVISION_VERSION="$2"
+      shift 2
+      ;;
+    --transformers-version)
+      TRANSFORMERS_VERSION="$2"
       shift 2
       ;;
     --qwen-model-path)
@@ -155,6 +162,7 @@ $PIP install \
   "torchvision==${TORCHVISION_VERSION}"
 
 log "Installing editable sam3 package with CrispEdit runtime extra"
+$PIP install "transformers==${TRANSFORMERS_VERSION}"
 $PIP install -e '.[crispedit]'
 
 log "Running import verification"
@@ -263,13 +271,17 @@ cat <<'EOF'
 Next steps:
   1) Verify HF auth if needed:
        huggingface-cli whoami
-  2) Inspect the ScaleEdit stages:
+  2) Inspect the CrispEdit stages:
+       python crispedit_mllm_prefilter.py --help
+       python crispedit_grounded_mask_runner.py --help
+  3) Inspect the ScaleEdit stages:
        python scaleedit_mllm_grounding.py --help
        python scaleedit_grounded_mask_runner.py --help
-  3) Run the regression tests:
+  4) Run the regression tests:
        python -m pytest -q
 
 Production docs:
   - README.md
+  - docs/CRISPEDIT_MASK.md
   - docs/SCALEEDIT_MASK.md
 EOF

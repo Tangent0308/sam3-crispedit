@@ -1,7 +1,7 @@
 """Fact-first Qwen3-VL prefilter for CrispEdit-2M.
 
 The current method and production configuration are documented in
-``docs/CRISPEDIT_PREFILTER.md``:
+``docs/CRISPEDIT_MASK.md``:
 
 0. text-only instruction slot extraction;
 1. source-only factual questionnaire;

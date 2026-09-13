@@ -3,7 +3,7 @@
 The vision-language model is deliberately not asked for a keep/drop verdict.  It
 only extracts instruction slots and reports factual observations.  This module
 normalizes those observations and applies the per-edit-type predicates described
-in ``docs/CRISPEDIT_PREFILTER.md``.
+in ``docs/CRISPEDIT_MASK.md``.
 """
 
 from __future__ import annotations
