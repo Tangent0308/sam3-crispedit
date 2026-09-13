@@ -10,6 +10,18 @@ import pyarrow.parquet as pq
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
+from crispedit.mask.pipeline import MASK_POLICY_VERSION as CRISPEDIT_MASK_POLICY_VERSION
+from scaleedit.grounding_runner import (
+    CorruptSampleImageError,
+    GroundingJob,
+    Qwen35ScaleEditGrounder,
+    _decode_sample_images,
+    expand_dense_aggregate_localization_boxes,
+    process_job,
+    refine_text_localization_boxes,
+    refine_surface_localization_boxes,
+    upgrade_global_change_mask_mode,
+)
 from scaleedit.mask_pipeline import (
     _clean_semantic_object_mask,
     _negative_space_from_carrier_mask,
@@ -28,17 +40,8 @@ from scaleedit.policy import (
     parse_bbox_localization,
     parse_observation,
 )
-from scaleedit.grounding_runner import (
-    CorruptSampleImageError,
-    GroundingJob,
-    Qwen35ScaleEditGrounder,
-    _decode_sample_images,
-    expand_dense_aggregate_localization_boxes,
-    process_job,
-    refine_text_localization_boxes,
-    refine_surface_localization_boxes,
-    upgrade_global_change_mask_mode,
-)
+from scaleedit.sam3_backend import MASK_POLICY_VERSION as SCALEEDIT_SAM_BACKEND_VERSION
+from scripts.validate_scaleedit_masks import validate_mask_placeholder
 from scripts.visualize_scaleedit_masks import COARSE_CATEGORY_GROUPS
 
 
@@ -46,6 +49,31 @@ def test_all_scaleedit_tasks_are_explicitly_supported():
     assert len(SUPPORTED_TASKS) == 23
     for task in SUPPORTED_TASKS:
         assert canonical_task(task.replace("_", " ")) == task
+
+
+def test_dataset_specific_sam_policies_remain_isolated():
+    assert CRISPEDIT_MASK_POLICY_VERSION == (
+        "sam3-dual-prompt-region-fusion-v5-surface-aware"
+    )
+    assert SCALEEDIT_SAM_BACKEND_VERSION == (
+        "sam3-dual-prompt-region-fusion-v10-fragment-aware-selection"
+    )
+
+
+def test_validator_accepts_only_well_formed_ground_fail_placeholders():
+    placeholder = {
+        "qc_flag": "GROUND_FAIL",
+        "mask_png": b"",
+        "mask_sum": 0,
+        "mask_height": 0,
+        "mask_width": 0,
+        "instance_masks": [],
+    }
+    assert validate_mask_placeholder(placeholder) == (True, [])
+    placeholder["qc_flag"] = "OK"
+    is_placeholder, errors = validate_mask_placeholder(placeholder)
+    assert is_placeholder
+    assert errors == ["missing mask_png outside GROUND_FAIL"]
 
 
 def test_coarse_review_groups_cover_every_scaleedit_task_once():

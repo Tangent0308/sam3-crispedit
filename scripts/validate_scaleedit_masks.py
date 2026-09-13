@@ -19,6 +19,23 @@ from pycocotools import mask as mask_utils
 from scaleedit.io import decode_image, discover_shards
 
 
+def validate_mask_placeholder(row: dict) -> tuple[bool, list[str]]:
+    """Validate a deliberate no-mask row without asking PIL to decode bytes."""
+
+    if row.get("mask_png"):
+        return False, []
+    errors = []
+    if str(row.get("qc_flag", "")) != "GROUND_FAIL":
+        errors.append("missing mask_png outside GROUND_FAIL")
+    if int(row.get("mask_sum") or 0) != 0:
+        errors.append("missing mask_png with nonzero mask_sum")
+    if int(row.get("mask_height") or 0) != 0 or int(row.get("mask_width") or 0) != 0:
+        errors.append("missing mask_png with nonzero dimensions")
+    if row.get("instance_masks"):
+        errors.append("missing mask_png with instance masks")
+    return True, errors
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=True)
@@ -74,6 +91,19 @@ def main() -> None:
                 errors.append(f"row_idx mismatch {raw_path.name}:{row_idx}")
             sample_ids.append(identity)
             source = decode_image(raw["source_image"])
+            mode = str(json.loads(row["ground_json"]).get("mask_mode", "unresolved"))
+            is_placeholder, placeholder_errors = validate_mask_placeholder(row)
+            if is_placeholder:
+                errors.extend(
+                    f"{message} {raw_path.name}:{position}"
+                    for message in placeholder_errors
+                )
+                areas.append(0.0)
+                flags[str(row["qc_flag"])] += 1
+                sources[str(row["mask_source"])] += 1
+                modes[mode] += 1
+                tasks[str(row["final_task"])] += 1
+                continue
             mask = Image.open(io.BytesIO(row["mask_png"])).convert("L")
             if mask.size != source.size or mask.size != (row["mask_width"], row["mask_height"]):
                 errors.append(f"mask size mismatch {raw_path.name}:{position}")
@@ -85,7 +115,6 @@ def main() -> None:
                 errors.append(f"mask_sum mismatch {raw_path.name}:{position}")
             if not math.isclose(area, float(row["area_frac"]), abs_tol=1e-12):
                 errors.append(f"area_frac mismatch {raw_path.name}:{position}")
-            mode = str(json.loads(row["ground_json"]).get("mask_mode", "unresolved"))
             if mode == "full_image" and mask_sum != pixel_count:
                 errors.append(f"incomplete full_image mask {raw_path.name}:{position}")
             if mode != "full_image" and mask_sum == 0:

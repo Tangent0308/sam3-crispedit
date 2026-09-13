@@ -1,4 +1,4 @@
-# ScaleEdit 当前 mask 标注流程
+# ScaleEdit 完整 mask 打标流程
 
 本文只描述仓库中当前使用的 ScaleEdit 实现。它从已经清洗并带有 `final_task` 的
 source/edited image pair 出发，先用 Qwen3.5-35B-A3B 生成编辑区域合同，再用 SAM3 生成
@@ -16,6 +16,7 @@ bbox 校验或增加独立 SAM3 搜索锚框；不会直接阈值化为最终 ma
 - `scaleedit/policy.py`：planner/locator prompt、严格 JSON 解析和少量确定性任务约束。
 - `scaleedit/grounding_runner.py`：Qwen 多卡调度、两阶段调用和 parquet 输出。
 - `scripts/setup_scaleedit_vllm_env.sh`：从零创建独立的 vLLM/CUDA 12.9 环境。
+- `scaleedit/sam3_backend.py`：从 v18 生产版原样隔离的 SAM3 底层候选与融合实现。
 - `scaleedit/mask_pipeline.py`：SAM/box/full-image/inverse/negative-space 路由及后处理。
 - `scaleedit/mask_runner.py`：SAM3 多卡调度和最终 parquet schema。
 - `scripts/validate_scaleedit_masks.py`：行对齐、PNG、RLE 和统计验证。
@@ -28,8 +29,8 @@ prompt_version = scaleedit_edit_plan_bbox_locator_v18_qwen_native_correspondence
 mask_policy_version = scaleedit_sam3_hybrid_mask_v12_compact_completion
 ```
 
-当前生产数据和结果使用以下固定路径。源数据目录只读；grounding、mask、日志和校验报告只写入
-独立的结果根目录。全量重跑时会先把已有未完成结果改名留档，再在相同结果路径从零创建输出。
+当前生产数据和结果使用以下固定路径。源数据目录只读；grounding、mask 和日志只写入
+独立结果根目录。不要将其与 CrispEdit 的 manifest/grounding 混用。
 
 | 内容 | 路径 |
 | --- | --- |
@@ -38,12 +39,11 @@ mask_policy_version = scaleedit_sam3_hybrid_mask_v12_compact_completion
 | 全量 grounding | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k-vllm-labeled/grounding` |
 | 全量 mask | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k-vllm-labeled/masks` |
 | 全量日志 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k-vllm-labeled/logs` |
-| 全量校验报告 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k-vllm-labeled/validation.json` |
-| v18 Qwen-native 66-case 根目录 | `/tmp/codex-scaleedit-v18-qwen-native-grounding-20260912` |
-| v18 grounding / mask | `/tmp/codex-scaleedit-v18-qwen-native-grounding-20260912/grounding-66`；`/tmp/codex-scaleedit-v18-qwen-native-grounding-20260912/masks-66` |
-| v18 历史 bad case 可视化 | `/tmp/codex-scaleedit-v18-qwen-native-grounding-20260912/visuals-bad-cases` |
-| v18 五大类完整可视化 | `/tmp/codex-scaleedit-v18-qwen-native-grounding-20260912/visuals-66` |
-| v18 校验报告 | `/tmp/codex-scaleedit-v18-qwen-native-grounding-20260912/validation.json` |
+| grounding 运行摘要 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k-vllm-labeled/grounding/run_summary.json` |
+| mask 运行摘要 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k-vllm-labeled/masks/run_summary.json` |
+| 全量运行日志 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k-vllm-labeled/logs/full_pipeline.log` |
+| 仓库内回归校验快照 | `docs_assets/scaleedit/current/validation.json` |
+| 仓库内可视化快照 | `docs_assets/scaleedit/current/key_cases.jpg` 和 `key_cases_page_2.jpg` |
 
 ## 输入数据
 
@@ -402,6 +402,28 @@ SCALEEDIT_SAM3=/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt
 重算，避免 prompt/解析逻辑升级后静默混用。确认需要强制重算当前版本时再增加 `--overwrite`。
 定位单个问题样本时，grounding 支持重复传入 `--sample-id SAMPLE_ID`，无需重跑整个数据集。
 
+## 全量结果
+
+当前 v18 产物与运行摘要均位于上文固定的 `...-vllm-labeled` 根目录。源数据
+100,000 行中有 34 行图像无法解码，grounding 按设计记录后跳过；其余 99,966 行
+均产生了同名 grounding 和 mask 记录，352/352 个 shard 完整对齐，Qwen/SAM3
+worker 退出码全部为 0。
+
+| mask QC | 行数 |
+| --- | ---: |
+| `OK` | 98,853 |
+| `SEMANTIC_QC` | 790 |
+| `GROUND_FAIL` | 212 |
+| `BOX_FALLBACK` | 95 |
+| `AR_MISMATCH` | 12 |
+| `EMPTY_MASK` | 4 |
+
+mask mode 为 regions 81,729、protect_foreground 4,155、full_image 13,880、unresolved 202。
+全量 launcher 最后的验证阶段因 `GROUND_FAIL` 空 `mask_png` 无法被旧 validator 解码而退出 1；
+这不是 grounding 或 SAM3 worker crash。当前 validator 已能识别这种合法的失败占位，
+仍会对 4 条真正的 `EMPTY_MASK` 报告非零校验错误。训练数据发布应继续按
+`qc_flag`、`mask_sum` 和 PNG/RLE 一致性做 fail-closed 筛选。
+
 ## 可视化结果
 
 ### v18 Qwen-native locator 回归（66 条）
@@ -430,18 +452,8 @@ SCALEEDIT_SAM3=/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt
 `[66,378,323,638]` 与 `[663,416,944,651]`；建筑 facade 不再让 Qwen 猜测错误的右侧 residual，
 而由配准差分补出左侧相邻墙面 `[212.5,214.953,447.5,971.963]`。
 
-结果路径：
-
-```text
-/tmp/codex-scaleedit-v18-qwen-native-grounding-20260912/
-├── grounding-66/
-├── masks-66/
-├── visuals-bad-cases/  # 11 个历史问题样本，2 pages
-├── visuals-66/         # 23 task，按五大类共 10 pages
-└── validation.json
-```
-
-仓库保留两张当前方法的重点样本快照。每行依次展示 source 与语义框、edited 与语义框、source 上的
+原始 `/tmp` 回归目录已在完成审计后清理；持久可复现记录是仓库内的两张重点样本快照
+和对应 `validation.json`。每行依次展示 source 与语义框、edited 与语义框、source 上的
 最终 mask overlay 和二值 mask；标题包含 task、路由、mask 来源、QC 与面积比例。
 
 ![ScaleEdit v18 key cases page 1](../docs_assets/scaleedit/current/key_cases.jpg)
@@ -459,8 +471,7 @@ SCALEEDIT_SAM3=/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt
   scripts/validate_scaleedit_masks.py scripts/visualize_scaleedit_masks.py
 ```
 
-当前 66-case 回归的机器校验统计保存在
-`/tmp/codex-scaleedit-v18-qwen-native-grounding-20260912/validation.json`，仓库快照位于
+当前 66-case 回归的机器校验快照位于
 [`docs_assets/scaleedit/current/validation.json`](../docs_assets/scaleedit/current/validation.json)：
 
 | 指标 | 结果 |

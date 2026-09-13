@@ -1,13 +1,58 @@
-# CrispEdit mask 打标
+# CrispEdit-2M 完整打标流程
 
-本文说明 prefilter 后的最终 mask 打标流程。它不使用 pixel diff，而是先由 Qwen3.5 理解
-source/result 中实际发生的编辑并给出保守区域框，再由 SAM3 同时使用 bbox 与指代短语
-生成候选 mask。
+本文是 CrispEdit-2M 的唯一主打标文档，覆盖 fact prefilter、Qwen3.5 grounding、
+SAM3 mask、环境安装、全量命令、生产路径、结果口径和可视化。当前方法不使用
+pixel diff。历史 legacy pipeline 仅用于回归对照，不是生产入口。
 
-本文所述方法及默认参数已经固化为当前生产方案。历史 one-pass、仅放大 bbox、不同
-region fusion 阈值等实验路线不再作为生产入口。
+本汇总分支不会让 CrispEdit 与 ScaleEdit 共享可变的 mask policy：CrispEdit 使用
+`crispedit/mask/pipeline.py` 中的生产版 `sam3-dual-prompt-region-fusion-v5-surface-aware`；
+ScaleEdit v18 依赖的后续实现已原样隔离在 `scaleedit/sam3_backend.py`。
 
-## 流程概览
+## 1. 输入、输出与生产路径
+
+源 parquet 每行使用 `input_img`、`output_img`、`instruction` 和 `type`。三个阶段均保持
+原 shard 文件名和 `row_idx` 对齐；prefilter drop 行在后续阶段保留 `PREFILTER_SKIP`
+占位，不调用 Qwen3.5 或 SAM3。
+
+| 内容 | 路径 |
+| --- | --- |
+| 原始数据 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M` |
+| 新增 100k 输入视图 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-additional-100k-input` |
+| prefilter audit / manifest | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit` / `manifest` |
+| Qwen3.5 grounding | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding` |
+| 最终 mask | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask` |
+| runtime previews | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-previews` |
+| 新增 100k 运行记录 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-run-additional-100k-20260908` |
+| 首批恢复运行记录 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-run-resumed-after-background-audit-20260831` |
+
+## 2. 方法
+
+### 2.1 Fact prefilter
+
+```text
+instruction + source + target
+  -> Step 0: 解析 add/remove/replace/color/motion/background/style 原子目标
+  -> Step 1: source 单图事实
+  -> Step 2: target 单图事实
+  -> 高置信 add/replace no-op fast path
+  -> Step 3: 隐藏 instruction 的成对差异描述
+  -> Step 4: 差异文本与 subgoals 匹配
+  -> Step 5: 预算内边界样本的独立复核
+  -> 确定性谓词 -> PASS / FAIL / UNSURE
+```
+
+Qwen3-VL-8B 只提取存在性、数量、属性、姿态、bbox、主体一致性和无关区域事实，
+不直接输出 keep/drop。代码将证据归一化后检查 `change_happened`、
+`blind_description_matches`、`same_subject`、`composition_preserved`、
+`not_global_regeneration` 和 `unrelated_regions_preserved` 等谓词。映射固定为
+`PASS -> keep`，`FAIL / UNSURE / ERROR -> drop`。
+
+该阶段保留原生 Transformers batch inference，不是 vLLM 阶段。严格模板指令由代码解析；
+重复 instruction 使用 worker 内 LRU cache；只有 remove/color/motion 等小目标依赖
+source-guided target crop。非法 JSON 默认只对失败行追加一次纠错回合，仍失败则
+fail-closed，不终止其他样本。
+
+### 2.2 Grounding 与 mask 概览
 
 ```text
 raw parquet + prefilter manifest
@@ -21,6 +66,13 @@ raw parquet + prefilter manifest
   → density-aware fusion / nearby tiny-region coverage
   → source-coordinate union mask parquet
 ```
+
+调用次数不是每行固定常数。Prefilter 会根据确定性 slot parser、no-op fast path、
+source-guided crop 和边界复核按需执行 Step 1--5；JSON 纠错只重试失败样本。Grounding
+的正常路径是两轮 Qwen3.5：第一轮观察 realized edit，第二轮定位；小 bbox
+会额外使用局部 crop 复核当前 candidate。Style 按既定 full-image 契约直接跳过
+grounding MLLM。vLLM 只替换 Qwen3.5 grounding 的执行后端，prompt、parser、bbox
+策略和 SAM3 后处理不因后端而分叉。
 
 第一轮不输出坐标。instruction 只作为编辑意图，图片对是事实来源；模型需要明确实际修改
 的对象、修改前后外观、空间布局和完整范围。color/material 类型额外提供四组 source/result
@@ -63,7 +115,7 @@ recall-first 扩展。background/style 不使用这一复核，因为 background
 短语；不能使用 change verb、抽象 absence，或把 hand 和 tablet 等不同语义类别混在
 同一个短语中。
 
-## SAM3 候选与融合
+### 2.3 SAM3 候选与融合
 
 对每个 region 同时运行三条路径：
 
@@ -104,15 +156,19 @@ recall-first 扩展。background/style 不使用这一复核，因为 background
 | background change | source 中稳定前景；无稳定前景时显式 full image | NOT(dilated foreground) 或 full image |
 | style | 无需 grounding | full image |
 
-## 代码结构
+## 3. 代码结构
 
 | 文件 | 作用 |
 |---|---|
+| `crispedit/prefilter/policy.py` | 证据归一化、状态转换、确定性谓词与 verdict |
+| `crispedit/prefilter/runner.py` | Qwen3-VL prompts、batch/crop、8 卡调度与 audit/manifest I/O |
+| `crispedit_mllm_prefilter.py` | fact prefilter 生产入口 |
 | `crispedit/mask/grounding.py` | 两轮与小区域复核 prompt、类别路由、bbox 融合、JSON parser 与 region schema |
 | `crispedit/mask/grounding_runner.py` | 8 卡 Qwen3.5 调度、局部复核图、manifest 对齐和 grounding parquet |
-| `crispedit/mask/pipeline.py` | 单样本 SAM3 三路候选、融合、映射和连通区域逻辑 |
+| `crispedit/mask/pipeline.py` | CrispEdit 生产版 SAM3 三路候选、融合、映射和连通区域逻辑 |
 | `crispedit/mask/runner.py` | 8 卡 SAM3 shard 调度、最终 parquet 与逐样本 preview |
 | `crispedit_mllm_grounding.py` / `crispedit_grounded_mask_runner.py` | 稳定的生产命令行入口 |
+| `scripts/setup_crispedit_envs.sh` | 一键创建 prefilter/SAM3 和 Qwen3.5/vLLM 两个隔离环境 |
 | `scripts/export_grounding_outputs.py` | 将模型两轮输出导出为 JSON/JSONL/CSV/Markdown |
 | `scripts/build_category_previews.py` | 从原图重建按类别 review 图，避免放大低清 runtime preview |
 | `scripts/evaluate_grounded_mask_bad_cases.py` | 小批量输出完整性、QC、来源和面积统计 |
@@ -124,18 +180,64 @@ grounding 和最终 mask parquet 都与原始 shard 的 `row_idx` 对齐。最�
 最终 mask 主要字段包括 `ground_json`、`mask_png`、`instance_masks`（含 COCO RLE）、
 `mask_source`、`area_frac`、`qc_flag`、`grounding_status`、模型信息和 prefilter 审计信息。
 
-## 使用方法
+## 4. 环境安装
 
-### 1. 运行 prefilter
+CrispEdit 的两类推理使用隔离环境，避免 SAM3/Transformers 与 vLLM 的 CUDA
+依赖互相覆盖：
 
-先按 [CRISPEDIT_PREFILTER.md](CRISPEDIT_PREFILTER.md) 生成逐 shard 对齐的 manifest。
+- `.venv-crispedit-runtime`：Python 3.11、Torch cu128、Qwen3-VL prefilter 和 SAM3 mask；
+- `.venv-crispedit-vllm`：Python 3.11、CUDA 12.9 vLLM wheel 和 Qwen3.5 grounding。
 
-### 2. 8 卡生成 realized edit 与 region bbox
+一键创建两个新环境：
+
+```bash
+cd /opt/tiger/tanyue/sam3-crispedit
+
+CRISPEDIT_QWEN_MODEL_PATH=/mnt/bn/strategy-mllm-train/common/models/Qwen3-VL-8B-Instruct \
+CRISPEDIT_SAM3_CHECKPOINT_PATH=/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt \
+  bash scripts/setup_crispedit_envs.sh
+```
+
+脚本依赖系统中已安装的 `uv`，并且拒绝覆盖已有环境。自定义安装目录可通过
+`CRISPEDIT_RUNTIME_VENV` 和 `CRISPEDIT_VLLM_VENV` 指定。脚本不下载模型权重，
+只验证用户指定的本地路径。若只需某一个环境，可分别运行
+`scripts/setup_env.sh` 或 `scripts/setup_vllm_env.sh`。
+
+## 5. 完整运行
+
+### 5.1 运行 prefilter
+
+```bash
+CRISPEDIT_DATASET=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
+CRISPEDIT_PREFILTER=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter
+CRISPEDIT_QWEN_VL=/mnt/bn/strategy-mllm-train/common/models/Qwen3-VL-8B-Instruct
+
+mkdir -p "$CRISPEDIT_PREFILTER/audit" "$CRISPEDIT_PREFILTER/manifest"
+
+.venv-crispedit-runtime/bin/python -u crispedit_mllm_prefilter.py \
+  --input-dir "$CRISPEDIT_DATASET" \
+  --audit-dir "$CRISPEDIT_PREFILTER/audit" \
+  --keep-manifest-dir "$CRISPEDIT_PREFILTER/manifest" \
+  --model-path "$CRISPEDIT_QWEN_VL" \
+  --devices 0,1,2,3,4,5,6,7 \
+  --batch-size 16 \
+  --max-new-tokens 512 \
+  --parse-retries 1 \
+  --slot-cache-size 20000 \
+  --confidence-threshold 0.6 \
+  --boundary-review-fraction 0.05 \
+  --progress-mininterval 5
+```
+
+生产全量运行不加 `--fail-fast`，避免单行图像或 JSON 异常中止整个 worker。不加
+`--overwrite` 时，已完成且对齐的 audit+manifest shard 会被跳过。
+
+### 5.2 8 卡生成 realized edit 与 region bbox
 
 Qwen3.5-35B-A3B 使用 vLLM 启动四个 TP=2 replica：
 
 ```bash
-.venv-vllm/bin/python -u crispedit_mllm_grounding.py \
+.venv-crispedit-vllm/bin/python -u crispedit_mllm_grounding.py \
   --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
   --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest \
   --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding \
@@ -173,10 +275,10 @@ bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine
 不加 `--overwrite` 时完整 shard 会被跳过。修改 prompt 或策略后应使用新的输出目录，避免
 把不同策略的 parquet 混在一起。
 
-### 3. 8 卡生成 SAM3 mask
+### 5.3 8 卡生成 SAM3 mask
 
 ```bash
-python -u crispedit_grounded_mask_runner.py \
+.venv-crispedit-runtime/bin/python -u crispedit_grounded_mask_runner.py \
   --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
   --grounding-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding \
   --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask \
@@ -187,15 +289,15 @@ python -u crispedit_grounded_mask_runner.py \
 
 可通过 `CRISPEDIT_SAM3_CHECKPOINT_PATH` 或 `--checkpoint-path` 指定 SAM3 checkpoint。
 
-### 4. 导出可读模型输出和分类预览
+### 5.4 导出可读模型输出和分类预览
 
 ```bash
-python scripts/export_grounding_outputs.py \
+.venv-crispedit-runtime/bin/python scripts/export_grounding_outputs.py \
   --grounding-dir /path/to/grounding \
   --output-dir /path/to/model_outputs \
   --write-json-array
 
-python scripts/build_category_previews.py \
+.venv-crispedit-runtime/bin/python scripts/build_category_previews.py \
   --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
   --mask-dir /path/to/masks \
   --selection-file docs_assets/mask_pipeline/full_run_selection.json \
@@ -207,7 +309,17 @@ python scripts/build_category_previews.py \
   --jpeg-quality 86
 ```
 
-## 全量运行结果
+## 6. 全量运行结果
+
+### Prefilter 概要
+
+2026-08-28 首批 150,421 行中 PASS/keep 42,639，drop 107,782；2026-09-08
+新增 100,000 行中 keep 26,140，drop 73,860。两批合计 keep 68,779。完整 audit
+保存在 fact-prefilter 目录，最终训练口径还需要通过 mask 非空与 QC 条件。
+
+![Prefilter full-run summary](../docs_assets/prefilter/full_run_summary.png)
+
+![Prefilter representative examples](../docs_assets/prefilter/representative_examples.png)
 
 ### 首批 150,421 行
 
@@ -294,8 +406,10 @@ JSON；最后一个 add 的 instruction 声称加回蛋糕切片，但图片对�
 realized edit 冲突后没有得到可用框。23 个 `BOX_FALLBACK` 均为非空矩形兜底，不计为硬
 失败但应优先抽检。
 
-prefilter 另有 617 个 fail-closed ERROR，因此没有进入 grounding；其数量和已定位的 batch
-级局部 crop 根因见 [CRISPEDIT_PREFILTER.md](CRISPEDIT_PREFILTER.md#55-新增-100k-运行)。
+prefilter 另有 617 个 fail-closed ERROR，因此没有进入 grounding；其中 608 条来自
+`[0,1000]` bbox 被局部 crop 当作 `[0,1]` 使用后引发的极端长宽比 batch 失败，
+其余 9 条是一次纠错后仍不合法的 JSON。这些行在当前产物中按 fail-closed drop，
+不应解读为模型已判定数据质量不合格。
 vLLM 断点续跑阶段耗时 1 小时 14 分 43 秒；这是接续已有 grounding shard 的时间，不是从
 空目录重跑 100k 的基准。完整 SAM3 阶段耗时 2 小时 15 分 55 秒。
 
@@ -383,7 +497,7 @@ bbox、source 坐标系 mask overlay 和二值 mask；具体选择记录在
 
 ![full-run style mask](../docs_assets/mask_pipeline/full_run/style.jpg)
 
-## 小批量回归结果
+## 7. 可视化与小批量回归
 
 ### 历史 mask 难例：47 条
 
@@ -442,3 +556,22 @@ bbox、target 与 MLLM bbox、映射到 source 的最终 mask overlay，以及�
 ### Replace
 
 ![replace mask review](../docs_assets/mask_pipeline/replace.jpg)
+
+## 8. 验证与断点续跑
+
+```bash
+.venv-crispedit-runtime/bin/python -m pytest -q \
+  tests/test_crispedit_prefilter_policy.py \
+  tests/test_crispedit_grounded_mask_pipeline.py
+
+.venv-crispedit-runtime/bin/python -m py_compile \
+  crispedit/prefilter/*.py crispedit/mask/*.py crispedit_*.py
+
+bash -n scripts/setup_env.sh scripts/setup_vllm_env.sh \
+  scripts/setup_crispedit_envs.sh
+```
+
+三个 runner 默认会跳过已完成的 shard。只有在 prompt/policy 版本变更或明确要重算时
+才使用 `--overwrite`，并应优先写入新输出目录。对齐验收至少检查：输入/audit/
+manifest/grounding/mask 同名 shard 数，逐 shard 行数，`row_idx`，`PREFILTER_SKIP`，
+`mask_sum > 0` 以及 PNG/RLE 面积一致性。

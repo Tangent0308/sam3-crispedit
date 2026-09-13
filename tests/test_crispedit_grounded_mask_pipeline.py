@@ -12,8 +12,6 @@ from crispedit.mask.pipeline import (
     _aggregate_semantic_connected_coverage,
     _color_surface_sam_prompt,
     _fuse_pcs_prompts,
-    _pcs_mask,
-    _prefer_pcs_candidate,
     _sam_text_prompt,
     annotate_grounded_sample,
     aspect_ratio_delta,
@@ -664,31 +662,6 @@ class _HybridProcessor:
         }
 
 
-class _LowConfidencePVSModel:
-    def predict_inst(self, inference_state, box, multimask_output):
-        masks = np.zeros((1, 100, 100), dtype=np.uint8)
-        masks[0, 18:82, 18:82] = 1
-        return masks, np.asarray([0.15]), np.zeros((1, 1, 1), dtype=np.float32)
-
-
-class _LowConfidenceHybridProcessor(_HybridProcessor):
-    model = _LowConfidencePVSModel()
-
-
-def test_low_confidence_pvs_falls_back_to_semantic_pcs():
-    mask, metadata = segment_grounded_box(
-        _LowConfidenceHybridProcessor(),
-        {},
-        "multiple facial piercings",
-        [200, 200, 800, 800],
-        (100, 100),
-    )
-    assert metadata["mask_source"] == "pcs"
-    assert metadata["pvs_rejection_reason"] == "PVS_LOW_CONFIDENCE"
-    assert metadata["pvs_rejected_predicted_iou"] == 0.15
-    assert mask.sum() == 18
-
-
 def test_sparse_semantic_detail_overrides_enclosing_pvs_without_rectangle():
     mask, metadata = segment_grounded_box(
         _HybridProcessor(), {}, "multiple facial piercings", [200, 200, 800, 800], (100, 100)
@@ -697,112 +670,6 @@ def test_sparse_semantic_detail_overrides_enclosing_pvs_without_rectangle():
     assert metadata["selection_reason"] == "SEMANTIC_DETAIL"
     assert not metadata["coverage_box_union"]
     assert mask.sum() == 18
-
-
-def test_localized_object_uses_initial_anchor_and_wider_internal_search():
-    _, metadata = segment_grounded_box(
-        _HybridProcessor(),
-        {},
-        "yellow plush toy",
-        [100, 100, 900, 900],
-        (100, 100),
-        region_mode="object",
-        mask_density="object",
-        anchor_box_2d=[300, 300, 500, 500],
-    )
-    assert metadata["sam_anchor_bbox_2d"] == [300.0, 300.0, 500.0, 500.0]
-    assert metadata["sam_positive_bbox_2d"] == [300.0, 300.0, 500.0, 500.0]
-    assert metadata["sam_search_expand_frac"] == 0.35
-
-
-def test_pcs_uses_tight_positive_box_inside_wider_containment_window():
-    class Processor:
-        def __init__(self):
-            self.positive_prompt = None
-
-        def reset_all_prompts(self, state):
-            return None
-
-        def set_text_prompt(self, prompt, state):
-            return {}
-
-        def add_geometric_prompt(self, box, label, state):
-            import torch
-
-            self.positive_prompt = box
-            masks = torch.zeros((1, 1, 100, 100), dtype=torch.uint8)
-            masks[0, 0, 40:60, 40:60] = 1
-            return {
-                "masks": masks,
-                "boxes": torch.tensor([[40, 40, 60, 60]]),
-                "scores": torch.tensor([0.9]),
-            }
-
-    processor = Processor()
-    mask, _ = _pcs_mask(
-        processor,
-        {},
-        "white plug",
-        np.asarray([20, 20, 80, 80], dtype=np.float32),
-        (100, 100),
-        use_geometric_prompt=True,
-        geometric_box=np.asarray([40, 40, 60, 60], dtype=np.float32),
-    )
-    np.testing.assert_allclose(processor.positive_prompt, [0.5, 0.5, 0.2, 0.2])
-    assert mask.sum() == 400
-
-
-def test_semantic_pcs_replaces_pvs_that_leaks_to_search_boundary():
-    pvs = np.zeros((100, 100), dtype=np.uint8)
-    pvs[20:90, 20:90] = 1
-    pcs = np.zeros((100, 100), dtype=np.uint8)
-    pcs[22:80, 22:80] = 1
-    use_pcs, reason = _prefer_pcs_candidate(
-        "plush toy",
-        np.asarray([10, 10, 90, 90], dtype=np.float32),
-        pvs,
-        pcs,
-        expanded_object_search=True,
-    )
-    assert use_pcs
-    assert reason == "PVS_SEARCH_BOUNDARY_LEAK"
-
-
-def test_weak_leaky_pvs_does_not_survive_only_because_pcs_disagrees():
-    pvs = np.zeros((100, 100), dtype=np.uint8)
-    pvs[10:35, 10:90] = 1
-    pcs = np.zeros((100, 100), dtype=np.uint8)
-    pcs[50:75, 50:80] = 1
-    use_pcs, reason = _prefer_pcs_candidate(
-        "pair of shoes",
-        np.asarray([10, 10, 90, 90], dtype=np.float32),
-        pvs,
-        pcs,
-        expanded_object_search=True,
-        pvs_predicted_iou=0.55,
-    )
-    assert use_pcs
-    assert reason == "PVS_WEAK_BOUNDARY_LEAK"
-
-
-def test_fragmented_pvs_yields_to_compact_object_pcs():
-    pvs = np.zeros((100, 100), dtype=np.uint8)
-    for offset in range(0, 60, 5):
-        pvs[10 + offset : 12 + offset, 10:70] = 1
-    pcs = np.zeros((100, 100), dtype=np.uint8)
-    pcs[30:60, 30:60] = 1
-    use_pcs, reason = _prefer_pcs_candidate(
-        "pair of shoes",
-        np.asarray([10, 10, 90, 90], dtype=np.float32),
-        pvs,
-        pcs,
-        expanded_object_search=True,
-        pvs_predicted_iou=0.9,
-        pvs_component_count=12,
-        pcs_component_count=2,
-    )
-    assert use_pcs
-    assert reason == "PVS_FRAGMENTED"
 
 
 def test_aggregate_dual_prompt_rejects_dense_enclosing_mask():
