@@ -1,0 +1,58 @@
+{
+  "seed": 20260914,
+  "sample_size_per_set": 12,
+  "sets": {
+    "strict": {
+      "manifest": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-CrispEdit-mask-referential-filter/final/selected_manifest.parquet",
+      "population": 17095,
+      "decision_counts": {
+        "keep": 12,
+        "review": 0
+      },
+      "dataset_counts": {
+        "crispedit": 2,
+        "scaleedit": 10
+      },
+      "sample_ids": [
+        "scaleedit:2.3_object_replacement/object_replacement_0000.parquet#2623",
+        "scaleedit:2.4_action_editing/action_editing_0000.parquet#7752",
+        "scaleedit:2.3_object_replacement/object_replacement_0006.parquet#24160",
+        "crispedit:color_00001.parquet#83",
+        "scaleedit:2.3_object_replacement/object_replacement_0012.parquet#34071",
+        "scaleedit:6.1_compositional_editing/compositional_editing_0000.parquet#5253",
+        "scaleedit:2.4_action_editing/action_editing_0001.parquet#30572",
+        "scaleedit:6.1_compositional_editing/compositional_editing_0000.parquet#23408",
+        "crispedit:motion change_00031.parquet#64",
+        "scaleedit:3.3_visual_beautification/visual_beautification_0000.parquet#6057",
+        "scaleedit:4.4_building_surface_text_editing/building_surface_text_editing_0006.parquet#27205",
+        "scaleedit:2.3_object_replacement/object_replacement_0003.parquet#14563"
+      ]
+    },
+    "loose": {
+      "manifest": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-CrispEdit-mask-referential-filter/final/loose_selected_manifest.parquet",
+      "population": 40384,
+      "decision_counts": {
+        "keep": 4,
+        "review": 8
+      },
+      "dataset_counts": {
+        "crispedit": 4,
+        "scaleedit": 8
+      },
+      "sample_ids": [
+        "scaleedit:4.1_movie_poster_text_editing/movie_poster_text_editing_0007.parquet#11056",
+        "crispedit:remove_01244.parquet#33",
+        "crispedit:remove_01040.parquet#180",
+        "scaleedit:2.3_object_replacement/object_replacement_0000.parquet#20090",
+        "scaleedit:2.2_object_removal/object_removal_0000.parquet#5803",
+        "scaleedit:4.1_movie_poster_text_editing/movie_poster_text_editing_0007.parquet#4094",
+        "scaleedit:2.3_object_replacement/object_replacement_0000.parquet#23421",
+        "scaleedit:2.3_object_replacement/object_replacement_0003.parquet#22909",
+        "crispedit:color_00072.parquet#211",
+        "scaleedit:2.3_object_replacement/object_replacement_0004.parquet#34000",
+        "crispedit:remove_00940.parquet#4",
+        "scaleedit:4.1_movie_poster_text_editing/movie_poster_text_editing_0007.parquet#23448"
+      ]
+    }
+  }
+}

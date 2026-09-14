@@ -193,3 +193,16 @@ for batch in dataset.to_batches(columns=columns, batch_size=32):
 
 也可以只读取某一个子数据集，或通过 `edit_type` 做 Arrow predicate pushdown。训练前应检查
 根目录 `_SUCCESS` 存在，并使用 `manifest.json` 中的最终行数作为数据加载计数基准。
+
+## 7. 下游同类多实例指代筛选
+
+在本统一数据之上完成的同类多实例细粒度指代难度筛选见
+[REFERENTIAL_EDIT_DIFFICULTY_FILTER.md](REFERENTIAL_EDIT_DIFFICULTY_FILTER.md)。2026-09-14
+全量结果从 167,345 条严格 mask 数据中得到 17,095 条严格 `keep`，以及包含 `review` 的
+40,384 条宽松清单；结果路径为：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-CrispEdit-mask-referential-filter
+```
+
+该步骤只读取本统一数据集，不会回写或修改这里的 parquet。
