@@ -50,3 +50,36 @@ manifest 与 ScaleEdit 的输入混用。
 
 最终 ScaleEdit 与 CrispEdit mask 的严格 QC、统一 schema 和自包含训练集导出见
 [UNIFIED_MASK_DATASET.md](docs/UNIFIED_MASK_DATASET.md)。
+
+## 同类多实例指代难度筛选
+
+对统一数据集做“多个同类实例中只编辑一个/真子集”的训练难度筛选：
+
+```bash
+.venv-scaleedit-vllm/bin/python scripts/filter_referential_edits.py --help
+```
+
+流程采用确定性预筛、单次 Qwen3.5 语义判断、SAM3 同类计数、已有 edit mask 覆盖核验，输出
+严格 `keep` 清单和单独的 `review` 清单。完整方法、参数、小批量结果与可视化路径见
+[同类多实例细粒度指代编辑筛选文档](docs/REFERENTIAL_EDIT_DIFFICULTY_FILTER.md)。
+
+全量 8 卡入口：
+
+```bash
+.venv-scaleedit-vllm/bin/python -u scripts/run_referential_filter_full.py supervise
+```
+
+它使用 4 个 vLLM TP=2 worker，完成后自动切换为 8 个单卡 SAM3 worker，并按源 shard
+保存可恢复的中间证据。
+
+运行中可另开终端查看带 elapsed/ETA 的 tqdm 进度条；监视器只读取 checkpoint，不占 GPU：
+
+```bash
+.venv-scaleedit-vllm/bin/python scripts/watch_referential_filter_progress.py
+```
+
+2026-09-14 全量筛选已完成：输入 167,345 条，严格 `keep` 17,095 条，`review`
+23,289 条，宽松集合 `keep + review` 共 40,384 条。生产结果位于
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-CrispEdit-mask-referential-filter`；
+完整统计与固定随机抽样看板见
+[筛选文档的全量结果章节](docs/REFERENTIAL_EDIT_DIFFICULTY_FILTER.md#8-全量结果与随机抽样2026-09-14)。
