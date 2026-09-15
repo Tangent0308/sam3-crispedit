@@ -1105,6 +1105,12 @@ class Qwen35ScaleEditGrounder:
         image_processor = getattr(self.processor, "image_processor", None)
         if image_processor is not None and hasattr(image_processor, "size"):
             image_processor.size.longest_edge = int(self.args.max_pixels)
+        optional_engine_args = {}
+        max_num_seqs = getattr(self.args, "vllm_max_num_seqs", None)
+        if max_num_seqs is not None:
+            optional_engine_args["max_num_seqs"] = int(max_num_seqs)
+        if bool(getattr(self.args, "vllm_enforce_eager", False)):
+            optional_engine_args["enforce_eager"] = True
         self.model = LLM(
             model=self.args.model_path,
             tensor_parallel_size=self.args.tensor_parallel_size,
@@ -1116,6 +1122,7 @@ class Qwen35ScaleEditGrounder:
             limit_mm_per_prompt={"image": 2},
             mm_processor_kwargs={"max_pixels": int(self.args.max_pixels)},
             generation_config="vllm",
+            **optional_engine_args,
         )
         # This is the vLLM equivalent of transformers.generate with
         # do_sample=False and all sampling warpers disabled.
@@ -1167,6 +1174,17 @@ class Qwen35ScaleEditGrounder:
                 ],
             }
         ]
+
+    def _build_observation_prompt(self, final_task: object, instruction: object) -> str:
+        """Return the Round-1 planner prompt.
+
+        Kept as a method so another paired-image dataset can reuse the exact
+        vLLM, retry, locator, and parser implementation while supplying only a
+        dataset-specific planner preamble.  ScaleEdit's default prompt and
+        outputs are unchanged.
+        """
+
+        return build_observation_prompt(final_task, instruction)
 
     @staticmethod
     def _localization_conversation(
@@ -1387,7 +1405,9 @@ class Qwen35ScaleEditGrounder:
     def infer(self, samples: Sequence[Dict]) -> List[Dict]:
         observation_jobs = []
         for sample in samples:
-            prompt = build_observation_prompt(sample["final_task"], sample["instruction"])
+            prompt = self._build_observation_prompt(
+                sample["final_task"], sample["instruction"]
+            )
             conversation = self._conversation(sample["source"], sample["target"], prompt)
             observation_jobs.append((prompt, conversation))
 
