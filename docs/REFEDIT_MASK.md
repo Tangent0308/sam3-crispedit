@@ -268,8 +268,9 @@ REFEDIT_QUALITY_MODEL_PATH
   grounding/      从头运行时生成，只含 prefilter PASS
   masks/          从头运行时生成，只含 prefilter PASS
   logs/
-  audit/latest_visualization_selection_seed20260915.json
-  visualization/prefilter_pass/
+  audit/prefilter_drop_selection_20260915.json
+  audit/mask_pass_selection_seed20260915.json
+  visualization/prefilter_drop/
   visualization/mask_pass/
   final/
     data/         105 个最终 mask Parquet，仅 PASS + mask QC OK
@@ -341,20 +342,32 @@ instruction、尺寸、二值像素、面积及版本：`validation_error_count 
 物化，mask payload 未重新推理。新的标准生产入口则在 grounding 前直接读取 PASS manifest，
 因此从头运行不会再为 10,413 条未通过 prefilter 的样本调用 Qwen3.5 或 SAM3。
 
-## 8. 最新可视化：仅使用 prefilter PASS 样本
+## 8. 最新可视化
 
-固定选择文件：
+### 8.1 Prefilter：只展示 DROP 样本
+
+prefilter 可视化只放被过滤掉的 FAIL/DROP case，不混入 PASS：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/audit/latest_visualization_selection_seed20260915.json
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/audit/prefilter_drop_selection_20260915.json
 ```
 
-共 10 条：五个主要任务各 2 条，均满足 prefilter PASS、mask QC OK、prefilter confidence
-不低于 0.95。以下 prefilter 图每行是 source/target 与质量判断。
+共 10 条，覆盖未完成编辑、错误位置、源图生成瑕疵、target 畸形、无效 no-op、移除残留和
+无关内容变化。包含最初人工指出的 `refedit:11791`、`12395`、`11861`、`9128`、`12761`
+和 `11217`。每行是 source、target、失败维度、reason code 与模型证据。
 
-![RefEdit prefilter PASS examples 1](assets/refedit_prefiltered_20260915/prefilter_pass_page_01.jpg)
+![RefEdit prefilter DROP examples 1](assets/refedit_prefiltered_20260915/prefilter_drop_page_01.jpg)
 
-![RefEdit prefilter PASS examples 2](assets/refedit_prefiltered_20260915/prefilter_pass_page_02.jpg)
+![RefEdit prefilter DROP examples 2](assets/refedit_prefiltered_20260915/prefilter_drop_page_02.jpg)
+
+### 8.2 Mask：只展示进入打标的 PASS 样本
+
+mask 可视化使用另一份选择文件，10 条样本均满足 prefilter PASS、mask QC OK 且 prefilter
+confidence 不低于 0.95：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/audit/mask_pass_selection_seed20260915.json
+```
 
 以下 mask 图每行从左到右是 source + MLLM bbox、target + MLLM bbox、source + final mask、
 binary final mask。
