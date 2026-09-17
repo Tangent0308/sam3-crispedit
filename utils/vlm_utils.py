@@ -65,6 +65,10 @@ def configure_backend(
         "qwen": "qwen3",
         "qwen8b": "qwen3",
         "qwen4b": "qwen4",
+        "qwen8b-vllm": "qwen3_vllm",
+        "qwen8b_vllm": "qwen3_vllm",
+        "qwen4b-vllm": "qwen4_vllm",
+        "qwen4b_vllm": "qwen4_vllm",
     }.get(name, name)
     new_config = _BackendConfig(
         name=name,
@@ -83,6 +87,17 @@ def configure_backend(
             torch.cuda.empty_cache()
 
     _backend_config = new_config
+
+
+def shutdown_backend():
+    """Release a loaded backend, including vLLM's engine subprocess."""
+    global _backend
+    if _backend is not None and hasattr(_backend, "close"):
+        _backend.close()
+    _backend = None
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 class _Qwen3Backend:
@@ -168,6 +183,97 @@ class _Qwen3Backend:
             },
             default_order="xyxy",
         )
+
+
+class _Qwen3VllmBackend:
+    """Qwen3-VL backend using vLLM continuous batching.
+
+    The public ``chat_batch`` contract matches the Hugging Face backend.  PIL
+    images stay in memory, while vLLM handles multimodal preprocessing and
+    schedules the entire audit batch instead of calling ``generate`` once per
+    small Python batch.
+    """
+
+    coordinate_order = "xyxy"
+    grounding_max_new_tokens = 128
+
+    def __init__(
+        self,
+        config: _BackendConfig,
+        default_model_id: str = QWEN3_MODEL_ID,
+    ):
+        from transformers import AutoProcessor
+        from vllm import LLM
+
+        self.model_id = config.model_id or default_model_id
+        self.processor = AutoProcessor.from_pretrained(self.model_id)
+        vllm_dtype = {
+            "bf16": "bfloat16",
+            "fp16": "float16",
+            "fp32": "float32",
+        }.get(config.dtype, config.dtype)
+        self.model = LLM(
+            model=self.model_id,
+            dtype=vllm_dtype,
+            tensor_parallel_size=1,
+            max_model_len=12288,
+            max_num_seqs=16,
+            max_num_batched_tokens=8192,
+            limit_mm_per_prompt={"image": 3},
+            mm_processor_kwargs={
+                "min_pixels": QWEN_MIN_VISUAL_TOKENS
+                * QWEN3_VL_SPATIAL_COMPRESSION
+                * QWEN3_VL_SPATIAL_COMPRESSION,
+                "max_pixels": QWEN_MAX_VISUAL_TOKENS
+                * QWEN3_VL_SPATIAL_COMPRESSION
+                * QWEN3_VL_SPATIAL_COMPRESSION,
+            },
+            enable_prefix_caching=True,
+            gpu_memory_utilization=0.8,
+            seed=0,
+        )
+
+    def chat_batch(self, batch_messages, max_new_tokens=512):
+        from vllm import SamplingParams
+
+        requests = []
+        for messages in batch_messages:
+            images = [
+                item["image"]
+                for message in messages
+                for item in message.get("content", [])
+                if item.get("type") == "image"
+            ]
+            prompt = self.processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            requests.append(
+                {
+                    "prompt": prompt,
+                    "multi_modal_data": {"image": images},
+                }
+            )
+        outputs = self.model.generate(
+            requests,
+            SamplingParams(
+                max_tokens=max_new_tokens,
+                temperature=0.0,
+                seed=0,
+            ),
+            use_tqdm=False,
+        )
+        return [output.outputs[0].text.strip() for output in outputs]
+
+    def close(self):
+        engine = getattr(self.model, "llm_engine", None)
+        client = getattr(engine, "engine_core", None)
+        if client is not None and hasattr(client, "shutdown"):
+            client.shutdown()
+
+    bbox_output_instructions = staticmethod(_Qwen3Backend.bbox_output_instructions)
+    parse_bboxes = staticmethod(_Qwen3Backend.parse_bboxes)
 
 
 class _RegionReasonerBackend:
@@ -675,6 +781,13 @@ def get_backend():
                 _backend_config,
                 default_model_id=QWEN4_MODEL_ID,
             )
+        elif _backend_config.name == "qwen3_vllm":
+            _backend = _Qwen3VllmBackend(_backend_config)
+        elif _backend_config.name == "qwen4_vllm":
+            _backend = _Qwen3VllmBackend(
+                _backend_config,
+                default_model_id=QWEN4_MODEL_ID,
+            )
         elif _backend_config.name == "qwen35":
             _backend = _Qwen35Backend(_backend_config)
         elif _backend_config.name == "regionreasoner":
@@ -682,6 +795,8 @@ def get_backend():
         display_name = {
             "qwen3": "qwen8b",
             "qwen4": "qwen4b",
+            "qwen3_vllm": "qwen8b-vllm",
+            "qwen4_vllm": "qwen4b-vllm",
         }.get(_backend_config.name, _backend_config.name)
         print(
             f"Loaded VLM backend={display_name} "

@@ -228,23 +228,20 @@ def materialize_plan(
     crop_records: list[dict[str, Any]] = []
     provenance_rows: list[dict[str, Any]] = []
     task_counts: Counter[str] = Counter()
-    region_counts: Counter[int] = Counter()
+    source_use_counts: Counter[str] = Counter()
+    case_index = 0
 
-    for case_index, planned in enumerate(tqdm(plan, desc="materialize pilot")):
+    for planned in tqdm(plan, desc="materialize source rows"):
         row_index = int(planned["parquet_row_index"])
         indexed = index_by_row[row_index]
-        selected_regions = planned.get("regions", [])
-        if not 1 <= len(selected_regions) <= 2:
+        edits = planned.get("edits", [])
+        edit_mask_indexes = [int(edit["mask_index"]) for edit in edits]
+        expected_mask_indexes = list(range(int(indexed["num_masks"])))
+        if sorted(edit_mask_indexes) != expected_mask_indexes:
             raise ValueError(
-                f"Row {row_index}: each case must contain one or two regions"
+                f"Row {row_index}: plan mask indexes {sorted(edit_mask_indexes)} "
+                f"must cover every source mask exactly once: {expected_mask_indexes}"
             )
-        for region in selected_regions:
-            mask_index = int(region["mask_index"])
-            if not 0 <= mask_index < indexed["num_masks"]:
-                raise IndexError(
-                    f"Row {row_index}: mask_index {mask_index} is outside "
-                    f"[0, {indexed['num_masks']})"
-                )
 
         embedded = image_bytes_from_cell(image_column[row_index])
         with Image.open(io.BytesIO(embedded)) as handle:
@@ -253,16 +250,13 @@ def materialize_plan(
         canvas_size = qwen_canvas_size(*source_size)
         canvas = original.resize(canvas_size, Image.Resampling.LANCZOS)
 
-        case_name = f"{case_index:02d}_{indexed['source_subset']}_r{row_index}_{planned['name']}"
-        image_name = case_name + ".png"
-        source_path = source_dir / image_name
+        source_name = f"source_{indexed['source_subset']}_r{row_index}.png"
+        source_path = source_dir / source_name
         canvas.save(source_path, format="PNG", optimize=True)
+        source_sha256 = sha256_bytes(source_path.read_bytes())
 
-        case_masks: list[np.ndarray] = []
-        case_rles: list[dict[str, Any]] = []
-        region_metadata: list[dict[str, Any]] = []
-        for region_position, region in enumerate(selected_regions):
-            mask_index = int(region["mask_index"])
+        for edit in edits:
+            mask_index = int(edit["mask_index"])
             raw_rle = indexed["masks"][mask_index]
             decoded = decode_rle(raw_rle)
             expected_shape = (source_size[1], source_size[0])
@@ -274,75 +268,71 @@ def materialize_plan(
             resized = resize_mask(decoded, canvas_size)
             rle = encode_rle(resized)
             bbox = tight_bbox(resized)
-            case_masks.append(resized)
-            case_rles.append(rle)
-            mask_path = mask_dir / f"{case_name}.region{region_position}.png"
+            case_name = (
+                f"{case_index:03d}_{indexed['source_subset']}_r{row_index}_"
+                f"m{mask_index}_{planned['name']}_{edit['name']}"
+            )
+            image_name = case_name + ".png"
+            mask_path = mask_dir / f"{case_name}.mask.png"
             Image.fromarray(resized.astype(np.uint8) * 255).save(mask_path)
+            overlay_masks(canvas, [resized]).save(overlay_dir / image_name)
             crop_records.append(
                 {
-                    "image": f"{case_name}.region{region_position}.png",
+                    "image": f"{case_name}.mask.png",
                     "original_image": image_name,
                     "bbox": bbox,
-                    "refer_object": str(region["refer_object"]),
-                    "new_instruction": str(region["new_instruction"]),
+                    "refer_object": str(edit["refer_object"]),
+                    "new_instruction": str(edit["new_instruction"]),
                     "mask_index": mask_index,
                 }
             )
-            region_metadata.append(
+            annotation = {
+                "image": image_name,
+                "source_image": source_name,
+                "editing_instruction": str(edit["editing_instruction"]),
+                "refer_object": [str(edit["refer_object"])],
+                "mask": [rle],
+                "task_type": str(edit["task_type"]),
+                "source_subset": indexed["source_subset"],
+                "parquet_row_index": row_index,
+                "mask_index": mask_index,
+            }
+            annotations.append(annotation)
+            provenance_rows.append(
                 {
-                    "mask_index": mask_index,
-                    "refer_object": str(region["refer_object"]),
-                    "new_instruction": str(region["new_instruction"]),
+                    **annotation,
+                    "source_parquet": str(parquet_path),
+                    "problem": indexed["problem"],
+                    "answer": indexed["answer"],
+                    "source_width": source_size[0],
+                    "source_height": source_size[1],
+                    "canvas_width": canvas_size[0],
+                    "canvas_height": canvas_size[1],
+                    "embedded_image_sha256": sha256_bytes(embedded),
+                    "canvas_image_sha256": source_sha256,
                     "bbox": bbox,
                     "mask_area_fraction": round(float(resized.mean()), 8),
                     "raw_rle_sha256": sha256_json(raw_rle),
                     "resized_rle": rle,
                 }
             )
-
-        overlay_path = overlay_dir / image_name
-        overlay_masks(canvas, case_masks).save(overlay_path)
-        annotation = {
-            "image": image_name,
-            "editing_instruction": str(planned["editing_instruction"]),
-            "refer_object": [
-                str(region["refer_object"]) for region in selected_regions
-            ],
-            "mask": case_rles,
-            "task_type": str(planned["task_type"]),
-            "source_subset": indexed["source_subset"],
-            "parquet_row_index": row_index,
-        }
-        annotations.append(annotation)
-        provenance_rows.append(
-            {
-                **annotation,
-                "source_parquet": str(parquet_path),
-                "problem": indexed["problem"],
-                "answer": indexed["answer"],
-                "source_width": source_size[0],
-                "source_height": source_size[1],
-                "canvas_width": canvas_size[0],
-                "canvas_height": canvas_size[1],
-                "embedded_image_sha256": sha256_bytes(embedded),
-                "canvas_image_sha256": sha256_bytes(source_path.read_bytes()),
-                "regions": region_metadata,
-            }
-        )
-        task_counts[str(planned["task_type"])] += 1
-        region_counts[len(selected_regions)] += 1
+            task_counts[str(edit["task_type"])] += 1
+            source_use_counts[source_name] += 1
+            case_index += 1
 
     write_jsonl(output_dir / "annotations.jsonl", annotations)
     write_jsonl(crop_dir / "crop_instruction.jsonl", crop_records)
     write_jsonl(output_dir / "provenance.jsonl", provenance_rows)
     elapsed = time.perf_counter() - started
     summary = {
+        "source_rows": len(plan),
+        "unique_source_images": len(source_use_counts),
         "cases": len(annotations),
         "regions": len(crop_records),
         "task_type_counts": dict(sorted(task_counts.items())),
-        "regions_per_case_counts": {
-            str(key): value for key, value in sorted(region_counts.items())
-        },
+        "regions_per_case_counts": {"1": len(annotations)},
+        "source_reuse_counts": dict(sorted(source_use_counts.items())),
+        "all_source_masks_covered": True,
         "image_column_read_seconds": round(image_read_seconds, 3),
         "materialize_wall_seconds": round(elapsed, 3),
         "materialize_cases_per_second": round(len(annotations) / elapsed, 3),

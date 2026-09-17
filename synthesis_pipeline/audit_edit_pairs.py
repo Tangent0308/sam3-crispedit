@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -51,7 +52,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guard-pixels", type=int, default=24)
     parser.add_argument("--max-items", type=int, default=None)
     parser.add_argument(
-        "--vlm", choices=["gemma4", "qwen8b", "qwen4b", "qwen35"], default="qwen8b"
+        "--vlm",
+        choices=[
+            "gemma4",
+            "qwen8b",
+            "qwen4b",
+            "qwen8b-vllm",
+            "qwen4b-vllm",
+            "qwen35",
+        ],
+        default="qwen8b-vllm",
     )
     parser.add_argument("--vlm-model-id", default=None)
     parser.add_argument("--vlm-device", default="cuda:0")
@@ -98,6 +108,7 @@ def input_fingerprint(
         "audit_version": AUDIT_VERSION,
         "audit_prompt": AUDIT_PROMPT,
         "image": row.get("image"),
+        "source_image": row.get("source_image"),
         "editing_instruction": row.get("editing_instruction"),
         "refer_object": row.get("refer_object"),
         "mask": row.get("mask"),
@@ -259,6 +270,7 @@ def quantiles(values: list[float]) -> dict[str, float]:
 
 
 def main() -> None:
+    audit_started = time.perf_counter()
     args = parse_args()
     rows = load_jsonl(args.annotations_jsonl)
     if args.max_items is not None:
@@ -273,9 +285,11 @@ def main() -> None:
     tasks = []
     output_by_image: dict[str, dict[str, Any]] = {}
     reused_cases = 0
+    backend_load_seconds = 0.0
+    inference_seconds = 0.0
     for row in rows:
         image_name = str(row.get("image", ""))
-        source_path = args.source_dir / image_name
+        source_path = args.source_dir / str(row.get("source_image") or image_name)
         edited_path = args.edited_dir / image_name
         fingerprint = input_fingerprint(row, source_path, edited_path, args)
         existing = existing_by_image.get(image_name)
@@ -307,10 +321,14 @@ def main() -> None:
             device=args.vlm_device,
             dtype=args.vlm_dtype,
         )
+        backend_started = time.perf_counter()
+        backend = vlm.get_backend()
+        backend_load_seconds = time.perf_counter() - backend_started
         batch_size = max(1, args.batch_size)
         for start in tqdm(range(0, len(tasks), batch_size), desc="edit-pair audit"):
             batch = tasks[start : start + batch_size]
-            outputs = vlm.get_backend().chat_batch(
+            inference_started = time.perf_counter()
+            outputs = backend.chat_batch(
                 [
                     audit_messages(
                         task["source"], task["overlay"], task["edited"], task["row"]
@@ -319,6 +337,7 @@ def main() -> None:
                 ],
                 max_new_tokens=args.max_new_tokens,
             )
+            inference_seconds += time.perf_counter() - inference_started
             for task, raw in zip(batch, outputs):
                 parsed = parse_json_object(raw)
                 quality = (
@@ -336,6 +355,7 @@ def main() -> None:
                     "raw_response": raw,
                     "input_fingerprint": task["input_fingerprint"],
                 }
+        vlm.shutdown_backend()
 
     output_rows = [output_by_image[str(row.get("image", ""))] for row in rows]
 
@@ -354,6 +374,14 @@ def main() -> None:
         "audited_cases": len(tasks),
         "reused_cases": reused_cases,
         "resume": args.resume,
+        "backend_load_seconds": round(backend_load_seconds, 3),
+        "inference_seconds": round(inference_seconds, 3),
+        "inference_cases_per_minute": (
+            round(len(tasks) / inference_seconds * 60.0, 3)
+            if inference_seconds > 0
+            else 0.0
+        ),
+        "audit_wall_seconds": round(time.perf_counter() - audit_started, 3),
     }
     (args.out_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

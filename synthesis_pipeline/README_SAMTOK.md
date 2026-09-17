@@ -1,47 +1,61 @@
 # SAMTok-derived edit pipeline
 
-## Scope of the first pilot
+## Data policy
 
 - Source: embedded image bytes and COCO RLE masks from
   `mix_gres8k_ver4k_train.parquet`.
-- Eligibility: no candidate-ranking filter yet. A row is retained when it is
-  not `No target` and has at least one non-empty mask record.
-- Edit granularity: one or two regions per case, never more than two.
-- Pilot balance: two cases each of `add`, `remove`, `replace`, and `attribute`;
-  six single-region cases and two dual-region cases.
-- Mask policy: reuse source RLE masks exactly. No SAM/SAM2 mask regeneration.
+- Eligibility: no ranking filter yet. A row is retained when it is not
+  `No target` and has at least one non-empty mask record.
+- One image, many edits: each parquet source image is materialized once. Every
+  source mask creates an independent single-region edit case referencing that
+  shared source through `source_image`.
+- Coverage is strict: a plan must contain every `mask_index` from `0` through
+  `num_masks - 1` exactly once. Missing or duplicate masks fail immediately.
+- Mask policy: source RLE masks are reused exactly; SAM/SAM2 is not run.
 - Editing: Qwen-Image-Edit-2511 with MIRAGE regional branches.
+- Audit: Qwen3-VL-8B through vLLM continuous batching by default, plus
+  deterministic pixel-locality metrics.
 
-The pilot instructions are checked into `pilot_plan.jsonl`. Keeping this first
-plan fixed makes the source/mask/edit smoke test deterministic and separates
-Qwen/MIRAGE behavior from instruction-MLLM variance. Automatic instruction
-generation can write the same plan schema in the next iteration.
+The checked-in `pilot_plan.jsonl` contains eight representative source rows,
+all with two masks. It therefore produces sixteen independent edit cases from
+eight unique source images. Add/remove/replace/attribute each have four cases.
 
-## Prepare a positive index and the pilot
+## Prepare the positive index and pilot
 
 ```bash
 python3 synthesis_pipeline/prepare_samtok_data.py \
   --parquet /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Training_Data/mix_gres8k_ver4k_train.parquet \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1 \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions \
   --plan-jsonl synthesis_pipeline/pilot_plan.jsonl \
   --force-index
 ```
 
-`positive_rows.jsonl` is a 7,671-row index containing provenance and all source
-RLE masks but not duplicated image bytes. It contains no `No target` rows.
-Selected embedded images are decoded on demand and resized to the same
-one-megapixel canvas calculation used by Qwen-Image-Edit; masks are resized with
-nearest-neighbor interpolation and re-encoded as COCO RLE.
+`positive_rows.jsonl` contains 7,671 positive rows with provenance and all
+source masks, but does not duplicate the embedded images. Selected images are
+decoded on demand and resized using the same one-megapixel canvas calculation
+as Qwen-Image-Edit. Masks use nearest-neighbor resize before COCO RLE re-encode.
+
+The relevant manifest fields are:
+
+```json
+{
+  "image": "unique_edit_case_and_output.png",
+  "source_image": "shared_source_gres_r31.png",
+  "mask_index": 0,
+  "mask": [{"size": [896, 1184], "counts": "..."}],
+  "editing_instruction": "..."
+}
+```
 
 ## Edit on eight GPUs
 
 ```bash
 /opt/tiger/tanyue/.venvs/mirage_official/bin/python \
   synthesis_pipeline/run_qwen_edit_pool.py \
-  --image-root /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/sources \
-  --instruction-jsonl /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/annotations.jsonl \
-  --crop-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/crops \
-  --results-full-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/edited \
+  --image-root /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/sources \
+  --instruction-jsonl /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/annotations.jsonl \
+  --crop-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/crops \
+  --results-full-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/edited \
   --model-id Qwen/Qwen-Image-Edit-2511 \
   --gpus 0,1,2,3,4,5,6,7 \
   --python /opt/tiger/tanyue/.venvs/mirage_official/bin/python \
@@ -50,45 +64,69 @@ nearest-neighbor interpolation and re-encoded as COCO RLE.
   --true-cfg-scale 4.0 --guidance-scale 1.0 --seed 0
 ```
 
-The pool uses one persistent model process per GPU and dynamic claims. A fresh
-seeded generator is created for every case, so scheduling order does not change
-the generated image.
+The output name is the edit case id, while the input is resolved from
+`source_image`. The pool retains one model per GPU and dynamically claims cases.
 
-## Audit and visualize
+## Audit with vLLM
 
-The audit code supports both the original polygon annotations and SAMTok COCO
-RLE annotations.
+The vLLM backend supports the same three-image audit prompt and deterministic
+temperature-zero decoding as the Hugging Face backend.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python3 synthesis_pipeline/audit_edit_pairs.py \
-  --annotations-jsonl /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/annotations.jsonl \
-  --source-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/sources \
-  --edited-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/edited \
-  --out-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/audit \
-  --batch-size 2 --vlm qwen8b --vlm-device cuda:0
-
-python3 synthesis_pipeline/build_pilot_gallery.py \
-  --annotations-jsonl /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/annotations.jsonl \
-  --source-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/sources \
-  --overlay-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/overlays \
-  --edited-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/edited \
-  --audit-jsonl /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/audit/edit_audit.jsonl \
-  --out-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v1/gallery
+CUDA_VISIBLE_DEVICES=0 \
+  /opt/tiger/tanyue/.venvs/mirage_official/bin/python \
+  synthesis_pipeline/audit_edit_pairs.py \
+  --annotations-jsonl /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/annotations.jsonl \
+  --source-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/sources \
+  --edited-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/edited \
+  --out-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/audit_vllm \
+  --batch-size 16 --vlm qwen8b-vllm --vlm-device cuda:0
 ```
 
-## Measured pilot speed
+`qwen8b-vllm` is now the default. Use `--vlm qwen8b` only for an HF baseline.
+The script reports backend loading and inference time separately and explicitly
+shuts down the vLLM engine process.
 
-Measured on eight H100 80GB GPUs with eight cases:
+## Visualize
 
-| Stage | Wall time | Observed speed |
+```bash
+python3 synthesis_pipeline/build_pilot_gallery.py \
+  --annotations-jsonl /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/annotations.jsonl \
+  --source-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/sources \
+  --overlay-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/overlays \
+  --edited-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/edited \
+  --audit-jsonl /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/audit_vllm/edit_audit.jsonl \
+  --out-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/gallery
+```
+
+## Measured v2 speed
+
+Measured on eight H100 80GB GPUs for editing and one H100 for audit:
+
+| Stage | Wall time | Throughput |
 |---|---:|---:|
-| Positive index | 0.67 s | 12,337 rows scanned |
-| Read embedded image column | 6.56 s | entire 5.1GB parquet image column |
-| Prepare 8 canvases + 10 RLE regions | 20.42 s total | 0.392 case/s |
-| Qwen/MIRAGE edit pool | 151.17 s | 3.175 case/min |
-| Qwen3-VL audit | 57.50 s | 8.35 case/min |
-| Gallery | 3.2 s | 8 cases |
+| Positive-only index | 0.69 s | 12,337 rows scanned |
+| Prepare 8 sources / 16 masks | 24.90 s | 0.643 edit case/s |
+| Qwen/MIRAGE edit pool | 181.80 s | 5.28 case/min including startup |
+| Qwen3-VL vLLM model load | 41.62 s | one-time per process |
+| Qwen3-VL vLLM inference | 8.69 s | 110.53 case/min |
+| Full vLLM audit | 55.24 s | 17.38 case/min including startup |
 
-Per-case Qwen/MIRAGE inference, excluding model startup, ranged from 68.39 to
-98.21 seconds (median 75.50 seconds). Dual-region cases were the slowest.
+With Qwen-Image-Edit already resident, the second case on each worker took
+64.70--69.00 seconds (mean 66.50), corresponding to about 7.22 case/min over
+eight GPUs.
 
+### vLLM versus Hugging Face audit
+
+The same sixteen cases and the same Qwen3-VL-8B model were audited through both
+backends:
+
+| Backend | Model load | Inference | Inference throughput |
+|---|---:|---:|---:|
+| Hugging Face, batch 2 | 8.11 s | 40.92 s | 23.46 case/min |
+| vLLM, continuous batch 16 | 41.62 s | 8.69 s | 110.53 case/min |
+
+vLLM makes the inference portion 4.71x faster. Its larger cold-start cost means
+very small one-off audits do not benefit, but it is strongly preferable for a
+long-running or large labeling job. All sixteen structured verdicts matched the
+HF backend exactly in this comparison.
