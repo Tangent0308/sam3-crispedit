@@ -27,8 +27,9 @@ The existing environments used for MIRAGE are supported:
 - instruction VLM: `/opt/tiger/tanyue/.venvs/vllm_mirage/bin/python`
 - Qwen image editing: `/opt/tiger/tanyue/.venvs/mirage_official/bin/python`
 
-See `synthesis_pipeline/README_SAMTOK.md` for reproducible commands after the
-pilot implementation is added.
+See [`synthesis_pipeline/README_SAMTOK.md`](synthesis_pipeline/README_SAMTOK.md)
+for the implemented pilot, exact reproduction commands, output schema, and
+measured runtime.
 
 ## Lineage
 
