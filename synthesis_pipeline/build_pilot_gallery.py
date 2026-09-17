@@ -21,8 +21,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overlay-dir", type=Path, required=True)
     parser.add_argument("--edited-dir", type=Path, required=True)
     parser.add_argument("--audit-jsonl", type=Path, default=None)
+    parser.add_argument("--manual-review-jsonl", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--panel-width", type=int, default=360)
+    parser.add_argument(
+        "--page-size",
+        type=int,
+        default=10,
+        help="Number of cases per contact sheet; avoids one oversized image.",
+    )
     return parser.parse_args()
 
 
@@ -79,6 +86,7 @@ def case_sheet(
     overlay: Image.Image,
     edited: Image.Image,
     audit: dict[str, Any] | None,
+    manual_review: dict[str, Any] | None,
     panel_width: int,
 ) -> Image.Image:
     panel_height = round(panel_width * 0.68)
@@ -89,7 +97,7 @@ def case_sheet(
         edited,
         difference_panel(source, edited, row["mask"]),
     ]
-    header_height = 150
+    header_height = 176
     sheet = Image.new("RGB", (panel_width * 4, header_height + panel_height + 36), "white")
     draw = ImageDraw.Draw(sheet)
     title = (
@@ -104,8 +112,14 @@ def case_sheet(
         y += 23
     if audit:
         reason = (audit.get("audit") or {}).get("reason", "")
-        status = f"Audit: {audit.get('quality')} — {reason}"
+        status = f"VLM audit: {audit.get('quality')} — {reason}"
         draw.text((12, 116), status[:180], fill=(120, 30, 20), font=font(16, True))
+    if manual_review:
+        status = (
+            f"Manual review: {manual_review.get('quality')} — "
+            f"{manual_review.get('reason', '')}"
+        )
+        draw.text((12, 140), status[:180], fill=(20, 75, 145), font=font(16, True))
     for index, (label, panel) in enumerate(zip(labels, panels)):
         x = index * panel_width
         sheet.paste(fit(panel, panel_width, panel_height), (x, header_height))
@@ -120,6 +134,11 @@ def main() -> None:
     if args.audit_jsonl and args.audit_jsonl.exists():
         audit_by_image = {
             str(row["image"]): row for row in load_jsonl(args.audit_jsonl)
+        }
+    manual_by_image: dict[str, dict[str, Any]] = {}
+    if args.manual_review_jsonl and args.manual_review_jsonl.exists():
+        manual_by_image = {
+            str(row["image"]): row for row in load_jsonl(args.manual_review_jsonl)
         }
     args.out_dir.mkdir(parents=True, exist_ok=True)
     case_dir = args.out_dir / "cases"
@@ -140,35 +159,52 @@ def main() -> None:
             overlay,
             edited,
             audit_by_image.get(name),
+            manual_by_image.get(name),
             args.panel_width,
         )
         path = case_dir / name.replace(".png", ".jpg")
         sheet.save(path, quality=92)
         sheets.append(sheet)
         audit = audit_by_image.get(name, {})
+        manual = manual_by_image.get(name, {})
         html_rows.append(
             "<section><h2>" + html.escape(name) + "</h2>"
             "<p><b>Instruction:</b> "
             + html.escape(str(row.get("editing_instruction", "")))
             + "</p><p><b>Audit:</b> "
             + html.escape(str(audit.get("quality", "not run")))
+            + "</p><p><b>Manual review:</b> "
+            + html.escape(str(manual.get("quality", "not run")))
+            + " — "
+            + html.escape(str(manual.get("reason", "")))
             + "</p><img src='cases/"
             + html.escape(path.name)
             + "'></section>"
         )
 
     if sheets:
+        if args.page_size <= 0:
+            raise ValueError("--page-size must be positive")
         gap = 12
-        contact = Image.new(
-            "RGB",
-            (max(sheet.width for sheet in sheets), sum(sheet.height for sheet in sheets) + gap * (len(sheets) - 1)),
-            (225, 225, 225),
-        )
-        y = 0
-        for sheet in sheets:
-            contact.paste(sheet, (0, y))
-            y += sheet.height + gap
-        contact.save(args.out_dir / "contact_sheet.jpg", quality=90)
+        for start in range(0, len(sheets), args.page_size):
+            page = sheets[start : start + args.page_size]
+            contact = Image.new(
+                "RGB",
+                (
+                    max(sheet.width for sheet in page),
+                    sum(sheet.height for sheet in page) + gap * (len(page) - 1),
+                ),
+                (225, 225, 225),
+            )
+            y = 0
+            for sheet in page:
+                contact.paste(sheet, (0, y))
+                y += sheet.height + gap
+            end = start + len(page) - 1
+            contact.save(
+                args.out_dir / f"contact_sheet_{start:03d}_{end:03d}.jpg",
+                quality=90,
+            )
     (args.out_dir / "index.html").write_text(
         "<!doctype html><meta charset='utf-8'><title>SAMTok edit pilot</title>"
         "<style>body{font-family:sans-serif;max-width:1500px;margin:auto;background:#eee}"
