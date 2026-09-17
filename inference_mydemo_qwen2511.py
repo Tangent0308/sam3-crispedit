@@ -1,8 +1,10 @@
 import argparse
 import json
 import os
+import socket
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import torch
 from PIL import Image
@@ -51,6 +53,35 @@ def parse_args():
         "--skip-existing",
         action="store_true",
         help="Skip images whose output file already exists.",
+    )
+    parser.add_argument(
+        "--work-queue-dir",
+        default=None,
+        help=(
+            "Optional shared directory for dynamic multi-worker scheduling. "
+            "Every worker receives the same manifest and atomically claims one "
+            "unfinished image at a time."
+        ),
+    )
+    parser.add_argument(
+        "--worker-id",
+        default=None,
+        help="Optional label recorded in dynamic queue claim files.",
+    )
+    parser.add_argument(
+        "--queue-poll-seconds",
+        type=float,
+        default=0.5,
+        help="Polling interval while all unfinished queue items are claimed.",
+    )
+    parser.add_argument(
+        "--claim-timeout-seconds",
+        type=float,
+        default=3600.0,
+        help=(
+            "Reclaim queue entries older than this many seconds. Set to 0 to "
+            "disable stale-claim recovery."
+        ),
     )
 
     parser.add_argument(
@@ -195,6 +226,54 @@ def save_outputs(image_name: str, full_out, results_full_dir: str):
     full_out.save(full_save_path)
 
 
+def infer_one_image(
+    pipe,
+    img_name: str,
+    image_root: str,
+    inst_map: dict,
+    crop_map: dict,
+    results_full_dir: str,
+    num_inference_steps: int,
+    true_cfg_scale: float,
+    guidance_scale: float,
+    negative_prompt: str,
+    generator_device: str,
+    seed: int,
+    patch_ratio: float,
+):
+    full_image_path = os.path.join(image_root, img_name)
+    full_prompt = inst_map[img_name]
+    crop_records = sorted(
+        crop_map[img_name], key=lambda rec: str(rec.get("image") or "")
+    )
+
+    with Image.open(full_image_path) as image:
+        full_image = image.convert("RGB")
+    crop_prompts, bboxes = collect_crop_inputs(crop_records)
+
+    # A fresh per-image generator makes output independent of which worker
+    # claims the image and of the order in which that worker receives jobs.
+    generator = torch.Generator(device=generator_device).manual_seed(seed)
+    infer_start = time.perf_counter()
+    full_out = run_qwen_multi_branch(
+        pipe=pipe,
+        full_image=full_image,
+        full_prompt=full_prompt,
+        crop_prompts=crop_prompts,
+        bboxes=bboxes,
+        num_inference_steps=num_inference_steps,
+        true_cfg_scale=true_cfg_scale,
+        guidance_scale=guidance_scale,
+        negative_prompt=negative_prompt,
+        generator=generator,
+        patch_ratio=patch_ratio,
+    )
+    infer_elapsed = time.perf_counter() - infer_start
+
+    print(f"[Runtime] {img_name} inference: {infer_elapsed:.3f}s")
+    save_outputs(img_name, full_out, results_full_dir)
+
+
 def run_inference_loop(
     pipe,
     image_names: list,
@@ -222,39 +301,140 @@ def run_inference_loop(
         else:
             print(f"\n=== Processing {img_name} ===")
 
-        full_image_path = os.path.join(image_root, img_name)
-        full_prompt = inst_map[img_name]
-        crop_records = sorted(
-            crop_map[img_name], key=lambda rec: str(rec.get("image") or "")
-        )
-
-        with Image.open(full_image_path) as image:
-            full_image = image.convert("RGB")
-        crop_prompts, bboxes = collect_crop_inputs(crop_records)
-
-        generator = torch.Generator(device=generator_device).manual_seed(seed)
-        infer_start = time.perf_counter()
-        full_out = run_qwen_multi_branch(
+        infer_one_image(
             pipe=pipe,
-            full_image=full_image,
-            full_prompt=full_prompt,
-            crop_prompts=crop_prompts,
-            bboxes=bboxes,
+            img_name=img_name,
+            image_root=image_root,
+            inst_map=inst_map,
+            crop_map=crop_map,
+            results_full_dir=results_full_dir,
             num_inference_steps=num_inference_steps,
             true_cfg_scale=true_cfg_scale,
             guidance_scale=guidance_scale,
             negative_prompt=negative_prompt,
-            generator=generator,
+            generator_device=generator_device,
+            seed=seed,
             patch_ratio=patch_ratio,
         )
-        infer_elapsed = time.perf_counter() - infer_start
 
-        print(f"[Runtime] {img_name} inference: {infer_elapsed:.3f}s")
-        save_outputs(img_name, full_out, results_full_dir)
+
+def _try_claim(claim_path: Path, worker_id: str, timeout_seconds: float) -> bool:
+    if timeout_seconds > 0 and claim_path.exists():
+        try:
+            age = time.time() - claim_path.stat().st_mtime
+            if age > timeout_seconds:
+                stale_path = claim_path.with_name(
+                    f"{claim_path.name}.stale-{os.getpid()}-{time.time_ns()}"
+                )
+                try:
+                    os.replace(claim_path, stale_path)
+                    stale_path.unlink(missing_ok=True)
+                    print(f"[Queue] Reclaimed stale claim: {claim_path.name}")
+                except FileNotFoundError:
+                    pass
+        except FileNotFoundError:
+            pass
+
+    try:
+        descriptor = os.open(
+            claim_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o644,
+        )
+    except FileExistsError:
+        return False
+
+    payload = json.dumps(
+        {
+            "worker_id": worker_id,
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "claimed_at": time.time(),
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        os.write(descriptor, payload)
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def run_dynamic_queue(
+    pipe,
+    image_names: list,
+    image_root: str,
+    inst_map: dict,
+    crop_map: dict,
+    results_full_dir: str,
+    work_queue_dir: str,
+    worker_id: str,
+    queue_poll_seconds: float,
+    claim_timeout_seconds: float,
+    num_inference_steps: int,
+    true_cfg_scale: float,
+    guidance_scale: float,
+    negative_prompt: str,
+    generator_device: str,
+    seed: int,
+    patch_ratio: float,
+):
+    queue_dir = Path(work_queue_dir)
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    Path(results_full_dir).mkdir(parents=True, exist_ok=True)
+    poll_seconds = max(0.05, float(queue_poll_seconds))
+    completed_by_worker = 0
+
+    while True:
+        claimed = None
+        pending = 0
+        for img_name in image_names:
+            if (Path(results_full_dir) / img_name).is_file():
+                continue
+            pending += 1
+            claim_path = queue_dir / f"{Path(img_name).name}.claim"
+            if _try_claim(claim_path, worker_id, claim_timeout_seconds):
+                claimed = (img_name, claim_path)
+                break
+
+        if claimed is None:
+            if pending == 0:
+                print(
+                    f"[Queue] Worker {worker_id} finished after "
+                    f"{completed_by_worker} image(s)."
+                )
+                return
+            time.sleep(poll_seconds)
+            continue
+
+        img_name, claim_path = claimed
+        print(f"\n=== [Queue:{worker_id}] Processing {img_name} ===")
+        try:
+            infer_one_image(
+                pipe=pipe,
+                img_name=img_name,
+                image_root=image_root,
+                inst_map=inst_map,
+                crop_map=crop_map,
+                results_full_dir=results_full_dir,
+                num_inference_steps=num_inference_steps,
+                true_cfg_scale=true_cfg_scale,
+                guidance_scale=guidance_scale,
+                negative_prompt=negative_prompt,
+                generator_device=generator_device,
+                seed=seed,
+                patch_ratio=patch_ratio,
+            )
+            completed_by_worker += 1
+        finally:
+            claim_path.unlink(missing_ok=True)
 
 
 def main():
     args = parse_args()
+
+    if args.work_queue_dir and args.image_path:
+        raise ValueError("--work-queue-dir is only supported in batch mode")
 
     if args.image_path:
         inst_map = {os.path.basename(args.image_path): args.instruction}
@@ -278,25 +458,48 @@ def main():
         image_names = [os.path.basename(args.image_path)]
     else:
         image_root = args.image_root
-        image_names = sorted(crop_map.keys())
-        print(f"Found {len(image_names)} images with crop records.")
+        missing_crop_records = sorted(set(inst_map) - set(crop_map))
+        if missing_crop_records:
+            raise ValueError(
+                "Missing crop records for instruction images: "
+                + ", ".join(missing_crop_records[:10])
+            )
+        # The instruction manifest is authoritative.  crop_map can be a shared
+        # full-dataset file while instruction_jsonl is a GPU shard; iterating
+        # crop_map here would make every shard process the full dataset and
+        # eventually index a prompt that is absent from its inst_map.
+        image_names = sorted(inst_map.keys())
+        print(f"Found {len(image_names)} instruction images with crop records.")
 
-    run_inference_loop(
-        pipe=pipeline,
-        image_names=image_names,
-        image_root=image_root,
-        inst_map=inst_map,
-        crop_map=crop_map,
-        results_full_dir=args.results_full_dir,
-        num_inference_steps=args.num_steps,
-        true_cfg_scale=args.true_cfg_scale,
-        guidance_scale=args.guidance_scale,
-        negative_prompt=args.negative_prompt,
-        generator_device=generator_device,
-        seed=args.seed,
-        patch_ratio=args.patch_ratio,
-        skip_existing=args.skip_existing,
-    )
+    common_kwargs = {
+        "pipe": pipeline,
+        "image_names": image_names,
+        "image_root": image_root,
+        "inst_map": inst_map,
+        "crop_map": crop_map,
+        "results_full_dir": args.results_full_dir,
+        "num_inference_steps": args.num_steps,
+        "true_cfg_scale": args.true_cfg_scale,
+        "guidance_scale": args.guidance_scale,
+        "negative_prompt": args.negative_prompt,
+        "generator_device": generator_device,
+        "seed": args.seed,
+        "patch_ratio": args.patch_ratio,
+    }
+    if args.work_queue_dir:
+        worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
+        run_dynamic_queue(
+            **common_kwargs,
+            work_queue_dir=args.work_queue_dir,
+            worker_id=worker_id,
+            queue_poll_seconds=args.queue_poll_seconds,
+            claim_timeout_seconds=args.claim_timeout_seconds,
+        )
+    else:
+        run_inference_loop(
+            **common_kwargs,
+            skip_existing=args.skip_existing,
+        )
 
 
 if __name__ == "__main__":
