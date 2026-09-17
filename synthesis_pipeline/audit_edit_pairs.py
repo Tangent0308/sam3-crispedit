@@ -14,6 +14,7 @@ from typing import Any, Iterable, Optional
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
+from pycocotools import mask as mask_utils
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -148,11 +149,39 @@ def normalize_polygons(value: Any) -> list[list[float]]:
     ]
 
 
+def decode_coco_rle(value: Any) -> Optional[np.ndarray]:
+    if not isinstance(value, dict) or "counts" not in value or "size" not in value:
+        return None
+    rle = {"counts": value["counts"], "size": value["size"]}
+    if isinstance(rle["counts"], str):
+        rle["counts"] = rle["counts"].encode("ascii")
+    decoded = mask_utils.decode(rle)
+    if decoded.ndim == 3:
+        decoded = np.any(decoded, axis=2)
+    return decoded.astype(bool)
+
+
 def mask_array(size: tuple[int, int], masks: Any) -> np.ndarray:
+    values = masks if isinstance(masks, list) else [masks]
+    rle_canvas = np.zeros((size[1], size[0]), dtype=bool)
+    found_rle = False
+    for value in values:
+        decoded = decode_coco_rle(value)
+        if decoded is None:
+            continue
+        found_rle = True
+        if decoded.shape != rle_canvas.shape:
+            decoded = cv2.resize(
+                decoded.astype(np.uint8), size, interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+        rle_canvas |= decoded
+    if found_rle:
+        return rle_canvas
+
     canvas = Image.new("L", size, 0)
     draw = ImageDraw.Draw(canvas)
-    if isinstance(masks, list):
-        for mask in masks:
+    if isinstance(values, list):
+        for mask in values:
             for polygon in normalize_polygons(mask):
                 draw.polygon(list(zip(polygon[0::2], polygon[1::2])), fill=255)
     return np.asarray(canvas, dtype=np.uint8) > 0
