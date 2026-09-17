@@ -32,6 +32,10 @@ See [`synthesis_pipeline/README_SAMTOK.md`](synthesis_pipeline/README_SAMTOK.md)
 for the implemented pilot, exact reproduction commands, output schema, and
 measured runtime.
 
+The full design rationale, task taxonomy, quality rubric, 100-case pilot
+commands, and measured results are documented in
+[`docs/SAMTOK_DERIVED_EDIT_PIPELINE.md`](docs/SAMTOK_DERIVED_EDIT_PIPELINE.md).
+
 ## Lineage
 
 The branch starts from MIRAGE commit `50a5df5` and retains its history. MIRAGE

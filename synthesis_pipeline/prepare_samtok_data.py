@@ -138,12 +138,29 @@ def build_positive_index(
 
 
 def qwen_canvas_size(width: int, height: int) -> tuple[int, int]:
-    ratio = width / height
-    target_width = math.sqrt(QWEN_TARGET_AREA * ratio)
-    target_height = target_width / ratio
-    target_width = round(target_width / CANVAS_MULTIPLE) * CANVAS_MULTIPLE
-    target_height = round(target_height / CANVAS_MULTIPLE) * CANVAS_MULTIPLE
-    return int(target_width), int(target_height)
+    """Return a fixed point of Qwen's rounded one-megapixel resize.
+
+    The model recomputes its canvas from the input's *rounded* aspect ratio.
+    Around a 32-pixel rounding boundary, applying the formula only once can
+    therefore make a prepared 864x1248 image become 864x1216 inside Qwen.  A
+    second application is stable and keeps source, RLE, crop boxes, and output
+    pixels aligned.
+    """
+    current_width, current_height = int(width), int(height)
+    for _ in range(4):
+        ratio = current_width / current_height
+        target_width = math.sqrt(QWEN_TARGET_AREA * ratio)
+        target_height = target_width / ratio
+        next_width = round(target_width / CANVAS_MULTIPLE) * CANVAS_MULTIPLE
+        next_height = round(target_height / CANVAS_MULTIPLE) * CANVAS_MULTIPLE
+        next_size = (int(next_width), int(next_height))
+        if next_size == (current_width, current_height):
+            return next_size
+        current_width, current_height = next_size
+    raise RuntimeError(
+        f"Qwen canvas size did not converge from {(width, height)}: "
+        f"{(current_width, current_height)}"
+    )
 
 
 def decode_rle(rle: dict[str, Any]) -> np.ndarray:

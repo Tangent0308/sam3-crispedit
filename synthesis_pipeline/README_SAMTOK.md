@@ -1,5 +1,10 @@
 # SAMTok-derived edit pipeline
 
+For the detailed Chinese design document, including the task taxonomy,
+instruction-generation safeguards, per-case manual review policy, and the
+100-case pilot, see
+[`../docs/SAMTOK_DERIVED_EDIT_PIPELINE.md`](../docs/SAMTOK_DERIVED_EDIT_PIPELINE.md).
+
 ## Data policy
 
 - Source: embedded image bytes and COCO RLE masks from
@@ -19,6 +24,12 @@
 The checked-in `pilot_plan.jsonl` contains eight representative source rows,
 all with two masks. It therefore produces sixteen independent edit cases from
 eight unique source images. Add/remove/replace/attribute each have four cases.
+
+The newer stratified 100-case pilot is generated with
+`generate_samtok_plan.py`: 50 two-mask sources yield 100 single-region cases,
+GRES/VER and the four edit types are balanced. Its strict 100/100 manual review
+found 72 pass, 7 review, and 21 fail; see the detailed design document for the
+per-type breakdown, failure analysis, and artifact paths.
 
 ## Prepare the positive index and pilot
 
