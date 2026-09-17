@@ -1,203 +1,39 @@
-# MIRAGE: Benchmarking and Aligning Multi-Instance Image Editing
-[Ziqian Liu](https://scholar.google.com/citations?view_op=list_works&hl=en&user=_1FGL3UAAAAJ) and [Stephan Alaniz](https://scholar.google.com/citations?user=mzZa_yQAAAAJ&hl=en&oi=ao)
+# SAMTok-derived fine-grained edit labeling
 
-[![arXiv](https://img.shields.io/badge/arXiv-Paper-b31b1b?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2604.05180)
-[![dataset](https://img.shields.io/badge/🤗%20HuggingFace-Dataset-yellow)](https://huggingface.co/datasets/ziqiangoodgood/MIRAGE)
+This branch derives localized image-editing pairs from the existing SAMTok
+GRES-8k and VER-4k training data. It reuses MIRAGE's regional Qwen-Image-Edit
+implementation and its Git history, while removing MIRAGE benchmark-generation
+and evaluation code that is unrelated to SAMTok labeling.
 
-> **Abstract:** *Instruction-guided image editing has seen remarkable progress with models like FLUX.2 and Qwen-Image-Edit, yet they still struggle with complex scenarios involving multiple similar instances, each requiring individual edits. We observe that state-of-the-art models suffer from severe over-editing and spatial misalignment when faced with multiple identical instances and composite instructions. To address this, we introduce a comprehensive benchmark specifically designed to evaluate fine-grained consistency in multi-instance and multi-instruction settings. We further propose Multi-Instance Regional Alignment via Guided Editing (MIRAGE), a training-free framework for precise, localized editing. By leveraging a vision-language model to decompose complex instructions into region-specific subsets, MIRAGE employs a multi-branch parallel denoising strategy that injects target-region latents into the global representation while preserving background integrity through a reference trajectory. Extensive evaluations on MIRAGE-Bench and RefEdit-Bench demonstrate that our framework significantly outperforms existing methods in achieving precise instance-level modifications while maintaining strong background consistency.*
+The data flow is:
 
-![overview](jpg/mybench_qualitative.jpg)
-**Fig. 1: Example images and instructions involving multiple similar instances and compositional edits.** Such scenarios are challenging for state-of-the-art models, which often introduce unintended modifications. In contrast, MIRAGE achieves precise instance-level editing while preserving background consistency.
+1. Read the canonical SAMTok parquet and build a positive-only index. Rows whose
+   answer is `No target` are excluded.
+2. Decode selected source images from the embedded parquet bytes and retain the
+   original COCO RLE instance masks.
+3. Generate one- or two-region editing instructions from the source plus mask
+   overlays.
+4. Run Qwen-Image-Edit-2511 with MIRAGE regional latent composition.
+5. Audit localization/background preservation and export a comparison gallery.
 
-# Benchmark Access
-We release **MIRAGE-Bench**, which can be downloaded on [Huggingface](https://huggingface.co/datasets/ziqiangoodgood/MIRAGE) or [Google Drive](https://drive.google.com/file/d/1VK8Vu7Vdw35GWb7IapZLFSugoJTblTDx/view?usp=sharing) directly. The benchmark contains 100 samples, each consisting of an image, a composite editing instruction formed by combining five sub-instructions, and the corresponding ground-truth mask. This benchmark is designed to evaluate image editing models in more complex referring-expression scenarios. 
+Pilot data and full-run artifacts are intentionally stored outside Git under
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/`.
 
-Notably, the entire **MIRAGE-Bench** is constructed based on our proposed [Automatic Image Synthesis Pipeline](#2-Automatic-Image-Synthesis-Pipeline).
+## Environment
 
-![benchmark](jpg/benchmark_example.jpg)
-**Fig. 2: MIRAGE-bench sample examples.** The first row shows the synthesized original images, the second row presents the corresponding ground-truth (GT) masks of the target regions, and the third row displays the editing instructions constructed based on the generated image semantics and the source prompts.
+The existing environments used for MIRAGE are supported:
 
-# 1. Requirements
-Install the required dependencies:
-```bash
-conda create -n mirage python=3.12 -y
-conda activate mirage
-pip install -r requirements.txt
-```
+- data preparation: `/usr/bin/python3`
+- instruction VLM: `/opt/tiger/tanyue/.venvs/vllm_mirage/bin/python`
+- Qwen image editing: `/opt/tiger/tanyue/.venvs/mirage_official/bin/python`
 
-Don't forget to log in to your Hugging Face account to get model access:
-```bash
-echo 'export HF_TOKEN=xxx' >> ~/.bashrc
-source ~/.bashrc
-```
+See `synthesis_pipeline/README_SAMTOK.md` for reproducible commands after the
+pilot implementation is added.
 
-## Quick Start
-To quickly try MIRAGE, you can run the following commands directly. The benchmark will be automatically downloaded from Hugging Face, so no manual setup is required.
+## Lineage
 
-```bash
-# FLUX.2 [klein]-9B + MIRAGE
-python quick_start.py \
-  --model flux2_klein9b \
-  --results-full-dir results/flux2_klein9B \
-  --patch-ratio 0.2
+The branch starts from MIRAGE commit `50a5df5` and retains its history. MIRAGE
+is described in:
 
-# FLUX.2 [Dev] + MIRAGE (If GPU memory is insufficient, you can enable CPU offloading by adding `--cpu-offload model` or even `--cpu-offload sequential`)
-python quick_start.py \
-  --model flux2_dev \
-  --results-full-dir results/flux2_dev \
-  --patch-ratio 0.2
-
-# Qwen-Image-Edit-2511 + MIRAGE (If GPU memory is insufficient, you can enable CPU offloading by adding `--cpu-offload model` or even `--cpu-offload sequential`)
-python quick_start.py \
-  --model qwen2511 \
-  --results-full-dir results/qwen2511 \
-  --patch-ratio 0.2
-```
-
-# 2. Automatic Image Synthesis Pipeline
-We provide a fully automated pipeline for generating image with multiple similar instances and composite editing instructions. If you need, please run the following commands in sequence to obtain a complete synthesized dataset.
-
-Alternatively, you can directly download the benchmark from the [link](#benchmark-access) above and proceed to [Base model + MIRAGE](#32-base-model--mirage) for inference, or simply follow the [Quick Start](#quick-start) instructions above without running the **Automatic Image Synthesis Pipeline**.
-
-```bash
-## 2.1 Image Description Generation
-python synthesis_pipeline/generate_source_prompts_batch_pairs.py \
-  --pair-template synthesis_pipeline/prompt_template/image_description/prompt_pair_batch.txt \
-  --generator-template synthesis_pipeline/prompt_template/image_description/prompt_draft_generator.txt \
-  --judge-template synthesis_pipeline/prompt_template/image_description/prompt_judge.txt \
-  --out synthesis_pipeline/source_prompts.jsonl \
-  --num-samples 200
-
-## 2.2 Image Generation (If GPU memory is insufficient, you can enable CPU offloading by adding `--cpu-offload model` or even `--cpu-offload sequential`)
-python synthesis_pipeline/flux_t2i_generate.py \
-  --jsonl synthesis_pipeline/source_prompts.jsonl \
-  --results-dir benchmark \
-  --batch-size 2
-
-## 2.3 Editing Instruction Generation
-python synthesis_pipeline/generate_instruction_refer.py \
-  --image-dir benchmark \
-  --jsonl synthesis_pipeline/source_prompts.jsonl \
-  --out-jsonl benchmark/annotations.jsonl \
-  --slot-template synthesis_pipeline/prompt_template/instruction/repeated_slot_plan.txt \
-  --generator-template synthesis_pipeline/prompt_template/instruction/instruction_generate.txt \
-  --extractor-template synthesis_pipeline/prompt_template/instruction/refer_extract.txt
-
-## 2.4 Mask Generation
-python synthesis_pipeline/generate_bbox_mask.py \
-  --image-dir benchmark \
-  --jsonl benchmark/annotations.jsonl \
-  --vis-dir benchmark/bbox_mask_vis
-```
-
-# 3. Inference
-We provide MIRAGE integration pipelines for multiple base image editing models.
-
-## 3.1 Target Localization
-Before running inference, first obtain cropped regions corresponding to the target objects:
-
-```bash
-python crop_image.py \
-  --image-root benchmark \
-  --instruction-jsonl benchmark/annotations.jsonl \
-  --output-dir benchmark/crops \
-  --out-jsonl benchmark/crops/crop_instruction.jsonl \
-  --batch-size 2
-```
-
-## 3.2 Base model + MIRAGE
-Run MIRAGE on different base models:
-```bash
-# FLUX.2[klein]-9B + MIRAGE
-python inference_mydemo_flux2_klein9B.py \
-  --image-root benchmark \
-  --instruction-jsonl benchmark/annotations.jsonl \
-  --crop-dir benchmark/crops \
-  --results-full-dir results/flux2_klein9B \
-  --patch-ratio 0.2
-```
-
-```bash
-# Flux.2[Dev] + MIRAGE (If GPU memory is insufficient, you can enable CPU offloading by adding `--cpu-offload model` or even `--cpu-offload sequential`)
-python inference_mydemo_flux2_dev.py \
-  --image-root benchmark \
-  --instruction-jsonl benchmark/annotations.jsonl \
-  --crop-dir benchmark/crops \
-  --results-full-dir results/flux2_dev \
-  --patch-ratio 0.2
-```
-
-```bash
-# Qwen-Image-Edit-2511 + MIRAGE (If GPU memory is insufficient, you can enable CPU offloading by adding `--cpu-offload model` or even `--cpu-offload sequential`)
-python inference_mydemo_qwen2511.py \
-  --image-root benchmark \
-  --instruction-jsonl benchmark/annotations.jsonl \
-  --crop-dir benchmark/crops \
-  --results-full-dir results/qwen2511 \
-  --patch-ratio 0.2
-```
-
-# 4. Evaluation
-## LLM-based Metrics
-**PF** and **Cons** are computed using a local open-source Qwen model, while **PQ** is evaluated using the GPT API.
-```bash
-# PF, Cons, PQ
-python metrics/EditScore/evaluation.py \
-  --annotations-jsonl benchmark/annotations.jsonl \
-  --crop-instruction-jsonl benchmark/crops/crop_instruction.jsonl \
-  --input-image-root benchmark \
-  --edited-image-root results/your_results \
-  --result-dir metrics/results/LLM/your_results \
-  --sc-model-name-or-path Qwen/Qwen3-VL-8B-Instruct \
-  --sc-lora-path EditScore/EditScore-Qwen3-VL-8B-Instruct \
-  --pq-model-name-or-path gpt-5.1 \
-  --pq-key YOUR_OPENAI_API_KEY \
-  --num-pass 3
-```
-
-## Traditional Metrics
-Compute pixel-level similarity metrics:
-
-```bash
-# MSE, LPIPS, PSNR...
-python metrics/traditional/evalaute_traditional.py \
-  --annotation_mapping_file benchmark/annotations.jsonl \
-  --src_image_folder benchmark \
-  --crop-instruction-jsonl benchmark/crops/crop_instruction.jsonl \
-  --tgt_method results/your_results \
-  --result_path metrics/results/traditional/your_results/metric_summary.csv
-```
-
-# Citation
-If you use this code or the benchmark in your research, please cite our paper:
-```
-@misc{liu2026miragebenchmarkingaligningmultiinstance,
-      title={MIRAGE: Benchmarking and Aligning Multi-Instance Image Editing}, 
-      author={Ziqian Liu and Stephan Alaniz},
-      year={2026},
-      eprint={2604.05180},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2604.05180}, 
-}
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+> Ziqian Liu and Stephan Alaniz, *MIRAGE: Benchmarking and Aligning
+> Multi-Instance Image Editing*, 2026.

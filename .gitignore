@@ -1,12 +1,16 @@
 __pycache__/
 *.py[cod]
 .env
+.venv/
+.venv-*/
 .DS_Store
 .vscode/
 .idea/
 **/results*/
 **/outputs/
 reports/
+work/
+logs/
 tests/
 test_*.py
 *_test.py
