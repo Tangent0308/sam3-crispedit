@@ -166,7 +166,7 @@ def load_instruction_map(jsonl_path: str):
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
             rec = json.loads(line)
-            mapping[rec["image"]] = rec["editing_instruction"]
+            mapping[rec["image"]] = rec
     return mapping
 
 
@@ -241,8 +241,14 @@ def infer_one_image(
     seed: int,
     patch_ratio: float,
 ):
-    full_image_path = os.path.join(image_root, img_name)
-    full_prompt = inst_map[img_name]
+    instruction_record = inst_map[img_name]
+    if isinstance(instruction_record, str):
+        source_image_name = img_name
+        full_prompt = instruction_record
+    else:
+        source_image_name = str(instruction_record.get("source_image") or img_name)
+        full_prompt = str(instruction_record["editing_instruction"])
+    full_image_path = os.path.join(image_root, source_image_name)
     crop_records = sorted(
         crop_map[img_name], key=lambda rec: str(rec.get("image") or "")
     )

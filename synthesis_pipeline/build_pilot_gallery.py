@@ -128,7 +128,7 @@ def main() -> None:
     html_rows = []
     for row in rows:
         name = str(row["image"])
-        with Image.open(args.source_dir / name) as handle:
+        with Image.open(args.source_dir / str(row.get("source_image") or name)) as handle:
             source = handle.convert("RGB")
         with Image.open(args.overlay_dir / name) as handle:
             overlay = handle.convert("RGB")

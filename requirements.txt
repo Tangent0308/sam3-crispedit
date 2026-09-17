@@ -10,3 +10,4 @@ torch>=2.7
 torchvision>=0.22
 tqdm>=4.67
 transformers>=4.57
+vllm==0.11.0

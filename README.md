@@ -11,10 +11,11 @@ The data flow is:
    answer is `No target` are excluded.
 2. Decode selected source images from the embedded parquet bytes and retain the
    original COCO RLE instance masks.
-3. Generate one- or two-region editing instructions from the source plus mask
-   overlays.
+3. Reuse each source image for every annotated mask and generate one independent
+   regional edit case per mask.
 4. Run Qwen-Image-Edit-2511 with MIRAGE regional latent composition.
-5. Audit localization/background preservation and export a comparison gallery.
+5. Audit localization/background preservation with batched Qwen3-VL vLLM and
+   export a comparison gallery.
 
 Pilot data and full-run artifacts are intentionally stored outside Git under
 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/`.
