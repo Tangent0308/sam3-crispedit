@@ -92,12 +92,35 @@ def region_write_weight(
     margin: int,
     device,
     dtype,
+    region_masks=None,
 ) -> torch.Tensor:
-    """Build a linear write-weight ramp around the union of region boxes."""
+    """Build a feathered write map from exact masks or fallback region boxes.
+
+    ``region_masks`` is aligned with ``latent_bboxes``. A non-null entry is a
+    full-image binary mask and is resized to the latent grid; a null entry keeps
+    the historical bbox behavior (needed by add edits whose mask is an anchor).
+    """
     latent_height, latent_width = latent_hw
     weight = torch.zeros(1, 1, latent_height, latent_width, dtype=torch.float32, device=device)
-    for y1, y2, x1, x2 in latent_bboxes:
-        weight[..., y1:y2, x1:x2] = 1.0
+    masks = list(region_masks) if region_masks is not None else []
+    for index, (y1, y2, x1, x2) in enumerate(latent_bboxes):
+        region_mask = masks[index] if index < len(masks) else None
+        if region_mask is None:
+            weight[..., y1:y2, x1:x2] = 1.0
+            continue
+        mask_tensor = torch.as_tensor(
+            region_mask, device=device, dtype=torch.float32
+        )
+        if mask_tensor.ndim != 2:
+            raise ValueError(
+                f"Expected a 2D region mask, got {tuple(mask_tensor.shape)}"
+            )
+        mask_tensor = torch.nn.functional.interpolate(
+            mask_tensor[None, None],
+            size=(latent_height, latent_width),
+            mode="nearest",
+        )
+        weight = torch.maximum(weight, (mask_tensor > 0.5).to(weight.dtype))
 
     if margin > 0:
         dilated = weight

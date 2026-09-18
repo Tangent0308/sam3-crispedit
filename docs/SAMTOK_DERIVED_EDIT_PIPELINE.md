@@ -10,7 +10,8 @@ GRES-8k/VER-4k 的原图与实例 mask，构造具有定位难度的单区域图
 每个原始 region 独立生成一条 case。这样既保留同图中其他实例作为干扰项，
 也避免一次编辑 5 个区域带来的任务纠缠。当前实现遵循以下硬约束：
 
-- 仅排除答案为 `No target` 或没有有效 mask 的行，不做生产级候选过滤。
+- positive index 仅排除答案为 `No target` 或没有有效 mask 的行；规划阶段另做
+  mask--instruction 兼容性过滤，不把不适合指定 edit type 的 region 送入生成。
 - source image 只物化一次，通过 `source_image` 被多条 case 共享。
 - 选中 source 的所有 mask 必须各出现一次，缺失或重复会直接报错。
 - 每条 case 恰好一个 region，不超过用户要求的双 region 上限。
@@ -86,53 +87,36 @@ SAMTok parquet
 
 ### 4.2 自动采样与指令生成
 
-`generate_samtok_plan.py` 以固定 seed 采样，并给 Qwen3-VL-8B-Instruct 同时提供：
+`generate_samtok_plan.py` 以固定 seed 过采样候选，并给 Qwen3-VL-8B-Instruct
+提供三张无标注色视觉输入：单独放大的 clean target cutout、包含 clean context/cutout/
+binary mask 的定位 panel，以及 clean source 全图。只有 cutout 定义可编辑对象，全图只
+用于场景和同类实例关系。SAMTok 原始 question/answer 往往同时描述两个 mask，曾导致
+planner 在两个合法对象间串实例；现在它们只保留在 provenance，不再进入单-mask prompt。
 
-1. 干净 source 全图，作为颜色、材质、类别和数量的唯一外观依据；
-2. annotation-safe target panel：左侧为未经涂色的 target 局部 crop，中间是在灰色
-   棋盘格上仅保留原始 target 像素的 clean cutout，右侧为独立的黑底白色二值 mask；
-   cutout 负责目标外观识别，mask 只表达几何范围；
-3. SAMTok 原始 referring question/answer；
-4. 当前必须生成的 edit type 及类型专属约束。
+模型除 `refer_object`、`editing_instruction` 和 `new_instruction` 外，还必须返回：
 
-模型返回三个字段：
+- `masked_content`：只描述当前 mask 内的完整连通内容；
+- `edit_unit_status`：`complete_object`、`complete_part` 或 `incomplete`；
+- `outside_dependencies` 与 `mask_compatibility`：判断指定 edit type 能否严格在当前
+  mask 范围内成立。
 
-- `refer_object`：靠位置、外观或关系区分同类实例的视觉指代表达；
-- `editing_instruction`：供全图编辑分支使用的完整指令；
-- `new_instruction`：供 MIRAGE region/crop 分支使用的短指令。
+完整 instruction 限制为 4--22 words，regional instruction 为 3--16 words；不允许
+背景重建配方、默认保持条款、解释和无关对象列表。校验器检查 masked-content、
+refer-object 和 instruction 的主体一致性、动作类型、replace 的具体替代身份以及
+generic add 模板。remove/replace 只接受完整独立物体；局部部件保留给 add/attribute。
+无法在 mask 内自洽完成、格式持续失败或类型退化的候选会标为 incompatible，不会
+终止整批任务，也不会用坏 instruction 凑数。
 
-输出必须是 ASCII English JSON。校验器拒绝空字段、过短指令及 `mask`、`overlay`、
-`marked`、`bbox`、`coordinate` 等标注泄漏词；最多重试三轮。少量模型持续复制
-模板时，确定性 fallback 只复用模型已给出的具体 `refer_object` 与短编辑，不创造
-新语义，并补充“仅改变该实例、保留其他内容”的约束。成功重跑会清除旧失败清单。
+默认先规划目标 case 数的 3 倍，再以整张 two-mask source 为单位筛选；只有两个 region
+都兼容才保留该 source。最终仍严格保持 GRES/VER 均衡、一图多用和四类数量均衡。
+候选不足会明确提示增大 `--candidate-cases`。
 
-当前校验同时接受 `mount/stick/install/paint/dye` 等合法动作同义词，避免把措辞丰富的
-正确回复误判为格式失败；但 attribute 若以 add/remove/replace 动作开头仍会被拒绝。
-对把规则原文当作 add 指令的回复（例如只说添加 `plausible object`），重试会改用一个
-不含候选物体、也不重复原规则的短 repair prompt，要求模型直接命名场景相关的具体
-物体。明显的 `top right panel` 等定位面板短语会被安全清理，而真实物体上的
-`rear panel` 仍被允许。fallback 会优先保留已合格的完整指令，并强制 regional
-instruction 与任务类型一致。
-
-100-case 复查发现，即使 prompt 明确声明红色只是标注，Qwen3-VL 仍会把高显著度的
-整块红色 overlay 复制为 source 属性，生成 `red train`、`red elephant`、`red shirt`
-和 `red patch` 等错误描述。因此当前实现不再向规划模型提供任何涂色后的原图。
-clean crop 负责外观识别，独立 binary mask 只负责定位，从输入表示上消除标注色泄漏。
-新计划把 `planning_visual_input=clean_crop_cutout_binary_v2` 写入 annotation/provenance，
-使审核器可以区分旧 red-overlay 指令与新输入表示；旧数据中的 source-red 描述默认进入
-review，而新数据仅在 clean source inventory 无法确认对应颜色时进入 review。
-
-remove 会要求同时移除在主体消失后无法合理独立存在的直接附着、穿戴、携带或手持
-内容，并保留可独立存在的场景对象与其他实例。若一个 mask 覆盖多个对象或部件，
-指令必须写明可见数量或完整范围，降低少删一个对象的概率。add 不再提供任何候选
-物体示例，只要求根据当前场景产生合理且原图中不存在的内容；replace 仍要求改变
-身份/类别/型号而非只改颜色或衣服。文本校验器拒绝标注术语、泛化模板和任务动作词
-不一致的输出，并在失败时重试。
-
-对 5 个已知污染 case 做定向规划复测后，错误颜色均消失：原来的 `red train` 被识别
-为写有站名的绿色标牌，`red elephant` 改为按相对位置指代大象，`red shirt` 改为蓝帽和
-浅色上衣，`red patch` 被重新识别为河岸上的人，`red wall` 场景则基于白色马桶和蓝色
-瓷砖产生新增指令。这次复测只验证新规划输入和 prompt，没有覆盖旧 100-case 产物。
+规划和审核 VLM 都不接收红色 overlay。新计划记录
+`planning_visual_input=clean_crop_cutout_binary_mask_grounded_v3`。remove 不再通过文字
+扩展到 mask 外的骑手、手持物或其他依附内容；若只编辑 mask 会留下不合理依附关系，
+该 region/type 应判 incompatible。add 不提供候选物体例子，只要求直接命名适合场景的
+具体新增物；replace 必须改变身份、类别或型号，单纯颜色、材质、文字或图案变化属于
+attribute。
 
 ### 4.3 数据物化
 
@@ -153,9 +137,13 @@ remove 会要求同时移除在主体消失后无法合理独立存在的直接�
   "source_image": "source_gres_r296.png",
   "editing_instruction": "Add a small brass bell ...",
   "refer_object": ["the steam locomotive with the number 178 on its front"],
+  "masked_content": "the steam locomotive",
+  "edit_unit_status": "complete_object",
+  "outside_dependencies": "none",
+  "mask_compatibility": "compatible",
   "mask": [{"size": [896, 1184], "counts": "..."}],
   "task_type": "add",
-  "planning_visual_input": "clean_crop_cutout_binary_v2",
+  "planning_visual_input": "clean_crop_cutout_binary_mask_grounded_v3",
   "source_subset": "gres",
   "parquet_row_index": 296,
   "mask_index": 0
@@ -168,42 +156,46 @@ remove 会要求同时移除在主体消失后无法合理独立存在的直接�
 从共享队列动态领取 case，避免每条样本重复加载模型，也减少不同画幅导致的长尾。
 每条 case 都重新创建相同 seed 的 generator，所以动态调度不会改变单条输出。
 
-MIRAGE 使用 source 全图分支和基于 mask/crop 的区域分支，在扩散 latent 中合成，
-当前关键参数为 `patch_ratio=0.2`、40 steps、`true_cfg_scale=4`、
-`guidance_scale=1`、seed 0。8 个 worker 仅改变并行调度，不改变生成算法或参数。
+MIRAGE 使用 source 全图分支和区域分支，在扩散 latent 中合成。旧实现只把 mask
+转成 bbox，矩形内非目标像素也可能被重写。当前 remove/replace/attribute 会把原始
+binary mask 下采样到 latent grid，并以两格 feather collar 做精确写回；add 的 mask
+表示放置锚点而不是新增物轮廓，因此仍使用 bbox。关键参数为 `patch_ratio=0.2`、
+40 steps、`true_cfg_scale=4`、`guidance_scale=1`、seed 0。8 个 worker 仅改变并行调度。
 
 ### 4.5 自动审核
 
 `audit_edit_pairs.py` 对每条 case 计算 mask 内、mask 膨胀保护区外和全图的平均绝对
 像素差及变化像素比例。审核输入同样不使用彩色 overlay，而是按如下顺序提供三张图：
 
-1. source-localization panel：左侧为放大且未涂色的 SOURCE crop，中间为只保留原始
-   target 像素的 clean cutout，右侧为独立黑白 binary mask；当文字与定位冲突时以
-   clean cutout 和 mask 为准；
-2. 与 source crop 完全对齐的放大 EDITED crop；
+1. 同尺度并排的紧致 SOURCE/EDITED crop，用细黑白边界标出完全相同的 exact-mask
+   footprint，避免把边界外同类实例误当成目标残留；
+2. 对齐的 SOURCE crop、binary mask、EDITED crop 和带白色 mask 边界的绝对差异图；
 3. 左右并排的 SOURCE/EDITED 全图，用于检查全局保持和正常显示尺度下的可见性。
 
 每条 case 仍只调用一次 Qwen3-VL-8B。prompt 采用 failure-first 结构，先要求模型不
 依赖指令中的名词，独立描述 source 与 edited 中实际可见的对象、部件和数量，再填写
 五个失败槽：source 描述不一致、编辑未完成、错实例/数量、依附物处理错误、非目标
 变化/伪影。任一槽位给出明确证据时，程序会强制判为 `fail`，不能被模型同时输出的
-`pass` 覆盖；只有视觉证据确实无法确定时才允许 `review`。
+`pass` 覆盖。审核只有 `pass/fail` 两类：无法确认、变化太弱或有明显歧义都判 fail，
+大体完成且自然的结果直接 pass，不再输出 review。
 
 四种编辑类型使用不同标准：
 
 - add：新增内容必须在 source 不存在，在 edited 中可明确识别，并且不能替换或破坏
   原目标；
-- remove：要求目标的所有实例、重叠部分和残留轮廓完整消失，同时处理不能独立存在的
-  依附内容并自然补全背景；
+- remove：要求当前 mask 对应实例的全部 masked 可见范围和残留轮廓完整消失；mask 外
+  同类实例应保留，不能误作目标残留；有 mask 外依附物的候选在规划阶段直接剔除；
 - replace：旧身份必须完整消失，新身份必须清楚可辨；仅改色、弱纹理变化或新旧混合
   均失败；
 - attribute：指定属性必须覆盖预期部位且清楚可见，目标身份、几何、姿态、数量以及
   非目标同类实例保持不变。
 
-VLM 结论之后不增加模型调用，而是用已有像素指标做保守 review gate：各类型的 mask
-内变化过弱、保护区外变化过广，或 `refer_object` 中的 source 颜色未被模型的独立
-source inventory 确认时，原本的自动 `pass` 会降为 `review`。这一步用于拦截小目标
-缺失、部分 remove 和标注色泄漏，不直接把边界 case 判死。
+VLM 结论之后不增加模型调用。像素指标一般只作为诊断 warning，不再因为保护区外
+变化较广或 add 变化比例较小把明显成功结果降级。完整 remove 的 mask 内变化比例低于
+50% 时直接 fail，用于拦截“人物仍在、只改变面貌/衣服”的漏判。反向只处理一个窄而
+可测的矛盾：VLM 唯一失败理由明确声称“完全没改/目标仍完整可见”，但 exact mask 内
+超过 95% 像素已变化且保护区外变化不超过 5% 时，取消这一条错误 completion failure；
+任何残留、伪影、数量或依附物 failure 都不能被该规则覆盖。
 
 默认使用 vLLM continuous batching，temperature 为 0，并以输入内容 hash 支持安全
 resume。vLLM 只改变推理调度，不改变审核模型；单条 case 始终只有一次审核调用。
@@ -235,7 +227,7 @@ CUDA_VISIBLE_DEVICES=0 $PYTHON synthesis_pipeline/generate_samtok_plan.py \
   --parquet "$PARQUET" \
   --positive-index /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/positive_rows.jsonl \
   --output-dir "$DATA_ROOT/planning" \
-  --num-cases 100 --seed 20260917 --batch-size 16 \
+  --num-cases 100 --candidate-cases 300 --seed 20260917 --batch-size 16 \
   --vlm qwen8b-vllm --vlm-device cuda:0 --vlm-dtype bf16 \
   --max-new-tokens 384
 ```
@@ -522,6 +514,48 @@ remove：目标/依附物残留、错实例以及不自然背景补全。自动�
 最终查看入口为 `gallery_v7_manual/index.html`；`manual_review.jsonl` 覆盖 100/100，
 `manual_review_summary.json` 保存上述按类型和子集统计。自动 fail 可直接隔离，自动
 review 不应全部丢弃：本批 36 条自动 review 中有 27 条经人工确认可用。
+
+### 7.7 Mask-grounded v3 / exact-edge audit v14 定向回归（2026-09-18）
+
+针对人工指出的 19 个 case 重新检查后，确认主要根因不是单一生图失败，而是三层问题：
+
+1. 原始 SAMTok question/answer 同时描述两个 mask，单-mask planner 会串到另一个实例；
+2. 指令把 mask 外依附物纳入编辑范围，而区域分支实际只能可靠处理当前 mask；
+3. v7 的像素 warning 把大量明显成功结果降为 review，同时 8B VLM 又可能漏掉“原目标
+   仍在但外观变化”的 remove。
+
+修复后对 019/020/021/030/033/040/049/053/081/090 做了三轮规划回归，并实际重生成
+其中 7 条。019 从“改 mask 外滑雪板”变为只改倒立者雪服；081 从错误要求移除两名
+球员变为只移除 mask 对应的 5 号球员，并完成自然补全；090 的硬黑矩形变为融合更自然
+的新标牌。040 的小花瓶也能在目标椅垫区域辨认。021 仍留下牙刷/牙膏残余，049 只是
+改变人物外观，说明这两类必须由兼容性/二值审核剔除，不能靠冗长 instruction 掩盖。
+
+7 条回归图位于：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/
+  pilot_100_v2_cleanmask/regression_v8/edit_gallery_v14/index.html
+```
+
+最终 exact-edge v14 审核得到 5 pass / 2 fail：019、020、040、081、090 pass，021
+因牙刷残留 fail，049 因 mask 内仅 24.91% 像素变化而触发完整 remove 硬门槛 fail。
+081 的 mask 内变化为 96.78%，VLM 唯一理由却声称“完全没改”，因此命中上述窄矛盾
+规则并恢复为 pass。审核保持 1 call/case；7 条的 VLM inference 为 7.98 秒、52.64
+case/min，含 43.71 秒冷启动的总墙钟为 54.80 秒。
+
+最终 planning smoke test 使用默认 3 倍过采样，从 60 个 region 候选筛出 20 条：
+GRES/VER 各 5 个 source，四类各 5 条；55/60 候选通过当轮兼容性校验，1 条持续格式
+失败被安全丢弃。总墙钟 90.25 秒，VLM inference 33.74 秒、106.71 candidate/min。
+随后加入 partial-section 和 image-language 最终校验后，直接重放同批缓存仍有 49/60
+compatible，并能完整选出 20 条，说明更严格规则不需要用坏指令补足类型配额。
+
+早期规划 smoke test 从 80 个 region 候选筛出 20 条：GRES/VER 各 5 个 source，四类
+各 5 条；70/80 候选通过当时的兼容性校验，2 条持续格式失败被安全丢弃。总墙钟
+104.50 秒，VLM inference 43.29 秒、110.88 candidate/min。加入严格 complete-object、
+partial-unit 和 generic-replacement 校验后，重放这批缓存响应只剩 63/80 compatible，
+固定 pair bucket 有一项短缺；因此默认过采样从 2 倍提升到 3 倍，避免用坏指令补数。
+7 卡单条冷启动编辑回归为 109.58 秒；该速度包含每卡各自模型加载，不代表长任务
+steady-state 吞吐。
 <!-- PILOT_RESULTS_END -->
 
 ## 8. 已知限制与扩量建议
