@@ -41,7 +41,9 @@ TASK_TYPES = ("add", "remove", "replace", "attribute")
 PLANNING_VISUAL_INPUT_VERSION = "clean_crop_cutout_binary_v2"
 FORBIDDEN_OUTPUT_PATTERN = re.compile(
     r"\b(marked|mask|overlay|annotations?|highlighted|bbox|coordinates?|target region|"
-    r"panels?|source crop|image [12])\w*\b",
+    r"source crop|image [12])\w*\b|"
+    r"\b(?:localization|mask|target|left|middle|right|top|bottom|upper|lower|first|"
+    r"second|third|three-part)\s+panels?\b|\bpanels?\s+(?:view|image)\b",
     flags=re.IGNORECASE,
 )
 TYPE_GUIDANCE = {
@@ -199,12 +201,31 @@ def instruction_messages(
     previous_response: str | None = None,
 ) -> list[dict[str, Any]]:
     prompt = build_prompt(row, task_type)
-    if previous_response:
+    if previous_response and task_type == "add":
+        previous_value = parse_json_object(previous_response) or {}
+        target_hint = remove_panel_location(
+            str(previous_value.get("refer_object", "the localized subject"))
+        )
+        prompt = f"""Design one localized ADD edit from the two supplied images.
+
+IMAGE 1 is the authoritative clean source. IMAGE 2 contains a clean target crop, the original isolated target pixels, and a binary shape cue.
+Previously identified subject: {target_hint}
+
+Inspect the scene and independently choose exactly one concrete physical item that would fit naturally on, beside, or in direct relation to this subject. Directly name the chosen item after the add action. It must be absent now, visually clear, and localized. Preserve every existing object and all similar instances. Do not mention images, panels, crops, masks, annotations, regions, coordinates, or these requirements. Do not use the phrases "plausible object", "scene context", "the target", or "the addition".
+
+Return exactly one JSON object and no markdown:
+{{"refer_object":"specific visual subject expression","editing_instruction":"full-image add instruction naming the item and placement","new_instruction":"short add instruction naming the same item"}}
+"""
+    elif previous_response:
         prompt += (
             "\n\nYour previous response was invalid because it leaked annotation "
-            "language or copied a generic task rule. Rewrite it with a concrete "
-            "visible target expression and scene-specific edit. Do not refer to any "
-            "panel, crop, mask, annotation, image number, or target region. "
+            "language, copied a generic task rule, or used the wrong edit action. "
+            "Rewrite it with a concrete visible target expression and a definite, "
+            "scene-specific edit. For add, name the exact item to add; never say only "
+            "'a plausible object'. For attribute, modify one property of the existing "
+            "target and do not add, remove, or replace an object. Both instruction "
+            "fields must perform the required task type. Do not refer to any panel, "
+            "crop, mask, annotation, image number, or target region. "
             "Previous response:\n" + previous_response[:1600]
         )
     return [
@@ -237,16 +258,42 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
 GENERIC_INSTRUCTION_PATTERN = re.compile(
     r"\b(?:semantically plausible|visible) accessor(?:y|ies)\b|"
     r"\baccessory or detail\b|\bplausible object or detail\b|"
+    r"\bplausible object from (?:the )?scene context\b|"
+    r"\babsent from (?:the )?target\b|\bnot a second copy\b|"
+    r"\binvent the addition\b|\bfixed or suggested catalog\b|"
     r"\bscene-(?:appropriate|plausible) (?:addition|object|detail)\b|"
     r"\bsmall,? clearly visible addition\b",
     flags=re.IGNORECASE,
 )
 TYPE_ACTION_PATTERNS = {
-    "add": re.compile(r"\b(add|attach|place|put|give|tie|hang)\b", re.IGNORECASE),
+    "add": re.compile(
+        r"\b(add|attach|place|put|give|tie|hang|mount|stick|install)\b",
+        re.IGNORECASE,
+    ),
     "remove": re.compile(r"\b(remove|erase|delete)\b", re.IGNORECASE),
     "replace": re.compile(r"\b(replace|substitut\w*|swap|exchange)\b", re.IGNORECASE),
-    "attribute": re.compile(r"\b(change|make|recolor|turn)\b", re.IGNORECASE),
+    "attribute": re.compile(
+        r"\b(change|make|recolor|turn|paint|dye|brighten|darken|alter)\b",
+        re.IGNORECASE,
+    ),
 }
+LEADING_CROSS_TYPE_ACTION = re.compile(
+    r"^(?:please\s+)?(?:add|attach|place|put|give|tie|hang|mount|stick|install|"
+    r"remove|erase|delete|replace|substitut\w*|swap|exchange)\b",
+    flags=re.IGNORECASE,
+)
+
+PANEL_LOCATION_PATTERN = re.compile(
+    r"\s+(?:in|on|from)\s+the\s+"
+    r"(?:(?:top|bottom|upper|lower|left|right|center|middle|central)\s+){0,3}"
+    r"panel\b",
+    flags=re.IGNORECASE,
+)
+
+
+def remove_panel_location(text: str) -> str:
+    """Drop an accidental localization-panel phrase without changing semantics."""
+    return re.sub(r"\s{2,}", " ", PANEL_LOCATION_PATTERN.sub("", text)).strip()
 
 
 def normalize_generated(
@@ -256,7 +303,7 @@ def normalize_generated(
         return None
     normalized = {}
     for key in ("refer_object", "editing_instruction", "new_instruction"):
-        text = str(value.get(key, "")).strip()
+        text = remove_panel_location(str(value.get(key, "")).strip())
         if not text or not text.isascii() or FORBIDDEN_OUTPUT_PATTERN.search(text):
             return None
         normalized[key] = text
@@ -267,6 +314,11 @@ def normalize_generated(
     if not TYPE_ACTION_PATTERNS[task_type].search(normalized["editing_instruction"]):
         return None
     if not TYPE_ACTION_PATTERNS[task_type].search(normalized["new_instruction"]):
+        return None
+    if task_type == "attribute" and any(
+        LEADING_CROSS_TYPE_ACTION.search(normalized[key])
+        for key in ("editing_instruction", "new_instruction")
+    ):
         return None
     return normalized
 
@@ -281,8 +333,13 @@ def deterministic_fallback(raw: str, task_type: str) -> dict[str, str] | None:
     value = parse_json_object(raw)
     if not value:
         return None
-    refer_object = str(value.get("refer_object", "")).strip()
-    new_instruction = str(value.get("new_instruction", "")).strip().rstrip(".")
+    refer_object = remove_panel_location(str(value.get("refer_object", "")).strip())
+    editing_instruction = remove_panel_location(
+        str(value.get("editing_instruction", "")).strip()
+    )
+    new_instruction = remove_panel_location(
+        str(value.get("new_instruction", "")).strip()
+    ).rstrip(".")
     if (
         not refer_object
         or not new_instruction
@@ -292,17 +349,40 @@ def deterministic_fallback(raw: str, task_type: str) -> dict[str, str] | None:
         or FORBIDDEN_OUTPUT_PATTERN.search(new_instruction)
     ):
         return None
-    if task_type == "remove":
-        editing_instruction = (
-            f"Remove {refer_object} completely, including any directly attached or "
-            "held elements that cannot plausibly remain alone, and reconstruct the "
-            "background naturally; preserve independent objects and other instances."
-        )
-    else:
-        editing_instruction = (
-            f"{new_instruction}. Apply this change only to {refer_object}; preserve "
-            "all similar instances and unrelated scene content."
-        )
+    if (
+        not editing_instruction
+        or not TYPE_ACTION_PATTERNS[task_type].search(editing_instruction)
+        or GENERIC_INSTRUCTION_PATTERN.search(editing_instruction)
+        or FORBIDDEN_OUTPUT_PATTERN.search(editing_instruction)
+    ):
+        if task_type == "remove":
+            editing_instruction = (
+                f"Remove {refer_object} completely, including any directly attached or "
+                "held elements that cannot plausibly remain alone, and reconstruct the "
+                "background naturally; preserve independent objects and other instances."
+            )
+        else:
+            editing_instruction = (
+                f"{new_instruction}. Apply this change only to {refer_object}; preserve "
+                "all similar instances and unrelated scene content."
+            )
+
+    if task_type == "attribute" and any(
+        LEADING_CROSS_TYPE_ACTION.search(text)
+        for text in (editing_instruction, new_instruction)
+    ):
+        return None
+
+    if not TYPE_ACTION_PATTERNS[task_type].search(new_instruction):
+        if task_type == "add":
+            new_instruction = f"Add {new_instruction}"
+        elif task_type == "remove":
+            new_instruction = f"Remove {refer_object} completely"
+        elif task_type == "replace":
+            new_instruction = f"Replace the target with {new_instruction}"
+        else:
+            new_instruction = f"Change the target so it is {new_instruction}"
+
     return normalize_generated(
         {
             "refer_object": refer_object,
