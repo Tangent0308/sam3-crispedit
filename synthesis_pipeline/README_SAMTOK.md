@@ -9,8 +9,9 @@ instruction-generation safeguards, per-case manual review policy, and the
 
 - Source: embedded image bytes and COCO RLE masks from
   `mix_gres8k_ver4k_train.parquet`.
-- Eligibility: no ranking filter yet. A row is retained when it is not
-  `No target` and has at least one non-empty mask record.
+- Eligibility: the positive index retains every non-`No target` row; instruction
+  planning then over-samples and keeps only whole sources whose masks are compatible
+  with their assigned edit types.
 - One image, many edits: each parquet source image is materialized once. Every
   source mask creates an independent single-region edit case referencing that
   shared source through `source_image`.
@@ -18,12 +19,14 @@ instruction-generation safeguards, per-case manual review policy, and the
   `num_masks - 1` exactly once. Missing or duplicate masks fail immediately.
 - Mask policy: source RLE masks are reused exactly; SAM/SAM2 is not run.
 - Editing: Qwen-Image-Edit-2511 with MIRAGE regional branches.
-- Planning localization: a clean target crop, isolated unmodified target-pixel
-  cutout, and separate binary mask; colored overlays are never shown to the
-  instruction VLM.
-- Audit: one Qwen3-VL-8B vLLM call per case with type-specific failure-first
-  criteria, aligned source/edit crops, a full-image comparison, and conservative
-  deterministic review gates.
+- Planning localization: a standalone clean target-pixel cutout, clean context,
+  separate binary mask, and clean full source; colored overlays and multi-mask
+  SAMTok question/answer text are never shown to the instruction VLM.
+- Regional writeback: remove/replace/attribute use a feathered exact mask; add
+  retains bbox guidance because its mask is a placement anchor.
+- Audit: one Qwen3-VL-8B vLLM call per case, binary pass/fail output, an exact-mask
+  edge on aligned before/after crops, an aligned source/mask/edit/difference panel,
+  and narrow deterministic guards for contradictory remove verdicts.
 
 The checked-in `pilot_plan.jsonl` contains eight representative source rows,
 all with two masks. It therefore produces sixteen independent edit cases from
@@ -84,9 +87,9 @@ The output name is the edit case id, while the input is resolved from
 
 ## Audit with vLLM
 
-The vLLM backend receives three annotation-safe views in one call: a clean
-source crop with a clean target-pixel cutout and separate binary mask, the aligned edited crop, and a
-full source/edit comparison. The
+The vLLM backend receives three annotation-safe views in one call: aligned tight
+before/after crops with the exact-mask edge, an aligned source/mask/edit/difference
+panel, and a full source/edit comparison. The
 prompt applies distinct add/remove/replace/attribute criteria and asks for
 explicit failure evidence before a verdict. No red-mask overlay is shown.
 

@@ -6,6 +6,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image
 from diffusers import QwenImageEditPlusPipeline
@@ -172,9 +173,13 @@ def load_instruction_map(jsonl_path: str):
 
 def load_crop_records(jsonl_path: str):
     mapping = defaultdict(list)
+    mask_root = Path(jsonl_path).resolve().parent.parent / "masks"
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
             rec = json.loads(line)
+            mask_name = rec.get("image")
+            if mask_name:
+                rec["_mask_path"] = str(mask_root / str(mask_name))
             mapping[rec["original_image"]].append(rec)
     return mapping
 
@@ -200,9 +205,10 @@ def load_qwen_pipeline(
     return pipeline
 
 
-def collect_crop_inputs(crop_records):
+def collect_crop_inputs(crop_records, case_task_type=None):
     crop_prompts = []
     bboxes = []
+    region_masks = []
     for rec in crop_records:
         if rec.get("bbox") is None:
             continue
@@ -216,8 +222,17 @@ def collect_crop_inputs(crop_records):
             prompt = instruction
         crop_prompts.append(prompt)
         bboxes.append(rec["bbox"])
+        task_type = str(rec.get("task_type") or case_task_type or "").lower()
+        mask_path = rec.get("_mask_path")
+        if task_type in {"remove", "replace", "attribute"} and mask_path:
+            with Image.open(mask_path) as mask_image:
+                region_masks.append(np.asarray(mask_image.convert("L")) > 127)
+        else:
+            # Add uses the source mask as a placement anchor, so its generated
+            # object may legitimately occupy nearby pixels inside the bbox.
+            region_masks.append(None)
 
-    return crop_prompts, bboxes
+    return crop_prompts, bboxes, region_masks
 
 
 def save_outputs(image_name: str, full_out, results_full_dir: str):
@@ -245,9 +260,11 @@ def infer_one_image(
     if isinstance(instruction_record, str):
         source_image_name = img_name
         full_prompt = instruction_record
+        case_task_type = None
     else:
         source_image_name = str(instruction_record.get("source_image") or img_name)
         full_prompt = str(instruction_record["editing_instruction"])
+        case_task_type = instruction_record.get("task_type")
     full_image_path = os.path.join(image_root, source_image_name)
     crop_records = sorted(
         crop_map[img_name], key=lambda rec: str(rec.get("image") or "")
@@ -255,7 +272,9 @@ def infer_one_image(
 
     with Image.open(full_image_path) as image:
         full_image = image.convert("RGB")
-    crop_prompts, bboxes = collect_crop_inputs(crop_records)
+    crop_prompts, bboxes, region_masks = collect_crop_inputs(
+        crop_records, case_task_type=case_task_type
+    )
 
     # A fresh per-image generator makes output independent of which worker
     # claims the image and of the order in which that worker receives jobs.
@@ -267,6 +286,7 @@ def infer_one_image(
         full_prompt=full_prompt,
         crop_prompts=crop_prompts,
         bboxes=bboxes,
+        region_masks=region_masks,
         num_inference_steps=num_inference_steps,
         true_cfg_scale=true_cfg_scale,
         guidance_scale=guidance_scale,

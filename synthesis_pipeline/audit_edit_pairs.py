@@ -27,60 +27,58 @@ import utils.vlm_utils as vlm
 from synthesis_pipeline.visual_prompt_utils import audit_visual_inputs
 
 
-COMMON_AUDIT_PROMPT = """Act as a skeptical visual inspector of one localized image edit. Many candidates are subtly wrong; do not assume success.
+COMMON_AUDIT_PROMPT = """Judge one localized image edit as PASS or FAIL. Use a practical training-data standard: pass a broadly correct, natural-looking edit; fail a clear error or an edit that is too weak to verify.
 
-IMAGE 1 is a three-part source-localization panel: LEFT is a clean SOURCE crop; MIDDLE isolates the target's original, unmodified photographic pixels on a gray checkerboard; RIGHT is the aligned black/white binary target mask. Only the MIDDLE target pixels and LEFT clean crop contain appearance information. White mask pixels specify geometry only. IMAGE 2 is the exactly aligned EDITED crop. IMAGE 3 shows the FULL SOURCE on the left and FULL EDITED on the right. No mask color is painted over photographic pixels.
+IMAGE 1 is a tight aligned SOURCE/EDITED comparison. In both halves the SAME thin black/white edge traces the exact target footprint; judge only photographic content INSIDE that edge when deciding whether the selected instance remains. Same-category content outside the edge is a distractor that should normally remain. The black/white line is geometry, not an object color. IMAGE 2 shows, from left to right, a wider aligned SOURCE crop, black/white target mask, aligned EDITED crop, and a false-color absolute-difference map whose white contour is the target boundary. Red in the difference map means strong change and blue means weak change; it is not an object color. IMAGE 3 shows FULL SOURCE beside FULL EDITED. No semantic-looking mask color is painted over photographic pixels.
 
 Requested edit: <<<INSTRUCTION>>>
 Named target: <<<TARGETS>>>
+Planner's literal masked-content inventory: <<<MASKED_CONTENT>>>
 Edit type: <<<TASK_TYPE>>>
 
 Type-specific criteria:
 <<<TYPE_CRITERIA>>>
 
-First identify the source target from the isolated clean target pixels and use the binary mask only for its extent. Then inspect the clean context crop without trusting nouns or claims in the instruction. If the Named target or instruction points to a nearby object outside the mask, record source_mismatch. Never infer color, texture, material, or identity from the black/white mask or checkerboard. Briefly inventory the actual masked target, its visible color/material, its parts, and its count in SOURCE and EDITED. A pixel difference alone is not proof that the requested semantic result exists. The requested result must also be recognizable in the full EDITED image at useful training scale.
+Write `source_inventory` from photographic content inside the SOURCE edge in IMAGE 1 alone before reasoning about the request, and `edited_inventory` from content inside the EDITED edge. Exclude nearby objects outside the edge and anything visible only in IMAGE 2 context or IMAGE 3. Then independently verify both the Named target and planner inventory; if either points to a nearby object outside the SOURCE edge, record source_mismatch. Never infer appearance from the edge, binary shape, difference colors, or instruction. A pixel difference alone is not proof: the requested result must be recognizable in FULL EDITED at useful training scale.
 
 Then fill five failure slots. Each slot must be JSON null only after visually verifying that failure is absent; otherwise write concise visible evidence:
 - source_mismatch: a pre-edit descriptor/precondition in the instruction is false in SOURCE, or requested added content already exists.
 - completion_failure: requested semantic change is missing, too weak to recognize, partial, or leaves old-target residue.
 - target_or_count_failure: wrong instance/part changed, or requested count/extent is not satisfied.
-- dependency_failure: attached/held/worn/dependent content is left implausibly, or content that should remain is incorrectly removed.
-- preservation_or_artifact_failure: a non-target instance, background, composition, or identity changes materially, or there are ghosts, overlaps, seams, or malformed content.
+- dependency_failure: the result leaves an obviously floating or impossible attached/held/supported object, or incorrectly removes such content outside the requested scope.
+- preservation_or_artifact_failure: a non-target instance or scene structure changes materially, or the edit has visible residue, duplicated parts, halos, hard cutout edges, mask-shaped stains, blur patches, texture discontinuities, implausible fill, overlaps, or malformed content. Small natural rendering variation is acceptable.
 
-Any definite non-null failure means `fail`, not `review`. Use `review` only for genuinely irresolvable visual ambiguity. Use `pass` only when all five failure slots are null. Do not merely restate the request as evidence.
+Compare counts of repeated scene objects before and after, including any unrequested object newly appearing inside the edited footprint. There is no review class. If the edit is ambiguous, difficult to see, or impossible to verify, use `fail` with the relevant evidence. Use `pass` when the requested change is clearly present and broadly natural even if it is not pixel-perfect. Any non-null failure slot requires `fail`. Do not merely restate the request as evidence.
 
 Return one compact JSON object only with exactly these keys:
-`source_inventory` (string), `edited_inventory` (string), `source_mismatch` (null or string), `completion_failure` (null or string), `target_or_count_failure` (null or string), `dependency_failure` (null or string), `preservation_or_artifact_failure` (null or string), `quality` (`pass`, `review`, or `fail`), and `reason` (string)."""
+`source_inventory` (string), `edited_inventory` (string), `source_mismatch` (null or string), `completion_failure` (null or string), `target_or_count_failure` (null or string), `dependency_failure` (null or string), `preservation_or_artifact_failure` (null or string), `quality` (`pass` or `fail`), and `reason` (string)."""
 
 TYPE_CRITERIA = {
     "add": (
-        "State whether the requested content is visibly absent in SOURCE, then name "
-        "what is actually visible in EDITED without borrowing its identity from the "
-        "instruction. It must be clearly recognizable at the intended target while "
-        "existing target content remains intact."
+        "Verify that the new item is absent in SOURCE, clearly recognizable at the "
+        "requested anchor in EDITED, and visually integrated rather than pasted on."
     ),
     "remove": (
-        "Explicitly compare the requested count and visible semantic parts in both "
-        "crops. The entire coherent target and all requested instances must disappear, "
-        "including portions adjacent to or overlapping another instance, with no "
-        "silhouette, body section, extremity, edge, fragment, ghost, or overlap left. Directly attached, worn, "
-        "carried, or held content that the target owns/supports and that cannot "
-        "plausibly remain by itself must also disappear unless the instruction "
-        "explicitly preserves it. An independent nearby actor/object must remain. The "
-        "revealed background must be reconstructed while independent objects remain."
+        "First compare content inside the two aligned edges in IMAGE 1. Judge "
+        "disappearance at that exact footprint, not by asking whether any "
+        "same-category object remains elsewhere in the crop or full image. A similar "
+        "instance whose SOURCE pixels are outside IMAGE 1 should remain and is not "
+        "target residue. The requested instance and all of its masked visible extent "
+        "must disappear. "
+        "If a same-shaped person/object, recognizable face, clothing, silhouette, or "
+        "pose remains at that location, the target was altered rather than removed. "
+        "Fail residue, ghost parts, duplicate remnants, floating dependencies, or an "
+        "unnatural reconstruction behind it."
     ),
     "replace": (
-        "Independently name the visible old identity in SOURCE and what the new pixels "
-        "in EDITED actually look like. If the requested replacement identity is not "
-        "unmistakably recognizable, mark completion_failure. The old target must disappear completely and the requested replacement "
-        "identity must be clearly present at the same location with plausible scale "
-        "and orientation. A mere recolor, weak texture change, mixture with the old "
-        "target, or nearly invisible change does not count as replacement."
+        "The old identity must be gone and the new identity clearly recognizable at "
+        "the same location. Fail mixtures, recolors posing as replacement, residue, "
+        "or a new object with visibly pasted or incoherent boundaries."
     ),
     "attribute": (
-        "The requested attribute must visibly change on the entire intended target "
-        "or specified part. Its identity, geometry, pose, and count must remain, and "
-        "the same attribute on non-target instances must not change."
+        "The requested attribute must visibly change on the intended masked content "
+        "without changing its identity or spilling across its boundary. Fail dirty "
+        "edges, partial recoloring, shape replacement, or changes to another instance."
     ),
 }
 
@@ -92,7 +90,7 @@ AUDIT_FAILURE_KEYS = (
     "preservation_or_artifact_failure",
 )
 
-AUDIT_VERSION = "edit_pair_failure_first_localized_v7_cached"
+AUDIT_VERSION = "edit_pair_exact_edge_v14_cached"
 
 COLOR_WORDS = {
     "black",
@@ -118,6 +116,14 @@ MINIMUM_INSIDE_CHANGED_FRACTION = {
     "attribute": 0.10,
 }
 MAXIMUM_OUTSIDE_GUARD_CHANGED_FRACTION = 0.12
+HARD_MINIMUM_REMOVE_CHANGED_FRACTION = 0.50
+HIGH_CONFIDENCE_REMOVE_CHANGED_FRACTION = 0.95
+MAXIMUM_REMOVE_OVERRIDE_OUTSIDE_FRACTION = 0.05
+UNCHANGED_REMOVE_CLAIM_PATTERN = re.compile(
+    r"\b(?:not (?:performed|executed|applied|completed)|no change|identical|"
+    r"same (?:content|object|person|target)|remain\w*(?:\s+\w+){0,3}\s+visible)\b",
+    flags=re.IGNORECASE,
+)
 DEPENDENT_OBJECT_TERMS = {
     "backpack",
     "bag",
@@ -208,6 +214,13 @@ def input_fingerprint(
         "minimum_inside_changed_fraction": MINIMUM_INSIDE_CHANGED_FRACTION,
         "maximum_outside_guard_changed_fraction": (
             MAXIMUM_OUTSIDE_GUARD_CHANGED_FRACTION
+        ),
+        "hard_minimum_remove_changed_fraction": HARD_MINIMUM_REMOVE_CHANGED_FRACTION,
+        "high_confidence_remove_changed_fraction": (
+            HIGH_CONFIDENCE_REMOVE_CHANGED_FRACTION
+        ),
+        "maximum_remove_override_outside_fraction": (
+            MAXIMUM_REMOVE_OVERRIDE_OUTSIDE_FRACTION
         ),
         "vlm": args.vlm,
         "vlm_model_id": args.vlm_model_id,
@@ -344,6 +357,7 @@ def build_audit_prompt(row: dict[str, Any]) -> str:
     targets = refer_object_text(row)
     return (
         prompt.replace("TARGETS", targets)
+        .replace("MASKED_CONTENT", str(row.get("masked_content", "not provided")))
         .replace("TASK_TYPE", task_type)
         .replace("TYPE_CRITERIA", TYPE_CRITERIA[task_type])
     )
@@ -351,7 +365,7 @@ def build_audit_prompt(row: dict[str, Any]) -> str:
 
 def audit_messages(
     source_localization: Image.Image,
-    edited_crop: Image.Image,
+    detail_comparison: Image.Image,
     full_comparison: Image.Image,
     row: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -360,7 +374,7 @@ def audit_messages(
             "role": "user",
             "content": [
                 {"type": "image", "image": source_localization},
-                {"type": "image", "image": edited_crop},
+                {"type": "image", "image": detail_comparison},
                 {"type": "image", "image": full_comparison},
                 {"type": "text", "text": build_audit_prompt(row)},
             ],
@@ -369,12 +383,12 @@ def audit_messages(
 
 
 def normalize_audit_result(value: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Validate failure-first evidence and prevent a contradictory `pass`."""
+    """Validate failure-first evidence and enforce a binary verdict."""
     if not value:
         return None
     normalized = dict(value)
     model_quality = str(normalized.get("quality", "")).strip().lower()
-    if model_quality not in {"pass", "review", "fail"}:
+    if model_quality not in {"pass", "fail"}:
         return None
     for key in ("source_inventory", "edited_inventory", "reason"):
         if not str(normalized.get(key, "")).strip():
@@ -401,10 +415,10 @@ def normalize_audit_result(value: Optional[dict[str, Any]]) -> Optional[dict[str
     return normalized
 
 
-def deterministic_review_warnings(
+def deterministic_diagnostic_warnings(
     row: dict[str, Any], metrics: dict[str, float], audit: Optional[dict[str, Any]]
 ) -> list[str]:
-    """Conservatively stop suspicious VLM passes without another model call."""
+    """Record pixel-level diagnostics without overriding the visual verdict."""
     task_type = normalized_task_type(row)
     inside_changed = metrics["inside_changed_fraction"]
     outside_changed = metrics["outside_guard_changed_fraction"]
@@ -416,9 +430,8 @@ def deterministic_review_warnings(
         warnings.append("broad_change_outside_target_guard")
 
     # A color used by refer_object describes the source target, not the desired
-    # result. If the VLM's independent SOURCE inventory cannot confirm it, the
-    # pair must not auto-pass. This directly guards against annotation-color
-    # leakage while remaining a review (not an automatic rejection).
+    # result. Keep disagreements visible for analysis, but let the edge-aware
+    # visual audit decide the binary verdict.
     if audit:
         refer_text = refer_object_text(row)
         refer_colors = {
@@ -440,7 +453,7 @@ def deterministic_review_warnings(
             for color in sorted(normalized_refer_colors - normalized_source_colors):
                 warnings.append(f"source_color_not_confirmed:{color}")
         elif "red" in normalized_refer_colors:
-            warnings.append("legacy_red_source_descriptor_requires_review")
+            warnings.append("legacy_red_source_descriptor_unconfirmed")
 
         if task_type == "remove" and outside_changed < 0.05:
             source_terms = source_tokens & DEPENDENT_OBJECT_TERMS
@@ -500,7 +513,7 @@ def main() -> None:
         with Image.open(edited_path) as handle:
             edited = handle.convert("RGB")
         mask = mask_array(source.size, row.get("mask", []))
-        source_localization, edited_crop, full_comparison = audit_visual_inputs(
+        source_localization, detail_comparison, full_comparison = audit_visual_inputs(
             source, edited, mask
         )
         tasks.append(
@@ -509,7 +522,7 @@ def main() -> None:
                 "source": source,
                 "edited": edited,
                 "source_localization": source_localization,
-                "edited_crop": edited_crop,
+                "detail_comparison": detail_comparison,
                 "full_comparison": full_comparison,
                 "metrics": locality_metrics(source, edited, mask, args.guard_pixels),
                 "input_fingerprint": fingerprint,
@@ -534,7 +547,7 @@ def main() -> None:
                 [
                     audit_messages(
                         task["source_localization"],
-                        task["edited_crop"],
+                        task["detail_comparison"],
                         task["full_comparison"],
                         task["row"],
                     )
@@ -550,15 +563,60 @@ def main() -> None:
                     if parsed
                     else "parse_error"
                 )
-                metric_warnings = deterministic_review_warnings(
+                metric_warnings = deterministic_diagnostic_warnings(
                     task["row"], task["metrics"], parsed
                 )
                 if parsed:
                     parsed["metric_warnings"] = metric_warnings
-                    if quality == "pass" and metric_warnings:
-                        parsed["quality_before_metric_guard"] = quality
-                        parsed["quality"] = "review"
-                        quality = "review"
+                    if (
+                        normalized_task_type(task["row"]) == "remove"
+                        and task["metrics"]["inside_changed_fraction"]
+                        < HARD_MINIMUM_REMOVE_CHANGED_FRACTION
+                    ):
+                        evidence = (
+                            "Too little of the masked target changed for a complete "
+                            "removal; the target likely remains or was only altered."
+                        )
+                        if not parsed.get("completion_failure"):
+                            parsed["completion_failure"] = evidence
+                        if "completion_failure" not in parsed["failure_tags"]:
+                            parsed["failure_tags"].append("completion_failure")
+                        parsed["quality"] = "fail"
+                        parsed["reason"] = (
+                            str(parsed.get("reason", "")).rstrip(". ")
+                            + ". "
+                            + evidence
+                        ).strip()
+                        quality = "fail"
+                    elif (
+                        normalized_task_type(task["row"]) == "remove"
+                        and task["metrics"]["inside_changed_fraction"]
+                        >= HIGH_CONFIDENCE_REMOVE_CHANGED_FRACTION
+                        and task["metrics"]["outside_guard_changed_fraction"]
+                        <= MAXIMUM_REMOVE_OVERRIDE_OUTSIDE_FRACTION
+                        and parsed.get("failure_tags") == ["completion_failure"]
+                        and UNCHANGED_REMOVE_CLAIM_PATTERN.search(
+                            str(parsed.get("completion_failure", ""))
+                        )
+                    ):
+                        # The exact-edge VLM occasionally calls an almost entirely
+                        # changed footprint "unchanged" after noticing a preserved
+                        # same-class distractor. Resolve only that narrow, measurable
+                        # contradiction; residue/artifact/count failures still fail.
+                        changed = task["metrics"]["inside_changed_fraction"]
+                        parsed["completion_failure"] = None
+                        parsed["failure_tags"] = []
+                        parsed["quality"] = "pass"
+                        parsed["verdict_override"] = (
+                            "high_pixel_change_contradicts_unchanged_claim"
+                        )
+                        parsed["reason"] = (
+                            "Passed by the remove contradiction guard: the model's "
+                            f"unchanged claim conflicts with {changed:.1%} changed "
+                            "pixels inside the exact target and no other failure was "
+                            "reported."
+                        )
+                        quality = "pass"
                 output_by_image[str(task["row"].get("image", ""))] = {
                     "image": task["row"].get("image"),
                     "editing_instruction": task["row"].get("editing_instruction"),
@@ -596,6 +654,22 @@ def main() -> None:
         "minimum_inside_changed_fraction": MINIMUM_INSIDE_CHANGED_FRACTION,
         "maximum_outside_guard_changed_fraction": (
             MAXIMUM_OUTSIDE_GUARD_CHANGED_FRACTION
+        ),
+        "hard_minimum_remove_changed_fraction": HARD_MINIMUM_REMOVE_CHANGED_FRACTION,
+        "high_confidence_remove_changed_fraction": (
+            HIGH_CONFIDENCE_REMOVE_CHANGED_FRACTION
+        ),
+        "maximum_remove_override_outside_fraction": (
+            MAXIMUM_REMOVE_OVERRIDE_OUTSIDE_FRACTION
+        ),
+        "verdict_override_counts": dict(
+            sorted(
+                Counter(
+                    str(row.get("audit", {}).get("verdict_override"))
+                    for row in output_rows
+                    if row.get("audit", {}).get("verdict_override")
+                ).items()
+            )
         ),
         "audit_version": AUDIT_VERSION,
         "vlm_calls": len(tasks),

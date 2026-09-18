@@ -274,6 +274,11 @@ def materialize_plan(
 
         for edit in edits:
             mask_index = int(edit["mask_index"])
+            if str(edit.get("mask_compatibility", "compatible")) != "compatible":
+                raise ValueError(
+                    f"Row {row_index} mask {mask_index}: incompatible edit reached "
+                    "materialization"
+                )
             raw_rle = indexed["masks"][mask_index]
             decoded = decode_rle(raw_rle)
             expected_shape = (source_size[1], source_size[0])
@@ -301,6 +306,7 @@ def materialize_plan(
                     "refer_object": str(edit["refer_object"]),
                     "new_instruction": str(edit["new_instruction"]),
                     "mask_index": mask_index,
+                    "task_type": str(edit["task_type"]),
                 }
             )
             annotation = {
@@ -314,6 +320,16 @@ def materialize_plan(
                 "parquet_row_index": row_index,
                 "mask_index": mask_index,
             }
+            if edit.get("masked_content"):
+                annotation["masked_content"] = str(edit["masked_content"])
+            if edit.get("edit_unit_status"):
+                annotation["edit_unit_status"] = str(edit["edit_unit_status"])
+            if edit.get("outside_dependencies"):
+                annotation["outside_dependencies"] = str(
+                    edit["outside_dependencies"]
+                )
+            if edit.get("mask_compatibility"):
+                annotation["mask_compatibility"] = str(edit["mask_compatibility"])
             if edit.get("planning_visual_input"):
                 annotation["planning_visual_input"] = str(
                     edit["planning_visual_input"]

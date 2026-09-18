@@ -223,6 +223,7 @@ def run_qwen_multi_branch(
     full_prompt: str,
     crop_prompts: List[str],
     bboxes: List[Union[Dict[str, int], Tuple[int, int, int, int], List[int]]],
+    region_masks: Optional[List[Optional[np.ndarray]]] = None,
     num_inference_steps: int = 40,
     true_cfg_scale: float = 4.0,
     guidance_scale: Optional[float] = 1.0,
@@ -388,6 +389,7 @@ def run_qwen_multi_branch(
             WRITE_MARGIN_CELLS,
             device=full_image_grid.device,
             dtype=full_image_grid.dtype,
+            region_masks=region_masks,
         ).clamp(max=BOX_WRITE_WEIGHT),
         max(num_steps - patch_until, 1),
     )

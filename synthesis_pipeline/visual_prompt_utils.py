@@ -77,6 +77,55 @@ def clean_target_cutout(
     return Image.fromarray(cutout, mode="RGB")
 
 
+def isolated_target_image(
+    source: Image.Image, mask: np.ndarray, tile_size: int = 768
+) -> Image.Image:
+    """Magnify only pixels inside one mask as a standalone model input."""
+    bbox = padded_mask_bbox(mask)
+    return _letterbox(clean_target_cutout(source, mask, bbox), (tile_size, tile_size))
+
+
+def target_footprint_comparison(
+    source: Image.Image,
+    edited: Image.Image,
+    mask: np.ndarray,
+    tile_size: int = 640,
+) -> Image.Image:
+    """Compare a tight aligned crop before and after with an exact mask edge.
+
+    Keeping a rectangular photographic crop avoids the misleading effect of
+    clipping edited background through the original object's silhouette.  A
+    thin black/white contour identifies the exact footprint while leaving
+    nearby same-category instances visible as explicit distractors.
+    """
+    bbox = padded_mask_bbox(mask, padding_fraction=0.05, min_padding=8)
+
+    def edged_crop(image: Image.Image) -> Image.Image:
+        pixels = np.asarray(image.convert("RGB").crop(bbox), dtype=np.uint8).copy()
+        mask_crop = mask[bbox[1] : bbox[3], bbox[0] : bbox[2]].astype(bool)
+        padded = np.pad(mask_crop, 2, mode="constant", constant_values=False)
+        dilated = np.zeros_like(mask_crop, dtype=bool)
+        eroded = np.ones_like(mask_crop, dtype=bool)
+        for dy in range(5):
+            for dx in range(5):
+                shifted = padded[dy : dy + mask_crop.shape[0], dx : dx + mask_crop.shape[1]]
+                dilated |= shifted
+                eroded &= shifted
+        band = dilated & ~eroded
+        pixels[band] = 0
+        inner = mask_crop & ~eroded
+        pixels[inner] = 255
+        return Image.fromarray(pixels, mode="RGB")
+
+    return _panel(
+        [
+            (edged_crop(source), "SOURCE; TARGET INSIDE B/W EDGE"),
+            (edged_crop(edited), "EDITED; SAME TARGET EDGE"),
+        ],
+        tile_size,
+    )
+
+
 def instruction_target_panel(
     source: Image.Image, mask: np.ndarray, tile_size: int = 512
 ) -> Image.Image:
@@ -92,25 +141,53 @@ def instruction_target_panel(
     )
 
 
+def _difference_map(
+    source_crop: Image.Image, edited_crop: Image.Image, mask_crop: np.ndarray
+) -> Image.Image:
+    """Return a false-color absolute difference map with a white mask contour."""
+    source_array = np.asarray(source_crop.convert("RGB"), dtype=np.float32)
+    edited_array = np.asarray(edited_crop.convert("RGB"), dtype=np.float32)
+    delta = np.abs(source_array - edited_array).mean(axis=2) / 255.0
+    strength = np.clip(delta / 0.35, 0.0, 1.0)
+    heat = np.zeros((*delta.shape, 3), dtype=np.uint8)
+    heat[..., 0] = np.round(255.0 * strength).astype(np.uint8)
+    heat[..., 2] = np.round(255.0 * (1.0 - strength)).astype(np.uint8)
+
+    padded = np.pad(mask_crop.astype(bool), 1, mode="constant", constant_values=False)
+    eroded = np.ones_like(mask_crop, dtype=bool)
+    for dy in range(3):
+        for dx in range(3):
+            eroded &= padded[dy : dy + mask_crop.shape[0], dx : dx + mask_crop.shape[1]]
+    contour = mask_crop.astype(bool) & ~eroded
+    heat[contour] = 255
+    return Image.fromarray(heat, mode="RGB")
+
+
 def audit_visual_inputs(
     source: Image.Image,
     edited: Image.Image,
     mask: np.ndarray,
     full_tile_size: int = 640,
 ) -> tuple[Image.Image, Image.Image, Image.Image]:
-    """Return source localization, aligned edit crop, and full comparison."""
+    """Return source localization, crop-level edit evidence, and full comparison."""
     if edited.size != source.size:
         edited = edited.resize(source.size, Image.Resampling.LANCZOS)
     bbox = padded_mask_bbox(mask)
     source_crop = source.convert("RGB").crop(bbox)
     edited_crop = edited.convert("RGB").crop(bbox)
-    source_localization = _panel(
+    source_localization = target_footprint_comparison(source, edited, mask)
+    mask_crop = mask[bbox[1] : bbox[3], bbox[0] : bbox[2]]
+    detail_comparison = _panel(
         [
-            (source_crop, "CLEAN SOURCE CROP"),
-            (clean_target_cutout(source, mask, bbox), "CLEAN TARGET PIXELS"),
+            (source_crop, "ALIGNED SOURCE CROP"),
             (binary_mask_crop(mask, bbox), "BINARY TARGET MASK"),
+            (edited_crop, "ALIGNED EDITED CROP"),
+            (
+                _difference_map(source_crop, edited_crop, mask_crop),
+                "ABS DIFF; WHITE = MASK EDGE",
+            ),
         ],
-        512,
+        448,
     )
     full_comparison = _panel(
         [
@@ -119,4 +196,4 @@ def audit_visual_inputs(
         ],
         full_tile_size,
     )
-    return source_localization, edited_crop, full_comparison
+    return source_localization, detail_comparison, full_comparison
