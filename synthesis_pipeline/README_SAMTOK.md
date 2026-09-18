@@ -18,8 +18,12 @@ instruction-generation safeguards, per-case manual review policy, and the
   `num_masks - 1` exactly once. Missing or duplicate masks fail immediately.
 - Mask policy: source RLE masks are reused exactly; SAM/SAM2 is not run.
 - Editing: Qwen-Image-Edit-2511 with MIRAGE regional branches.
-- Audit: Qwen3-VL-8B through vLLM continuous batching by default, plus
-  deterministic pixel-locality metrics.
+- Planning localization: a clean target crop, isolated unmodified target-pixel
+  cutout, and separate binary mask; colored overlays are never shown to the
+  instruction VLM.
+- Audit: one Qwen3-VL-8B vLLM call per case with type-specific failure-first
+  criteria, aligned source/edit crops, a full-image comparison, and conservative
+  deterministic review gates.
 
 The checked-in `pilot_plan.jsonl` contains eight representative source rows,
 all with two masks. It therefore produces sixteen independent edit cases from
@@ -27,8 +31,8 @@ eight unique source images. Add/remove/replace/attribute each have four cases.
 
 The newer stratified 100-case pilot is generated with
 `generate_samtok_plan.py`: 50 two-mask sources yield 100 single-region cases,
-GRES/VER and the four edit types are balanced. Its strict 100/100 manual review
-found 72 pass, 7 review, and 21 fail; see the detailed design document for the
+GRES/VER and the four edit types are balanced. Its two-round 100/100 manual review
+found 66 pass, 7 review, and 27 fail; see the detailed design document for the
 per-type breakdown, failure analysis, and artifact paths.
 
 ## Prepare the positive index and pilot
@@ -80,8 +84,11 @@ The output name is the edit case id, while the input is resolved from
 
 ## Audit with vLLM
 
-The vLLM backend supports the same three-image audit prompt and deterministic
-temperature-zero decoding as the Hugging Face backend.
+The vLLM backend receives three annotation-safe views in one call: a clean
+source crop with a clean target-pixel cutout and separate binary mask, the aligned edited crop, and a
+full source/edit comparison. The
+prompt applies distinct add/remove/replace/attribute criteria and asks for
+explicit failure evidence before a verdict. No red-mask overlay is shown.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -91,7 +98,8 @@ CUDA_VISIBLE_DEVICES=0 \
   --source-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/sources \
   --edited-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/edited \
   --out-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/audit_vllm \
-  --batch-size 16 --vlm qwen8b-vllm --vlm-device cuda:0
+  --batch-size 16 --vlm qwen8b-vllm --vlm-device cuda:0 \
+  --max-new-tokens 384
 ```
 
 `qwen8b-vllm` is now the default. Use `--vlm qwen8b` only for an HF baseline.
