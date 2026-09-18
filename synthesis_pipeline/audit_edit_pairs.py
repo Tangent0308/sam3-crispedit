@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from collections import Counter
@@ -23,23 +24,111 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import utils.vlm_utils as vlm
+from synthesis_pipeline.visual_prompt_utils import audit_visual_inputs
 
 
-AUDIT_PROMPT = """Compare three images in order: (1) SOURCE, (2) SOURCE WITH RED TARGET MASK, and (3) EDITED.
+COMMON_AUDIT_PROMPT = """Act as a skeptical visual inspector of one localized image edit. Many candidates are subtly wrong; do not assume success.
+
+IMAGE 1 is a three-part source-localization panel: LEFT is a clean SOURCE crop; MIDDLE isolates the target's original, unmodified photographic pixels on a gray checkerboard; RIGHT is the aligned black/white binary target mask. Only the MIDDLE target pixels and LEFT clean crop contain appearance information. White mask pixels specify geometry only. IMAGE 2 is the exactly aligned EDITED crop. IMAGE 3 shows the FULL SOURCE on the left and FULL EDITED on the right. No mask color is painted over photographic pixels.
+
 Requested edit: <<<INSTRUCTION>>>
-Target region(s): <<<TARGETS>>>
+Named target: <<<TARGETS>>>
+Edit type: <<<TASK_TYPE>>>
 
-Judge the edited result for training-pair quality:
-- The requested change should be visibly present on the intended instance/part.
-- Other same-category instances must remain unedited.
-- Background, composition, identity, and unrelated objects should remain substantially preserved.
-- Small diffusion/rendering differences are acceptable; reject a wrong-instance edit, absent requested change, severe artifacts, or broad scene replacement.
+Type-specific criteria:
+<<<TYPE_CRITERIA>>>
 
-Output one JSON object only:
-{"edit_visible":true,"correct_instance":true,"non_target_preserved":true,"scene_preserved":true,"quality":"pass","reason":"brief visible evidence"}
-`quality` must be `pass`, `review`, or `fail`. No markdown or extra text."""
+First identify the source target from the isolated clean target pixels and use the binary mask only for its extent. Then inspect the clean context crop without trusting nouns or claims in the instruction. If the Named target or instruction points to a nearby object outside the mask, record source_mismatch. Never infer color, texture, material, or identity from the black/white mask or checkerboard. Briefly inventory the actual masked target, its visible color/material, its parts, and its count in SOURCE and EDITED. A pixel difference alone is not proof that the requested semantic result exists. The requested result must also be recognizable in the full EDITED image at useful training scale.
 
-AUDIT_VERSION = "edit_pair_visual_locality_v2_cached"
+Then fill five failure slots. Each slot must be JSON null only after visually verifying that failure is absent; otherwise write concise visible evidence:
+- source_mismatch: a pre-edit descriptor/precondition in the instruction is false in SOURCE, or requested added content already exists.
+- completion_failure: requested semantic change is missing, too weak to recognize, partial, or leaves old-target residue.
+- target_or_count_failure: wrong instance/part changed, or requested count/extent is not satisfied.
+- dependency_failure: attached/held/worn/dependent content is left implausibly, or content that should remain is incorrectly removed.
+- preservation_or_artifact_failure: a non-target instance, background, composition, or identity changes materially, or there are ghosts, overlaps, seams, or malformed content.
+
+Any definite non-null failure means `fail`, not `review`. Use `review` only for genuinely irresolvable visual ambiguity. Use `pass` only when all five failure slots are null. Do not merely restate the request as evidence.
+
+Return one compact JSON object only with exactly these keys:
+`source_inventory` (string), `edited_inventory` (string), `source_mismatch` (null or string), `completion_failure` (null or string), `target_or_count_failure` (null or string), `dependency_failure` (null or string), `preservation_or_artifact_failure` (null or string), `quality` (`pass`, `review`, or `fail`), and `reason` (string)."""
+
+TYPE_CRITERIA = {
+    "add": (
+        "State whether the requested content is visibly absent in SOURCE, then name "
+        "what is actually visible in EDITED without borrowing its identity from the "
+        "instruction. It must be clearly recognizable at the intended target while "
+        "existing target content remains intact."
+    ),
+    "remove": (
+        "Explicitly compare the requested count and visible semantic parts in both "
+        "crops. The entire coherent target and all requested instances must disappear, "
+        "including portions adjacent to or overlapping another instance, with no "
+        "silhouette, body section, extremity, edge, fragment, ghost, or overlap left. Directly attached, worn, "
+        "carried, or held content that the target owns/supports and that cannot "
+        "plausibly remain by itself must also disappear unless the instruction "
+        "explicitly preserves it. An independent nearby actor/object must remain. The "
+        "revealed background must be reconstructed while independent objects remain."
+    ),
+    "replace": (
+        "Independently name the visible old identity in SOURCE and what the new pixels "
+        "in EDITED actually look like. If the requested replacement identity is not "
+        "unmistakably recognizable, mark completion_failure. The old target must disappear completely and the requested replacement "
+        "identity must be clearly present at the same location with plausible scale "
+        "and orientation. A mere recolor, weak texture change, mixture with the old "
+        "target, or nearly invisible change does not count as replacement."
+    ),
+    "attribute": (
+        "The requested attribute must visibly change on the entire intended target "
+        "or specified part. Its identity, geometry, pose, and count must remain, and "
+        "the same attribute on non-target instances must not change."
+    ),
+}
+
+AUDIT_FAILURE_KEYS = (
+    "source_mismatch",
+    "completion_failure",
+    "target_or_count_failure",
+    "dependency_failure",
+    "preservation_or_artifact_failure",
+)
+
+AUDIT_VERSION = "edit_pair_failure_first_localized_v7_cached"
+
+COLOR_WORDS = {
+    "black",
+    "blue",
+    "brown",
+    "gold",
+    "gray",
+    "green",
+    "grey",
+    "orange",
+    "pink",
+    "purple",
+    "red",
+    "silver",
+    "white",
+    "yellow",
+}
+
+MINIMUM_INSIDE_CHANGED_FRACTION = {
+    "add": 0.08,
+    "remove": 0.75,
+    "replace": 0.45,
+    "attribute": 0.10,
+}
+MAXIMUM_OUTSIDE_GUARD_CHANGED_FRACTION = 0.12
+DEPENDENT_OBJECT_TERMS = {
+    "backpack",
+    "bag",
+    "bicycle",
+    "bike",
+    "cart",
+    "leash",
+    "stroller",
+    "suitcase",
+    "umbrella",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,7 +155,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vlm-model-id", default=None)
     parser.add_argument("--vlm-device", default="cuda:0")
     parser.add_argument("--vlm-dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
-    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--max-new-tokens", type=int, default=384)
     parser.add_argument(
         "--resume",
         action=argparse.BooleanOptionalAction,
@@ -106,15 +195,20 @@ def input_fingerprint(
 ) -> str:
     payload = {
         "audit_version": AUDIT_VERSION,
-        "audit_prompt": AUDIT_PROMPT,
+        "audit_prompt": build_audit_prompt(row),
         "image": row.get("image"),
         "source_image": row.get("source_image"),
         "editing_instruction": row.get("editing_instruction"),
         "refer_object": row.get("refer_object"),
+        "planning_visual_input": row.get("planning_visual_input"),
         "mask": row.get("mask"),
         "source_sha256": file_sha256(source_path),
         "edited_sha256": file_sha256(edited_path),
         "guard_pixels": args.guard_pixels,
+        "minimum_inside_changed_fraction": MINIMUM_INSIDE_CHANGED_FRACTION,
+        "maximum_outside_guard_changed_fraction": (
+            MAXIMUM_OUTSIDE_GUARD_CHANGED_FRACTION
+        ),
         "vlm": args.vlm,
         "vlm_model_id": args.vlm_model_id,
         "vlm_dtype": args.vlm_dtype,
@@ -198,14 +292,6 @@ def mask_array(size: tuple[int, int], masks: Any) -> np.ndarray:
     return np.asarray(canvas, dtype=np.uint8) > 0
 
 
-def mask_overlay(image: Image.Image, mask: np.ndarray) -> Image.Image:
-    base = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
-    red = np.zeros_like(base)
-    red[..., 0] = 255
-    base[mask] = np.round(base[mask] * 0.45 + red[mask] * 0.55).astype(np.uint8)
-    return Image.fromarray(base)
-
-
 def locality_metrics(
     source: Image.Image, edited: Image.Image, mask: np.ndarray, guard_pixels: int
 ) -> dict[str, float]:
@@ -237,23 +323,135 @@ def locality_metrics(
     }
 
 
+def normalized_task_type(row: dict[str, Any]) -> str:
+    task_type = str(row.get("task_type", "")).strip().lower()
+    if task_type not in TYPE_CRITERIA:
+        raise ValueError(f"Unsupported task_type for audit: {task_type!r}")
+    return task_type
+
+
+def refer_object_text(row: dict[str, Any]) -> str:
+    value = row.get("refer_object", [])
+    values = value if isinstance(value, list) else [value]
+    return "; ".join(str(item) for item in values if str(item).strip())
+
+
+def build_audit_prompt(row: dict[str, Any]) -> str:
+    task_type = normalized_task_type(row)
+    prompt = COMMON_AUDIT_PROMPT.replace(
+        "INSTRUCTION", str(row.get("editing_instruction", ""))
+    )
+    targets = refer_object_text(row)
+    return (
+        prompt.replace("TARGETS", targets)
+        .replace("TASK_TYPE", task_type)
+        .replace("TYPE_CRITERIA", TYPE_CRITERIA[task_type])
+    )
+
+
 def audit_messages(
-    source: Image.Image, overlay: Image.Image, edited: Image.Image, row: dict[str, Any]
+    source_localization: Image.Image,
+    edited_crop: Image.Image,
+    full_comparison: Image.Image,
+    row: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    prompt = AUDIT_PROMPT.replace("INSTRUCTION", str(row.get("editing_instruction", "")))
-    targets = "; ".join(str(value) for value in row.get("refer_object", []))
-    prompt = prompt.replace("TARGETS", targets)
     return [
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": source},
-                {"type": "image", "image": overlay},
-                {"type": "image", "image": edited},
-                {"type": "text", "text": prompt},
+                {"type": "image", "image": source_localization},
+                {"type": "image", "image": edited_crop},
+                {"type": "image", "image": full_comparison},
+                {"type": "text", "text": build_audit_prompt(row)},
             ],
         }
     ]
+
+
+def normalize_audit_result(value: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Validate failure-first evidence and prevent a contradictory `pass`."""
+    if not value:
+        return None
+    normalized = dict(value)
+    model_quality = str(normalized.get("quality", "")).strip().lower()
+    if model_quality not in {"pass", "review", "fail"}:
+        return None
+    for key in ("source_inventory", "edited_inventory", "reason"):
+        if not str(normalized.get(key, "")).strip():
+            return None
+    detected_failures = []
+    for key in AUDIT_FAILURE_KEYS:
+        if key not in normalized:
+            return None
+        evidence = normalized.get(key)
+        if evidence is None:
+            continue
+        if not isinstance(evidence, str):
+            return None
+        stripped = evidence.strip()
+        if not stripped or stripped.lower() in {"none", "null", "n/a", "no"}:
+            normalized[key] = None
+            continue
+        normalized[key] = stripped
+        detected_failures.append(key)
+    normalized["model_quality"] = model_quality
+    normalized["failure_tags"] = detected_failures
+    # A generated `pass` must never override explicit failure evidence.
+    normalized["quality"] = "fail" if detected_failures else model_quality
+    return normalized
+
+
+def deterministic_review_warnings(
+    row: dict[str, Any], metrics: dict[str, float], audit: Optional[dict[str, Any]]
+) -> list[str]:
+    """Conservatively stop suspicious VLM passes without another model call."""
+    task_type = normalized_task_type(row)
+    inside_changed = metrics["inside_changed_fraction"]
+    outside_changed = metrics["outside_guard_changed_fraction"]
+    warnings = []
+    minimum_inside_change = MINIMUM_INSIDE_CHANGED_FRACTION[task_type]
+    if inside_changed < minimum_inside_change:
+        warnings.append(f"weak_{task_type}_pixel_change")
+    if outside_changed > MAXIMUM_OUTSIDE_GUARD_CHANGED_FRACTION:
+        warnings.append("broad_change_outside_target_guard")
+
+    # A color used by refer_object describes the source target, not the desired
+    # result. If the VLM's independent SOURCE inventory cannot confirm it, the
+    # pair must not auto-pass. This directly guards against annotation-color
+    # leakage while remaining a review (not an automatic rejection).
+    if audit:
+        refer_text = refer_object_text(row)
+        refer_colors = {
+            token
+            for token in re.findall(r"[a-z]+", refer_text.lower())
+            if token in COLOR_WORDS
+        }
+        source_tokens = set(
+            re.findall(r"[a-z]+", str(audit.get("source_inventory", "")).lower())
+        )
+        normalized_source_colors = {
+            "gray" if token == "grey" else token for token in source_tokens
+        }
+        normalized_refer_colors = {
+            "gray" if token == "grey" else token for token in refer_colors
+        }
+        planning_visual_input = str(row.get("planning_visual_input", ""))
+        if planning_visual_input.startswith("clean_crop_cutout_binary"):
+            for color in sorted(normalized_refer_colors - normalized_source_colors):
+                warnings.append(f"source_color_not_confirmed:{color}")
+        elif "red" in normalized_refer_colors:
+            warnings.append("legacy_red_source_descriptor_requires_review")
+
+        if task_type == "remove" and outside_changed < 0.05:
+            source_terms = source_tokens & DEPENDENT_OBJECT_TERMS
+            instruction_tokens = set(
+                re.findall(
+                    r"[a-z]+", str(row.get("editing_instruction", "")).lower()
+                )
+            )
+            for term in sorted(source_terms - instruction_tokens):
+                warnings.append(f"dependent_scope_unverified:{term}")
+    return warnings
 
 
 def quantiles(values: list[float]) -> dict[str, float]:
@@ -302,13 +500,17 @@ def main() -> None:
         with Image.open(edited_path) as handle:
             edited = handle.convert("RGB")
         mask = mask_array(source.size, row.get("mask", []))
-        overlay = mask_overlay(source, mask)
+        source_localization, edited_crop, full_comparison = audit_visual_inputs(
+            source, edited, mask
+        )
         tasks.append(
             {
                 "row": row,
                 "source": source,
                 "edited": edited,
-                "overlay": overlay,
+                "source_localization": source_localization,
+                "edited_crop": edited_crop,
+                "full_comparison": full_comparison,
                 "metrics": locality_metrics(source, edited, mask, args.guard_pixels),
                 "input_fingerprint": fingerprint,
             }
@@ -331,7 +533,10 @@ def main() -> None:
             outputs = backend.chat_batch(
                 [
                     audit_messages(
-                        task["source"], task["overlay"], task["edited"], task["row"]
+                        task["source_localization"],
+                        task["edited_crop"],
+                        task["full_comparison"],
+                        task["row"],
                     )
                     for task in batch
                 ],
@@ -339,12 +544,21 @@ def main() -> None:
             )
             inference_seconds += time.perf_counter() - inference_started
             for task, raw in zip(batch, outputs):
-                parsed = parse_json_object(raw)
+                parsed = normalize_audit_result(parse_json_object(raw))
                 quality = (
                     str(parsed.get("quality", "parse_error"))
                     if parsed
                     else "parse_error"
                 )
+                metric_warnings = deterministic_review_warnings(
+                    task["row"], task["metrics"], parsed
+                )
+                if parsed:
+                    parsed["metric_warnings"] = metric_warnings
+                    if quality == "pass" and metric_warnings:
+                        parsed["quality_before_metric_guard"] = quality
+                        parsed["quality"] = "review"
+                        quality = "review"
                 output_by_image[str(task["row"].get("image", ""))] = {
                     "image": task["row"].get("image"),
                     "editing_instruction": task["row"].get("editing_instruction"),
@@ -365,12 +579,27 @@ def main() -> None:
     summary = {
         "cases": len(output_rows),
         "quality_counts": dict(sorted(Counter(row["quality"] for row in output_rows).items())),
+        "metric_warning_counts": dict(
+            sorted(
+                Counter(
+                    warning
+                    for row in output_rows
+                    for warning in (row.get("audit") or {}).get("metric_warnings", [])
+                ).items()
+            )
+        ),
         "metric_quantiles": {
             name: quantiles([row["locality_metrics"][name] for row in output_rows])
             for name in metric_names
         },
         "guard_pixels": args.guard_pixels,
+        "minimum_inside_changed_fraction": MINIMUM_INSIDE_CHANGED_FRACTION,
+        "maximum_outside_guard_changed_fraction": (
+            MAXIMUM_OUTSIDE_GUARD_CHANGED_FRACTION
+        ),
         "audit_version": AUDIT_VERSION,
+        "vlm_calls": len(tasks),
+        "calls_per_audited_case": 1.0 if tasks else 0.0,
         "audited_cases": len(tasks),
         "reused_cases": reused_cases,
         "resume": args.resume,

@@ -314,6 +314,10 @@ def materialize_plan(
                 "parquet_row_index": row_index,
                 "mask_index": mask_index,
             }
+            if edit.get("planning_visual_input"):
+                annotation["planning_visual_input"] = str(
+                    edit["planning_visual_input"]
+                )
             annotations.append(annotation)
             provenance_rows.append(
                 {

@@ -4,8 +4,8 @@ This is a pilot sampler, not a production eligibility filter. It samples an
 equal number of two-mask GRES and VER rows so that every selected source can be
 reused twice and the requested edit-case count is exact. Within each subset the
 rows are stratified by minimum region area to retain both tiny/hard and larger
-targets. Qwen3-VL sees the clean source and one red-mask overlay and writes one
-localized edit instruction for every original mask.
+targets. Qwen3-VL sees the clean source plus an annotation-safe target panel
+and writes one localized edit instruction for every original mask.
 """
 
 from __future__ import annotations
@@ -30,43 +30,50 @@ from tqdm import tqdm
 from synthesis_pipeline.prepare_samtok_data import (
     decode_rle,
     load_jsonl,
-    overlay_masks,
     qwen_canvas_size,
     resize_mask,
 )
+from synthesis_pipeline.visual_prompt_utils import instruction_target_panel
 import utils.vlm_utils as vlm
 
 
 TASK_TYPES = ("add", "remove", "replace", "attribute")
+PLANNING_VISUAL_INPUT_VERSION = "clean_crop_cutout_binary_v2"
 FORBIDDEN_OUTPUT_PATTERN = re.compile(
-    r"\b(marked|mask|overlay|highlighted|bbox|coordinates?|target region)\w*\b",
+    r"\b(marked|mask|overlay|annotations?|highlighted|bbox|coordinates?|target region|"
+    r"panels?|source crop|image [12])\w*\b",
     flags=re.IGNORECASE,
 )
 TYPE_GUIDANCE = {
     "add": (
-        "Add one small, clearly visible and semantically plausible accessory or "
-        "detail to the marked target (for example a collar, hat, sticker, ribbon, "
-        "or light). Do not add a second copy of the target itself."
+        "Choose one small, clearly visible addition solely from the clean image's "
+        "scene context and target semantics. It must be plausible in this specific "
+        "scene, absent from the source target, and not a second copy of the target."
     ),
     "remove": (
-        "Remove the entire marked target and reconstruct the occluded background "
-        "naturally. Do not remove similar non-target instances."
+        "Remove the entire target and reconstruct every revealed part of the "
+        "background naturally. Also remove an element only when the target itself "
+        "physically supports, wears, carries, or holds that element and it cannot "
+        "plausibly remain alone. Do not remove an independent nearby actor or object "
+        "merely because it touches, uses, observes, or stands near the target. Preserve "
+        "separate scene objects and similar non-target instances."
     ),
     "replace": (
-        "Replace the entire marked target with exactly one visually distinct but "
+        "Replace the entire target with exactly one visually distinct but "
         "scene-plausible object of similar pose and scale. The replacement must "
         "change object identity, category, or model; a color or clothing change "
         "alone is an attribute edit and is invalid here."
     ),
     "attribute": (
-        "Change one conspicuous local attribute of the marked target, such as its "
-        "color, material, or pattern, while preserving identity, geometry, and pose."
+        "Change one conspicuous local visual attribute of the target while "
+        "preserving its identity, geometry, pose, and count."
     ),
 }
 
 PROMPT = """You are designing one difficult, localized image-editing training example.
 
-IMAGE 1 is the clean source. IMAGE 2 is the same image with exactly one target region highlighted in RED.
+IMAGE 1 is the clean full source and is authoritative for every real color, material, object, and count.
+IMAGE 2 is a three-part localization panel: LEFT is an unmodified clean crop around the target; MIDDLE isolates the target's original, unmodified photographic pixels on a gray checkerboard; RIGHT is a black/white binary mask aligned to that crop. Only the MIDDLE target pixels and LEFT clean crop contain appearance information. White mask pixels encode geometry only.
 Original referring question: <<<QUESTION>>>
 Original answer: <<<ANSWER>>>
 Required edit type: <<<TASK_TYPE>>>
@@ -75,13 +82,16 @@ Task-specific rule:
 <<<TYPE_GUIDANCE>>>
 
 Requirements:
-- Identify only the red-marked instance. The final text must NOT mention a red mask, overlay, bbox, coordinates, or mask index.
-- RED in IMAGE 2 is only an annotation color. Never claim that the source object is red unless it is visibly red in IMAGE 1.
+- First identify the target from the isolated clean target pixels, then use the clean crop and full image for context. Use the original question and answer only as supporting context; trust the isolated and clean pixels if text and image conflict.
+- Never infer color, material, texture, identity, or object name from the black/white mask. Every descriptive attribute in the output must be visibly confirmed in the clean source or clean crop.
+- The final text must NOT mention the panel, crop, mask, annotation, bbox, coordinates, image number, or target region.
 - Write a concise visual referring expression that distinguishes this instance from same-category instances using visible relations, position, appearance, or context.
+- If the one mask covers multiple objects or parts, explicitly state the visible count or full extent so the edit cannot be partially completed.
 - The edit must be localized, unambiguous, visibly judgeable, and realistic for this scene and target size.
 - The requested new object/attribute must not already be present on the target in IMAGE 1.
 - For a tiny target, prefer a simple high-contrast change that remains visible after editing.
 - Explicitly preserve other same-category instances and unrelated scene content.
+- For add, invent the addition from this scene alone; do not copy an item from a fixed or suggested catalog.
 - Use ASCII English.
 
 Return exactly one JSON object and no markdown:
@@ -181,9 +191,9 @@ def build_prompt(row: dict[str, Any], task_type: str) -> str:
     )
 
 
-def audit_messages(
+def instruction_messages(
     source: Image.Image,
-    overlay: Image.Image,
+    target_panel: Image.Image,
     row: dict[str, Any],
     task_type: str,
     previous_response: str | None = None,
@@ -191,10 +201,10 @@ def audit_messages(
     prompt = build_prompt(row, task_type)
     if previous_response:
         prompt += (
-            "\n\nYour previous response was invalid because it leaked mask/overlay "
+            "\n\nYour previous response was invalid because it leaked annotation "
             "language or copied a generic task rule. Rewrite it with a concrete "
-            "visible target expression and scene-specific edit. Never use the words "
-            "marked, mask, overlay, highlighted, bbox, coordinate, or target region. "
+            "visible target expression and scene-specific edit. Do not refer to any "
+            "panel, crop, mask, annotation, image number, or target region. "
             "Previous response:\n" + previous_response[:1600]
         )
     return [
@@ -202,7 +212,7 @@ def audit_messages(
             "role": "user",
             "content": [
                 {"type": "image", "image": source},
-                {"type": "image", "image": overlay},
+                {"type": "image", "image": target_panel},
                 {"type": "text", "text": prompt},
             ],
         }
@@ -226,7 +236,9 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
 
 GENERIC_INSTRUCTION_PATTERN = re.compile(
     r"\b(?:semantically plausible|visible) accessor(?:y|ies)\b|"
-    r"\baccessory or detail\b|\bplausible object or detail\b",
+    r"\baccessory or detail\b|\bplausible object or detail\b|"
+    r"\bscene-(?:appropriate|plausible) (?:addition|object|detail)\b|"
+    r"\bsmall,? clearly visible addition\b",
     flags=re.IGNORECASE,
 )
 TYPE_ACTION_PATTERNS = {
@@ -254,6 +266,8 @@ def normalize_generated(
         return None
     if not TYPE_ACTION_PATTERNS[task_type].search(normalized["editing_instruction"]):
         return None
+    if not TYPE_ACTION_PATTERNS[task_type].search(normalized["new_instruction"]):
+        return None
     return normalized
 
 
@@ -262,7 +276,7 @@ def deterministic_fallback(raw: str, task_type: str) -> dict[str, str] | None:
 
     This fallback never invents a new edit. It retains the model's concrete
     target expression and short regional instruction, then adds preservation
-    language without any mask/overlay terminology.
+    language without any annotation terminology.
     """
     value = parse_json_object(raw)
     if not value:
@@ -280,8 +294,9 @@ def deterministic_fallback(raw: str, task_type: str) -> dict[str, str] | None:
         return None
     if task_type == "remove":
         editing_instruction = (
-            f"Remove only {refer_object} and reconstruct the background naturally; "
-            "preserve all other people, objects, and scene content."
+            f"Remove {refer_object} completely, including any directly attached or "
+            "held elements that cannot plausibly remain alone, and reconstruct the "
+            "background naturally; preserve independent objects and other instances."
         )
     else:
         editing_instruction = (
@@ -302,9 +317,9 @@ def main() -> None:
     args = parse_args()
     started = time.perf_counter()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    overlay_dir = args.output_dir / "instruction_overlays"
+    panel_dir = args.output_dir / "instruction_target_panels"
     source_dir = args.output_dir / "instruction_sources"
-    overlay_dir.mkdir(parents=True, exist_ok=True)
+    panel_dir.mkdir(parents=True, exist_ok=True)
     source_dir.mkdir(parents=True, exist_ok=True)
 
     positive_rows = load_jsonl(args.positive_index)
@@ -329,17 +344,17 @@ def main() -> None:
         for mask_index, raw_rle in enumerate(row["masks"]):
             task_type = TASK_TYPES[(source_position * 2 + mask_index) % len(TASK_TYPES)]
             mask = resize_mask(decode_rle(raw_rle), canvas_size)
-            overlay = overlay_masks(source, [mask])
-            overlay_name = f"{row['source_subset']}_r{row_index}_m{mask_index}_{task_type}.jpg"
-            overlay.save(overlay_dir / overlay_name, quality=92)
+            target_panel = instruction_target_panel(source, mask)
+            panel_name = f"{row['source_subset']}_r{row_index}_m{mask_index}_{task_type}.jpg"
+            target_panel.save(panel_dir / panel_name, quality=95)
             tasks.append(
                 {
                     "row": row,
                     "mask_index": mask_index,
                     "task_type": task_type,
                     "source": source.copy(),
-                    "overlay": overlay,
-                    "overlay_name": overlay_name,
+                    "target_panel": target_panel,
+                    "panel_name": panel_name,
                 }
             )
 
@@ -370,9 +385,9 @@ def main() -> None:
             inference_started = time.perf_counter()
             outputs = backend.chat_batch(
                 [
-                    audit_messages(
+                    instruction_messages(
                         task["source"],
-                        task["overlay"],
+                        task["target_panel"],
                         task["row"],
                         task["task_type"],
                         task.get("previous_response"),
@@ -388,7 +403,7 @@ def main() -> None:
                     "parquet_row_index": task["row"]["parquet_row_index"],
                     "mask_index": task["mask_index"],
                     "task_type": task["task_type"],
-                    "overlay": task["overlay_name"],
+                    "target_panel": task["panel_name"],
                     "attempt": attempt + 1,
                     "parsed": generated,
                     "raw_response": raw,
@@ -411,7 +426,7 @@ def main() -> None:
                     "parquet_row_index": task["row"]["parquet_row_index"],
                     "mask_index": task["mask_index"],
                     "task_type": task["task_type"],
-                    "overlay": task["overlay_name"],
+                    "target_panel": task["panel_name"],
                     "attempt": "deterministic_fallback",
                     "parsed": generated,
                     "raw_response": task.get("previous_response"),
@@ -453,6 +468,7 @@ def main() -> None:
                     "mask_index": task["mask_index"],
                     "name": f"auto_{task['task_type']}",
                     "task_type": task["task_type"],
+                    "planning_visual_input": PLANNING_VISUAL_INPUT_VERSION,
                     **task["generated"],
                 }
             )

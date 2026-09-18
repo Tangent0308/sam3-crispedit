@@ -41,9 +41,10 @@ GRES-8k/VER-4k 的原图与实例 mask，构造具有定位难度的单区域图
 
 ### 3.1 Add
 
-给目标增加一个小而清晰、语义合理的附属物或局部细节，例如领结、丝带、贴纸、
-灯、徽章或帽子。约束为只给指定实例添加，不生成目标本身的第二个副本；小目标
-优先选择高对比、编辑后仍可观察的变化。
+给目标增加一个小而清晰、语义合理的附属物或局部细节。新增内容必须由模型根据
+当前干净图像的场景和目标语义自行决定，prompt 不提供物体清单或具体例子，避免
+模型反复生成示例中的有限类别。约束为只给指定实例添加，不生成目标本身的第二个
+副本；小目标优先选择高对比、编辑后仍可观察的变化。
 
 ### 3.2 Remove
 
@@ -87,8 +88,10 @@ SAMTok parquet
 
 `generate_samtok_plan.py` 以固定 seed 采样，并给 Qwen3-VL-8B-Instruct 同时提供：
 
-1. 干净 source；
-2. 仅当前 region 红色高亮的 source；
+1. 干净 source 全图，作为颜色、材质、类别和数量的唯一外观依据；
+2. annotation-safe target panel：左侧为未经涂色的 target 局部 crop，中间是在灰色
+   棋盘格上仅保留原始 target 像素的 clean cutout，右侧为独立的黑底白色二值 mask；
+   cutout 负责目标外观识别，mask 只表达几何范围；
 3. SAMTok 原始 referring question/answer；
 4. 当前必须生成的 edit type 及类型专属约束。
 
@@ -103,10 +106,25 @@ SAMTok parquet
 模板时，确定性 fallback 只复用模型已给出的具体 `refer_object` 与短编辑，不创造
 新语义，并补充“仅改变该实例、保留其他内容”的约束。成功重跑会清除旧失败清单。
 
-100-case 人工审查后又增加了三项保护：明确告知模型红色只来自 overlay、不得把它
-误认为 source 属性；add 的新内容不得已存在；replace 必须改变身份/类别/型号而非
-只改颜色或衣服。校验器还会拒绝泛化的“add a plausible accessory”模板和与任务
-类型动作词不一致的指令。它们作用于后续新计划，本节实测的 100 条没有追溯重生成。
+100-case 复查发现，即使 prompt 明确声明红色只是标注，Qwen3-VL 仍会把高显著度的
+整块红色 overlay 复制为 source 属性，生成 `red train`、`red elephant`、`red shirt`
+和 `red patch` 等错误描述。因此当前实现不再向规划模型提供任何涂色后的原图。
+clean crop 负责外观识别，独立 binary mask 只负责定位，从输入表示上消除标注色泄漏。
+新计划把 `planning_visual_input=clean_crop_cutout_binary_v2` 写入 annotation/provenance，
+使审核器可以区分旧 red-overlay 指令与新输入表示；旧数据中的 source-red 描述默认进入
+review，而新数据仅在 clean source inventory 无法确认对应颜色时进入 review。
+
+remove 会要求同时移除在主体消失后无法合理独立存在的直接附着、穿戴、携带或手持
+内容，并保留可独立存在的场景对象与其他实例。若一个 mask 覆盖多个对象或部件，
+指令必须写明可见数量或完整范围，降低少删一个对象的概率。add 不再提供任何候选
+物体示例，只要求根据当前场景产生合理且原图中不存在的内容；replace 仍要求改变
+身份/类别/型号而非只改颜色或衣服。文本校验器拒绝标注术语、泛化模板和任务动作词
+不一致的输出，并在失败时重试。
+
+对 5 个已知污染 case 做定向规划复测后，错误颜色均消失：原来的 `red train` 被识别
+为写有站名的绿色标牌，`red elephant` 改为按相对位置指代大象，`red shirt` 改为蓝帽和
+浅色上衣，`red patch` 被重新识别为河岸上的人，`red wall` 场景则基于白色马桶和蓝色
+瓷砖产生新增指令。这次复测只验证新规划输入和 prompt，没有覆盖旧 100-case 产物。
 
 ### 4.3 数据物化
 
@@ -115,7 +133,7 @@ SAMTok parquet
 
 - 原始 COCO RLE 的画布版 RLE；
 - 二值 mask PNG；
-- 红色 target overlay；
+- 供人工可视化使用的红色 target overlay；该图不进入规划或自动审核 VLM；
 - MIRAGE crop instruction 及 bbox；
 - 含原始问题/答案、hash、尺寸和面积的 provenance。
 
@@ -126,9 +144,10 @@ SAMTok parquet
   "image": "000_gres_r296_m0_auto_auto_add.png",
   "source_image": "source_gres_r296.png",
   "editing_instruction": "Add a small brass bell ...",
-  "refer_object": ["the red steam locomotive on the platform"],
+  "refer_object": ["the steam locomotive with the number 178 on its front"],
   "mask": [{"size": [896, 1184], "counts": "..."}],
   "task_type": "add",
+  "planning_visual_input": "clean_crop_cutout_binary_v2",
   "source_subset": "gres",
   "parquet_row_index": 296,
   "mask_index": 0
@@ -148,17 +167,38 @@ MIRAGE 使用 source 全图分支和基于 mask/crop 的区域分支，在扩散
 ### 4.5 自动审核
 
 `audit_edit_pairs.py` 对每条 case 计算 mask 内、mask 膨胀保护区外和全图的平均绝对
-像素差及变化像素比例。它同时把 source、红色 mask overlay、edited 三张图和指令
-送入 Qwen3-VL-8B，检查：
+像素差及变化像素比例。审核输入同样不使用彩色 overlay，而是按如下顺序提供三张图：
 
-- 请求的变化是否可见；
-- 是否命中正确实例；
-- 同类非目标是否保留；
-- 背景、构图和无关物体是否基本保持；
-- 是否存在严重伪影或广泛场景重绘。
+1. source-localization panel：左侧为放大且未涂色的 SOURCE crop，中间为只保留原始
+   target 像素的 clean cutout，右侧为独立黑白 binary mask；当文字与定位冲突时以
+   clean cutout 和 mask 为准；
+2. 与 source crop 完全对齐的放大 EDITED crop；
+3. 左右并排的 SOURCE/EDITED 全图，用于检查全局保持和正常显示尺度下的可见性。
+
+每条 case 仍只调用一次 Qwen3-VL-8B。prompt 采用 failure-first 结构，先要求模型不
+依赖指令中的名词，独立描述 source 与 edited 中实际可见的对象、部件和数量，再填写
+五个失败槽：source 描述不一致、编辑未完成、错实例/数量、依附物处理错误、非目标
+变化/伪影。任一槽位给出明确证据时，程序会强制判为 `fail`，不能被模型同时输出的
+`pass` 覆盖；只有视觉证据确实无法确定时才允许 `review`。
+
+四种编辑类型使用不同标准：
+
+- add：新增内容必须在 source 不存在，在 edited 中可明确识别，并且不能替换或破坏
+  原目标；
+- remove：要求目标的所有实例、重叠部分和残留轮廓完整消失，同时处理不能独立存在的
+  依附内容并自然补全背景；
+- replace：旧身份必须完整消失，新身份必须清楚可辨；仅改色、弱纹理变化或新旧混合
+  均失败；
+- attribute：指定属性必须覆盖预期部位且清楚可见，目标身份、几何、姿态、数量以及
+  非目标同类实例保持不变。
+
+VLM 结论之后不增加模型调用，而是用已有像素指标做保守 review gate：各类型的 mask
+内变化过弱、保护区外变化过广，或 `refer_object` 中的 source 颜色未被模型的独立
+source inventory 确认时，原本的自动 `pass` 会降为 `review`。这一步用于拦截小目标
+缺失、部分 remove 和标注色泄漏，不直接把边界 case 判死。
 
 默认使用 vLLM continuous batching，temperature 为 0，并以输入内容 hash 支持安全
-resume。vLLM 只加速审核推理，不改变审核模型和 prompt。
+resume。vLLM 只改变推理调度，不改变审核模型；单条 case 始终只有一次审核调用。
 
 ### 4.6 人工逐条审核
 
@@ -222,7 +262,7 @@ CUDA_VISIBLE_DEVICES=0 $PYTHON synthesis_pipeline/audit_edit_pairs.py \
   --source-dir "$DATA_ROOT/sources" --edited-dir "$DATA_ROOT/edited" \
   --out-dir "$DATA_ROOT/audit_vllm" --batch-size 16 \
   --vlm qwen8b-vllm --vlm-device cuda:0 --vlm-dtype bf16 \
-  --max-new-tokens 256 --no-resume
+  --max-new-tokens 384 --no-resume
 
 # 人工看完每条 case 后，将结论写入 decisions JSON，再物化并强制校验 100% 覆盖。
 python3 synthesis_pipeline/materialize_manual_review.py \
@@ -261,7 +301,7 @@ pilot_100_v1/
     instruction_responses.jsonl
     instruction_summary.json
     instruction_sources/
-    instruction_overlays/
+    instruction_target_panels/ # clean crop + separate binary mask; no colored overlay
   sources/                 # 50 shared source images
   masks/                   # 100 binary masks
   overlays/                # 100 target overlays
@@ -271,6 +311,7 @@ pilot_100_v1/
   audit_vllm/
     edit_audit.jsonl
     summary.json
+  audit_v7_failure_first/  # 本轮 failure-first 单次调用审核结果
   manual_review.jsonl
   manual_review_summary.json
   gallery/
@@ -279,6 +320,7 @@ pilot_100_v1/
     ...
     contact_sheet_090_099.jpg
     index.html
+  gallery_v7_audit/       # v7 audit + 第二轮人工复核后的可视化
 ```
 
 ## 7. 实测结果
@@ -336,38 +378,41 @@ mask 面积比例分布如下：
 
 ### 7.3 100/100 人工质量审查
 
-最终人工结论为 72 pass、7 review、21 fail。`review` 表示视觉结果可用，但需要
-修正文案、重分类或接受部分完成；将其计入候选时可用率为 79%。
+结合用户对可视化结果的第二轮复核，人工结论更新为 66 pass、7 review、27 fail。
+`review` 表示视觉结果可用，但需要修正文案、重分类或接受部分完成；将其计入候选时
+可用率为 73%。
 
 | 类型 | pass | review | fail | pass rate | pass + review |
 |---|---:|---:|---:|---:|---:|
-| add | 16 | 0 | 9 | 64% | 64% |
-| remove | 19 | 1 | 5 | 76% | 80% |
-| replace | 17 | 5 | 3 | 68% | 88% |
+| add | 15 | 0 | 10 | 60% | 60% |
+| remove | 15 | 1 | 9 | 60% | 64% |
+| replace | 16 | 5 | 4 | 64% | 84% |
 | attribute | 20 | 1 | 4 | 80% | 84% |
-| **总计** | **72** | **7** | **21** | **72%** | **79%** |
+| **总计** | **66** | **7** | **27** | **66%** | **73%** |
 
-按来源看，GRES 为 38 pass / 4 review / 8 fail（76% pass），VER 为
-34 pass / 3 review / 13 fail（68% pass）。VER 的关系/局部 mask 更细、更难，
+按来源看，GRES 为 34 pass / 4 review / 12 fail（68% pass），VER 为
+32 pass / 3 review / 15 fail（64% pass）。VER 的关系/局部 mask 更细、更难，
 但指代语义与 mask 不一致的风险也更高。
 
 | 面积层 | pass | review | fail | pass rate |
 |---|---:|---:|---:|---:|
-| 0（最小） | 17 | 1 | 2 | 85% |
+| 0（最小） | 15 | 1 | 4 | 75% |
 | 1 | 13 | 1 | 6 | 65% |
-| 2 | 15 | 1 | 4 | 75% |
-| 3 | 13 | 0 | 7 | 65% |
-| 4（最大） | 14 | 4 | 2 | 70% |
+| 2 | 13 | 1 | 6 | 65% |
+| 3 | 12 | 0 | 8 | 60% |
+| 4（最大） | 13 | 4 | 3 | 65% |
 
 本次小目标层反而最好，说明“小”本身不是主要失败原因；更重要的是指令是否与
 source/mask 一致，以及任务能否在目标空间尺度内清晰呈现。
 
 人工记录的主要问题为：
 
-- edit missing：9 条；请求变化不存在或弱到不可判定；
-- prompt/source mismatch：5 条；例如 prompt 错称原物体已是红色，导致模型先大幅
+- edit missing：10 条；请求变化不存在或弱到不可判定；
+- prompt/source mismatch：8 条；例如 prompt 错称原物体已是红色，导致模型先大幅
   改色再添加小配件；
-- partial edit / wrong operation：各 4 条；例如 remove 退化为改色，replace 只改局部；
+- partial edit：7 条；包括实例残留、多实例少删和依附物处理不完整；
+- wrong operation / broad target change：各 4 条；例如 remove 退化为改色、replace
+  只改局部，或局部 add 导致整个目标大范围改色；
 - collateral edit / prompt-mask mismatch：各 3 条；包括误改非目标小羊、指令说镜柱
   而 mask 实际对应前景花坛；
 - generic instruction / taxonomy mismatch：各 2 条；模板 fallback 不够具体，或
@@ -375,19 +420,38 @@ source/mask 一致，以及任务能否在目标空间尺度内清晰呈现。
 
 ### 7.4 vLLM 审核与人工审核的差异
 
-自动审核给出 97 pass / 3 fail；3 条自动 fail 都被人工确认，因此 fail precision
-为 100%。但人工最终发现 21 条 fail，自动审核只命中 3 条，fail recall 仅 14.3%。
-在 97 条自动 pass 中，人工判为 72 pass、7 review、18 fail。
+初版自动审核给出 97 pass / 3 fail；3 条自动 fail 都被人工确认，因此 fail precision
+为 100%。但复核后人工发现 27 条 fail，自动审核只命中 3 条，fail recall 为 11.1%。
+在 97 条自动 pass 中，人工判为 66 pass、7 review、24 fail。
 
-结论是 vLLM 很适合做快速、低成本的明显失败预筛，但当前 prompt/模型过于宽松，
+结论是 vLLM 很适合做快速、低成本的明显失败预筛，但初版 prompt/模型过于宽松，
 不能直接作为生产数据的最终准入器。特别需要新增确定性检查：指令与 source/mask
 语义一致性、add 前目标属性是否已存在、replace 是否退化为 attribute，以及
 非目标实例变化检测。
 
-本次提交已经先落地其中可由文本规则可靠处理的部分：红色 overlay 防误认、add
-已存在属性提示、replace 身份约束、泛化 add 模板拒绝和任务动作词校验。pilot 中
-可被新文本校验直接拦下的已有 3 条；其余视觉/语义一致性问题仍需额外的 source-mask
-审核模型或更强的最终过滤器。
+在相同 100 条旧出图上重跑 failure-first v7 审核后，结果为 35 pass / 47 review /
+18 fail。47 条 review 是有意设置的保守隔离区，不等价于 47 条失败：其中既包含旧
+规划指令可能受红色 overlay 污染的 case，也包含像素变化强度或非目标变化接近边界、
+需要人工或更强模型确认的 case。新版审核推理 69.10 秒，吞吐 86.83 case/min；模型
+冷启动 40.32 秒，总墙钟 139.44 秒，且明确记录为 100 calls / 100 cases。
+
+用户复查指出的九条 case 在 v7 中均不再自动通过：
+
+| case | v7 | 拦截依据 |
+|---|---|---|
+| 001 | review | 旧 red-overlay source 描述进入强制复核 |
+| 005 | fail | VLM 识别到重叠处仍有长颈鹿身体残留 |
+| 025 | review | 伞和包的依附物移除范围无法自动确认 |
+| 030 | fail | 只改色而没有生成可辨认的替换对象 |
+| 033 | review | 两实例 remove 的区域变化不足，可能少删 |
+| 054 | review | replacement 区域变化过弱且保护区外变化偏大 |
+| 057 | review | source 红色描述未确认且存在较广区域变化 |
+| 058 | fail | source 不存在所谓 red patch，替换也不可见 |
+| 092 | review | source 红色墙面描述未获独立确认 |
+
+这组结果说明单靠 8B VLM 仍可能把细微残留误判为完成，但放大对齐 crop、失败证据
+优先输出与确定性 review gate 的组合可以防止这些 case 直接进入自动 pass。正式扩量
+仍应对 review 抽检或重生成，并持续用人工结论校准阈值。
 
 ### 7.5 可视化与逐条结论
 
@@ -396,10 +460,12 @@ source/mask 一致，以及任务能否在目标空间尺度内清晰呈现。
 - `gallery/index.html`：可滚动 HTML 索引；
 - `manual_review.jsonl`：100 条逐 case 的人工布尔指标、结论、问题标签和原因；
 - `manual_review_summary.json`：按任务和数据子集聚合的统计；
-- `audit_vllm/edit_audit.jsonl`：自动审核原始结构化结果与像素 locality metrics。
+- `audit_vllm/edit_audit.jsonl`：初版自动审核原始结构化结果与像素 locality metrics；
+- `audit_v7_failure_first/`：本轮 failure-first v7 审核结果与精确速度统计；
+- `gallery_v7_audit/index.html`：v7 自动结论和第二轮人工结论的更新版可视化。
 
 总体判断：当前采样设计很好地覆盖了所需的细粒度/困难定位场景，且最终通过的
-72 条中包含大量同类多实例、小物体、遮挡和局部编辑；但原始出图不能不经筛选直接
+66 条中包含大量同类多实例、小物体、遮挡和局部编辑；但原始出图不能不经筛选直接
 入训。正式扩量前应优先修复指令-source-mask 一致性和 add/replace 类型约束，并把
 人工发现的失败模式加入自动审核。按本次严格标准，保留 pass、隔离 review、丢弃或
 重生成 fail 是更稳妥的数据策略。
