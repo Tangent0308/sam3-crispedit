@@ -1,8 +1,8 @@
 # CrispEdit-2M 完整打标流程
 
-本文是 CrispEdit-2M 的唯一主打标文档，覆盖 fact prefilter、Qwen3.5 grounding、
-SAM3 mask、环境安装、全量命令、生产路径、结果口径和可视化。当前方法不使用
-pixel diff。历史 legacy pipeline 仅用于回归对照，不是生产入口。
+本文是 CrispEdit-2M 的唯一主打标文档，覆盖原 fact prefilter、当前 Qwen3.8 pair-quality
+prefilter、Qwen3.5 grounding、SAM3 mask、环境安装、全量命令、生产路径、结果口径和
+可视化。当前方法不使用 pixel diff。历史 legacy pipeline 仅用于回归对照，不是生产入口。
 
 本汇总分支不会让 CrispEdit 与 ScaleEdit 共享可变的 mask policy：CrispEdit 使用
 `crispedit/mask/pipeline.py` 中的生产版 `sam3-dual-prompt-region-fusion-v5-surface-aware`；
@@ -18,7 +18,8 @@ ScaleEdit v18 依赖的后续实现已原样隔离在 `scaleedit/sam3_backend.py
 | --- | --- |
 | 原始数据 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M` |
 | 新增 100k 输入视图 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-additional-100k-input` |
-| prefilter audit / manifest | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit` / `manifest` |
+| 原 fact prefilter audit / manifest | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit` / `manifest` |
+| Qwen3.8 pair-quality prefilter | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter` |
 | Qwen3.5 grounding | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding` |
 | 最终 mask | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask` |
 | runtime previews | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-previews` |
@@ -52,6 +53,32 @@ Qwen3-VL-8B 只提取存在性、数量、属性、姿态、bbox、主体一致�
 source-guided target crop。非法 JSON 默认只对失败行追加一次纠错回合，仍失败则
 fail-closed，不终止其他样本。
 
+#### Qwen3.8 pair-quality（当前改进实现）
+
+为降低上述 fact prefilter 对 replace、background、style 和大范围 add 的系统性误杀，当前
+实现参考 RefEdit quality prefilter，每条样本只调用一次 Qwen3.8-27B：source、target、
+instruction 和 edit type 在同一个请求中联合判断。它不执行类别专用 bbox 或 crop；类别只
+用于提供 add/remove/replace/color/motion/background/style 的合法变化范围。模型在同一
+JSON 中输出：
+
+- `source_state -> target_state -> visible_change -> instruction_match` 成对事实；
+- source referent、instruction meaningfulness、edit completion、source/target integrity、
+  content preservation 六个独立维度；
+- reason codes、summary 和 confidence。
+
+最终 verdict 完全由代码生成：六维全 PASS 才是 PASS；任一维 FAIL 为 FAIL，其余为
+UNSURE。`visible_change=NONE` 或 `instruction_match=FAIL` 会强制
+`edit_completion=FAIL`；二者存在 UNSURE 时也不能得到全 PASS，避免最终 verdict 与成对
+证据矛盾。固定映射仍为 `PASS -> keep`、`FAIL / UNSURE / ERROR -> drop`。类别规则允许
+replace 改变主体类别与轮廓，允许 background/style 的预期全局视觉变化，也不会因新增物
+成为主体就判定 unrelated change。
+
+推理以 shard 为任务、8 个 TP=1 vLLM replica 并行，每个 replica 按 batch 提交请求。JSON
+解析失败时只对失败行追加一次格式纠错；仍失败则写 ERROR 并 fail-closed，不影响其他行。
+每个输入 shard 生成同名 `audit` 和 `manifest`：audit 保存完整 assessment、原始响应、重试、
+reason codes、失败维度和耗时，manifest 保留后续 grounding 所需的逐行判定字段。二者始终
+保留全部 `row_idx`，而不是只写 keep 行。
+
 ### 2.2 Grounding 与 mask 概览
 
 ```text
@@ -67,8 +94,9 @@ raw parquet + prefilter manifest
   → source-coordinate union mask parquet
 ```
 
-调用次数不是每行固定常数。Prefilter 会根据确定性 slot parser、no-op fast path、
-source-guided crop 和边界复核按需执行 Step 1--5；JSON 纠错只重试失败样本。Grounding
+原 fact prefilter 会根据确定性 slot parser、no-op fast path、source-guided crop 和边界复核
+按需执行 Step 1--5，因此调用次数不是每行固定常数。当前 pair-quality prefilter 的正常路径
+固定为一次 source+target 联合调用，只有 JSON 解析失败的样本才追加一次格式纠错。Grounding
 的正常路径是两轮 Qwen3.5：第一轮观察 realized edit，第二轮定位；小 bbox
 会额外使用局部 crop 复核当前 candidate。Style 按既定 full-image 契约直接跳过
 grounding MLLM。vLLM 只替换 Qwen3.5 grounding 的执行后端，prompt、parser、bbox
@@ -163,6 +191,9 @@ recall-first 扩展。background/style 不使用这一复核，因为 background
 | `crispedit/prefilter/policy.py` | 证据归一化、状态转换、确定性谓词与 verdict |
 | `crispedit/prefilter/runner.py` | Qwen3-VL prompts、batch/crop、8 卡调度与 audit/manifest I/O |
 | `crispedit_mllm_prefilter.py` | fact prefilter 生产入口 |
+| `crispedit/prefilter/pair_quality.py` | Qwen3.8 单次成对审计 prompt、parser 与确定性 verdict |
+| `crispedit/prefilter/pair_runner.py` | 8 卡 vLLM 调度、定点 case 和对齐 audit/manifest I/O |
+| `crispedit_pair_prefilter.py` | Qwen3.8 pair-quality 运行入口 |
 | `crispedit/mask/grounding.py` | 两轮与小区域复核 prompt、类别路由、bbox 融合、JSON parser 与 region schema |
 | `crispedit/mask/grounding_runner.py` | 8 卡 Qwen3.5 调度、局部复核图、manifest 对齐和 grounding parquet |
 | `crispedit/mask/pipeline.py` | CrispEdit 生产版 SAM3 三路候选、融合、映射和连通区域逻辑 |
@@ -186,7 +217,8 @@ CrispEdit 的两类推理使用隔离环境，避免 SAM3/Transformers 与 vLLM 
 依赖互相覆盖：
 
 - `.venv-crispedit-runtime`：Python 3.11、Torch cu128、Qwen3-VL prefilter 和 SAM3 mask；
-- `.venv-crispedit-vllm`：Python 3.11、CUDA 12.9 vLLM wheel 和 Qwen3.5 grounding。
+- `.venv-crispedit-vllm`：Python 3.11、CUDA 12.9 vLLM wheel、Qwen3.8 prefilter 和
+  Qwen3.5 grounding。
 
 一键创建两个新环境：
 
@@ -231,6 +263,44 @@ mkdir -p "$CRISPEDIT_PREFILTER/audit" "$CRISPEDIT_PREFILTER/manifest"
 
 生产全量运行不加 `--fail-fast`，避免单行图像或 JSON 异常中止整个 worker。不加
 `--overwrite` 时，已完成且对齐的 audit+manifest shard 会被跳过。
+
+Qwen3.8 pair-quality 使用 8 个 TP=1 vLLM replica。每个 shard 内按 batch 提交；非法 JSON
+只对失败样本追加一次纠错回合。2026-09-16 启动的全量运行使用以下参数，其中 Python 环境
+复用了已安装 Qwen3.8/vLLM 的兼容环境；新环境也可以使用仓库的
+`.venv-crispedit-vllm/bin/python`：
+
+```bash
+PAIR_PYTHON=/opt/tiger/tanyue/sam3-crispedit/.venv-scaleedit-vllm/bin/python
+PAIR_OUTPUT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter
+
+"$PAIR_PYTHON" -u crispedit_pair_prefilter.py \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
+  --output-dir "$PAIR_OUTPUT" \
+  --model-path /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B \
+  --devices 0,1,2,3,4,5,6,7 \
+  --tensor-parallel-size 1 \
+  --batch-size 4 \
+  --vllm-max-num-seqs 4 \
+  --vllm-max-model-len 8192 \
+  --vllm-gpu-memory-utilization 0.85 \
+  --max-new-tokens 1024 \
+  --parse-retries 1 \
+  --progress-mininterval 5
+```
+
+实际命令保存在输出目录的 `run_full_prefilter.sh`。本次通过 tmux 后台运行，并由 `tee`
+同时保留 tqdm 进度和完整日志：
+
+```bash
+tmux new-session -d -s crispedit_qwen38_prefilter \
+  "bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/run_full_prefilter.sh"
+
+tail -f /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/full_prefilter.log
+```
+
+不加 `--overwrite` 时，runner 会跳过 audit 与 manifest 均完整且对齐的 shard，适合断点续跑。
+定点回归可重复传入 `--case 'SHARD.parquet:ROW_IDX'`；前置实验选择记录在
+[`qwen38_pair_quality_cases.json`](../docs_assets/prefilter/qwen38_pair_quality_cases.json)。
 
 ### 5.2 8 卡生成 realized edit 与 region bbox
 
@@ -311,7 +381,7 @@ bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine
 
 ## 6. 全量运行结果
 
-### Prefilter 概要
+### 原 fact prefilter 概要
 
 2026-08-28 首批 150,421 行中 PASS/keep 42,639，drop 107,782；2026-09-08
 新增 100,000 行中 keep 26,140，drop 73,860。两批合计 keep 68,779。完整 audit
@@ -320,6 +390,75 @@ bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine
 ![Prefilter full-run summary](../docs_assets/prefilter/full_run_summary.png)
 
 ![Prefilter representative examples](../docs_assets/prefilter/representative_examples.png)
+
+### Qwen3.8 pair-quality 全量重跑
+
+2026-09-16 至 2026-09-18 使用上述 8 卡 vLLM 配置完成全部 985 个 shard、250,421 行。
+输出与运行记录如下：
+
+```text
+audit / manifest  /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter
+运行脚本          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/run_full_prefilter.sh
+运行日志          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/full_prefilter.log
+运行汇总          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/run_summary.json
+深度校验          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/validation_summary.json
+run id            pair_prefilter_20260916_041550
+```
+
+全量结果为 PASS/keep 215,779（86.17%），FAIL/drop 34,642（13.83%）。没有 UNSURE、
+ERROR 或 parse error；8 个 worker 退出码均为 0。输入、audit 和 manifest 均为 985 个同名
+shard，逐 shard 行数、`row_idx` 和 audit/manifest verdict 对齐错误均为 0，也没有临时文件
+残留。wall time 为 48:50:51，全局平均吞吐约 1.42 行/秒；记录在单行 audit 中的模型调用
+耗时均值 5.47 秒、中位数 5.44 秒、p95 5.96 秒。
+
+| 类型 | 原始行 | keep | drop | keep 率 |
+|---|---:|---:|---:|---:|
+| add | 51,267 | 43,243 | 8,024 | 84.35% |
+| background | 21,504 | 20,633 | 871 | 95.95% |
+| color | 21,294 | 17,503 | 3,791 | 82.20% |
+| motion | 32,314 | 26,712 | 5,602 | 82.66% |
+| remove | 51,290 | 41,889 | 9,401 | 81.67% |
+| replace | 51,200 | 44,784 | 6,416 | 87.47% |
+| style | 21,552 | 21,015 | 537 | 97.51% |
+| **总计** | **250,421** | **215,779** | **34,642** | **86.17%** |
+
+原 fact prefilter 只保留 68,779 行（27.47%）。在逐行对齐比较中，新方法将 148,502 个
+原 FAIL/UNSURE/ERROR 恢复为 PASS，同时将 1,502 个原 PASS 改判为 FAIL；其余 67,277 个
+原 PASS 仍为 PASS。因此新增 keep 并非来自行数或 shard 口径变化，而是 pair-quality
+判定显著降低了原方法的系统性误杀。
+
+34,642 个 drop 中，失败维度以 `edit_completion`（33,805）为主，其次是
+`instruction_meaningfulness`（11,106）、`content_preservation`（3,812）、
+`source_reference`（1,869）、`target_integrity`（647）和 `source_integrity`（1）；同一行可以
+同时命中多个维度。最常见 reason code 是 `NO_OP_ALREADY_SATISFIED`（10,096）、
+`EDIT_COMPLETION_FAIL`（9,423）、`WRONG_ATTRIBUTE_OR_ACTION`（4,454）、
+`EDIT_NOT_COMPLETED`（3,859）和 `UNRELATED_CONTENT_CHANGED`（2,590）。
+
+以下审阅图使用固定 seed `20260918`，按七种 edit type 分层抽取，不是人工挑选。具体 shard、
+row、instruction、旧/新 verdict 和模型理由保存在
+[`qwen38_full_selection.json`](../docs_assets/prefilter/qwen38_full_selection.json)。
+
+旧方法非 PASS、新方法 PASS，每类 2 条：
+
+![Qwen3.8 full-run rescued cases](../docs_assets/prefilter/qwen38_full_rescued.jpg)
+
+新方法 FAIL，每类 2 条，并尽量覆盖不同 failure mode：
+
+![Qwen3.8 full-run dropped cases](../docs_assets/prefilter/qwen38_full_drop.jpg)
+
+旧方法 PASS、新方法 FAIL，每类 1 条：
+
+![Qwen3.8 full-run tightened cases](../docs_assets/prefilter/qwen38_full_tightened.jpg)
+
+人工浏览这 35 条后，多数转移符合目标：新版恢复了道路/物体添加、姿态变化、背景替换、
+主体移除和整体风格转换，也能过滤 no-op、错误 referent、未完成编辑、位置不符和明显无关
+内容变化。仍有两个边界：`color_00062.parquet:72` 的白色到象牙色变化很轻，肉眼难以确认；
+`replace_00080.parquet:162` 已完成龙到凤凰的替换，但同时移除了玫瑰，因此当前按
+unrelated content drop。模型 PASS/FAIL 的 confidence 中位数都为 1.0，不能把 confidence
+当成人工正确率或用于区分这类边界样本。
+
+本节只说明新的 prefilter 产物。本文后续 grounding/mask 全量统计仍来自原 fact prefilter
+的 68,779 个 keep；在用新 manifest 重跑后续阶段前，两套数字不能混用。
 
 ### 首批 150,421 行
 
@@ -499,6 +638,53 @@ bbox、source 坐标系 mask overlay 和二值 mask；具体选择记录在
 
 ## 7. 可视化与小批量回归
 
+### Qwen3.8 pair-quality 前置实验
+
+2026-09-16 使用 Qwen3.8-27B、vLLM 和 8 个单卡 worker 做了两组测试。所有结果均为
+0 parse error、0 worker error；实验目录分别为：
+
+```text
+/opt/tiger/tanyue/crispedit-pair-prefilter-qwen38-refined-20260916
+/opt/tiger/tanyue/crispedit-pair-prefilter-qwen38-batch4-smoke-20260916
+```
+
+第一组是 32 条人工分层回归：12 条旧方法疑似误杀、6 条明确 drop、7 条明确 keep 和
+7 条边界/历史 bad case。新方法没有丢失 8 条旧方法已保留的样本，并把 15 条旧 drop
+改为 PASS；其中 11/12 个疑似误杀被救回，7/7 个明确 keep 保持 PASS。代价是 6 个明确
+drop 中有 3 个被错保留，均为全图中较细的颜色或动作判断。
+
+| 分组 | 样本数 | 旧 keep | 新 keep |
+|---|---:|---:|---:|
+| 疑似误杀 / policy risk | 12 | 0 | 11 |
+| 明确 drop | 6 | 0 | 3 |
+| 明确 keep | 7 | 7 | 7 |
+| 边界 / 历史 bad case | 7 | 1 | 2 |
+| **合计** | **32** | **8** | **23** |
+
+![Qwen3.8 pair-quality regression](../docs_assets/prefilter/qwen38_pair_quality_regression.jpg)
+
+剩余争议集中在黑色/深灰差异、几乎不变的相对位置和小物体动作。模型错误地声称量杯被
+拿起，也把花瓶的透视深度描述理解为严格位置约束。这说明单次全图调用显著提高召回，
+但不能把高 confidence 当作小目标正确性的替代品。
+
+![Qwen3.8 pair-quality limitations](../docs_assets/prefilter/qwen38_pair_quality_limitations.jpg)
+
+第二组从 8 个不同类别 shard 各取固定的 4 行，实际以 batch 4 提交。旧方法 keep
+13/32，新方法 keep 28/32；转移为 16 个旧 drop→新 PASS、1 个旧 PASS→新 FAIL。
+人工浏览转移样本后，大多数是合理救回，例如轮胎变白、明确姿态变化、删除主体、
+replace 和 style；同时存在需要扩大抽检的宽松风险。模型启动与首次 JIT 在内的 wall time
+为 147 秒；记录到的推理摊销为每卡每行 5.90--7.02 秒，均值 6.39 秒。这只是单批 smoke，
+不是全量吞吐基准。
+
+![Qwen3.8 batch-4 rescues page 1](../docs_assets/prefilter/qwen38_pair_quality_batch4_1.jpg)
+
+![Qwen3.8 batch-4 rescues page 2](../docs_assets/prefilter/qwen38_pair_quality_batch4_2.jpg)
+
+这些实验支持继续进行全量重跑；完整结果、校验和固定种子可视化见第 6 节。早期暴露出的
+color/motion 细粒度风险仍然存在，因此全量结果保留完整 audit，而不是只保留二值 manifest。
+如后续需要进一步提高精度，应先基于人工标注分层集量化这些风险，再决定是否只对特定边界
+样本增加局部复核，避免重新引入原 fact prefilter 的高误杀率。
+
 ### 历史 mask 难例：47 条
 
 使用仓库内 [eval_selection.json](../docs_assets/mask_pipeline/eval_selection.json) 的 47 条历史
@@ -520,7 +706,7 @@ mask 难例，在 GPU 0–7 上分别运行 Qwen3.5 和 SAM3。该评测专门�
 
 ### Prefilter keep 均匀抽样：56 条
 
-从最新 prefilter 全量输出的 keep 数据中按 7 个类别各抽 8 条，并使用同一最终流程运行：
+从原 fact prefilter 全量输出的 keep 数据中按 7 个类别各抽 8 条，并使用同一最终流程运行：
 
 - grounding：56 rows，0 runtime error，0 `GROUND_FAIL`，48 `OK` + 8 `STYLE_FULL_IMAGE`；
 - region bbox：97；小区域复核 30 requests / 35 candidates，0 refinement parse failure；
@@ -561,6 +747,7 @@ bbox、target 与 MLLM bbox、映射到 source 的最终 mask overlay，以及�
 
 ```bash
 .venv-crispedit-runtime/bin/python -m pytest -q \
+  tests/test_crispedit_pair_prefilter.py \
   tests/test_crispedit_prefilter_policy.py \
   tests/test_crispedit_grounded_mask_pipeline.py
 
