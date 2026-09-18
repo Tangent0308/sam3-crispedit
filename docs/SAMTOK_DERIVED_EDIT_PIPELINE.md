@@ -106,6 +106,14 @@ SAMTok parquet
 模板时，确定性 fallback 只复用模型已给出的具体 `refer_object` 与短编辑，不创造
 新语义，并补充“仅改变该实例、保留其他内容”的约束。成功重跑会清除旧失败清单。
 
+当前校验同时接受 `mount/stick/install/paint/dye` 等合法动作同义词，避免把措辞丰富的
+正确回复误判为格式失败；但 attribute 若以 add/remove/replace 动作开头仍会被拒绝。
+对把规则原文当作 add 指令的回复（例如只说添加 `plausible object`），重试会改用一个
+不含候选物体、也不重复原规则的短 repair prompt，要求模型直接命名场景相关的具体
+物体。明显的 `top right panel` 等定位面板短语会被安全清理，而真实物体上的
+`rear panel` 仍被允许。fallback 会优先保留已合格的完整指令，并强制 regional
+instruction 与任务类型一致。
+
 100-case 复查发现，即使 prompt 明确声明红色只是标注，Qwen3-VL 仍会把高显著度的
 整块红色 overlay 复制为 source 属性，生成 `red train`、`red elephant`、`red shirt`
 和 `red patch` 等错误描述。因此当前实现不再向规划模型提供任何涂色后的原图。
@@ -469,6 +477,51 @@ source/mask 一致，以及任务能否在目标空间尺度内清晰呈现。
 入训。正式扩量前应优先修复指令-source-mask 一致性和 add/replace 类型约束，并把
 人工发现的失败模式加入自动审核。按本次严格标准，保留 pass、隔离 review、丢弃或
 重生成 fail 是更稳妥的数据策略。
+
+### 7.6 Fresh clean-mask 100-case 复跑（seed 20260918）
+
+修复后的 pipeline 从头生成了另一批 100 条，产物位于：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/
+  SAMTok_Derived_Edit_Labeling/pilot_100_v2_cleanmask
+```
+
+该批包含 50 张 source（GRES/VER 各 25 张），每张两个 mask 分别形成独立单-region
+case；add/remove/replace/attribute 各 25 条，五个 mask 面积分层各 20 条。全部 100 条
+annotation 都记录 `planning_visual_input=clean_crop_cutout_binary_v2`，文本预检未发现
+red-mask、overlay、panel 方位或 generic-rule 泄漏。
+
+一次成功生产运行的速度如下（不含开发阶段失败重试和人工检查）：
+
+| 阶段 | 时间 | 吞吐 |
+|---|---:|---:|
+| 指令规划 | 104.72 s wall；40.23 s inference | 149.15 case/min inference |
+| source/mask 物化 | 110.99 s | 0.90 case/s |
+| 8×H100 Qwen-Image-Edit | 1,008.57 s | 5.95 case/min |
+| Qwen3-VL v7 审核 | 142.30 s wall；68.94 s inference | 87.03 case/min inference |
+| 自动阶段合计 | 1,366.58 s（22 分 46.6 秒） | — |
+
+编辑输出通过 100/100 文件集合、PNG 解码和 source/edited 尺寸一致性检查。v7 自动
+审核为 53 pass / 36 review / 11 fail，严格保持一次 VLM 调用/条。随后对 100/100
+逐例人工查看 source、mask、edited 和差分图，结论为 72 pass / 3 review / 25 fail：
+
+| 类型 | pass | review | fail | pass rate |
+|---|---:|---:|---:|---:|
+| add | 18 | 1 | 6 | 72% |
+| remove | 12 | 1 | 12 | 48% |
+| replace | 20 | 0 | 5 | 80% |
+| attribute | 22 | 1 | 2 | 88% |
+
+这批 100 条都来自有两个已标注 region 的 source，人工均确认具有困难定位背景；通过
+样本中可见同类多实例选择、极小目标、局部部件、遮挡和拥挤场景。主要失败仍集中在
+remove：目标/依附物残留、错实例以及不自然背景补全。自动审核与人工结论的混淆中，
+9 条自动 pass 被人工判 fail，另有 7 条自动 review 被判 fail；同时有 2 条自动 fail
+实际上人工判 pass，说明 8B VLM 仍不能代替人工抽检。
+
+最终查看入口为 `gallery_v7_manual/index.html`；`manual_review.jsonl` 覆盖 100/100，
+`manual_review_summary.json` 保存上述按类型和子集统计。自动 fail 可直接隔离，自动
+review 不应全部丢弃：本批 36 条自动 review 中有 27 条经人工确认可用。
 <!-- PILOT_RESULTS_END -->
 
 ## 8. 已知限制与扩量建议
