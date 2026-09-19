@@ -46,6 +46,8 @@ def parse_args() -> argparse.Namespace:
         default="none",
     )
     parser.add_argument("--patch-ratio", type=float, default=0.2)
+    parser.add_argument("--edit-method", default="mirage",
+                        choices=["mirage", "mirage_relaxed", "official_full", "context_edit", "context_edit_v2", "context_adaptive"])
     parser.add_argument("--num-steps", type=int, default=40)
     parser.add_argument("--true-cfg-scale", type=float, default=4.0)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
@@ -100,6 +102,8 @@ def worker_command(args: argparse.Namespace, queue_dir: Path, worker_id: str) ->
         args.cpu_offload,
         "--patch-ratio",
         str(args.patch_ratio),
+        "--edit-method",
+        args.edit_method,
         "--num-steps",
         str(args.num_steps),
         "--true-cfg-scale",

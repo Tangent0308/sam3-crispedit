@@ -21,6 +21,9 @@ test_*.py
 !tests/test_split_audit_eval.py
 !tests/test_summarize_manual_review.py
 !tests/test_merge_audit_splits.py
+!tests/test_audit_quality_v3.py
+!tests/test_region_write_weight.py
+!tests/test_context_composition.py
 *.ckpt
 *.safetensors
 *.pt

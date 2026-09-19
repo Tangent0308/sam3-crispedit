@@ -12,6 +12,7 @@ from PIL import Image
 from diffusers import QwenImageEditPlusPipeline
 
 from utils.runner_qwen2511 import run_qwen_multi_branch
+from utils.context_edit import edit_context_crop
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -120,6 +121,9 @@ def parse_args():
         default=0.2,
         help="Fraction of inference steps assigned to region branches.",
     )
+    parser.add_argument("--edit-method", default="mirage",
+                        choices=["mirage", "mirage_relaxed", "official_full", "context_edit", "context_edit_v2", "context_adaptive"],
+                        help="Editing algorithm; mirage preserves historical behavior.")
     parser.add_argument(
         "--num-steps",
         type=int,
@@ -255,6 +259,7 @@ def infer_one_image(
     generator_device: str,
     seed: int,
     patch_ratio: float,
+    edit_method: str = "mirage",
 ):
     instruction_record = inst_map[img_name]
     if isinstance(instruction_record, str):
@@ -280,7 +285,7 @@ def infer_one_image(
     # claims the image and of the order in which that worker receives jobs.
     generator = torch.Generator(device=generator_device).manual_seed(seed)
     infer_start = time.perf_counter()
-    full_out = run_qwen_multi_branch(
+    runner_kwargs = dict(
         pipe=pipe,
         full_image=full_image,
         full_prompt=full_prompt,
@@ -294,6 +299,36 @@ def infer_one_image(
         generator=generator,
         patch_ratio=patch_ratio,
     )
+    if edit_method in {"context_edit", "context_edit_v2", "context_adaptive"}:
+        masks = []
+        for record in crop_records:
+            with Image.open(record["_mask_path"]) as handle:
+                if handle.size != full_image.size:
+                    raise ValueError("Source/mask dimensions differ")
+                masks.append(np.asarray(handle.convert("L")) > 127)
+        if not masks or not isinstance(instruction_record, dict):
+            raise ValueError("Context editing requires a typed annotation and target mask")
+        full_out = edit_context_crop(
+            pipe, full_image, instruction_record, np.logical_or.reduce(masks),
+            generator, num_inference_steps, true_cfg_scale, guidance_scale, negative_prompt,
+            remove_context_window=edit_method == "context_edit_v2",
+            target_guide=edit_method == "context_adaptive" and case_task_type == "attribute",
+            attribute_mask_composition=edit_method == "context_adaptive" and case_task_type == "attribute",
+        )
+    elif edit_method == "official_full":
+        full_out = pipe(image=full_image, prompt=full_prompt, negative_prompt=negative_prompt,
+                        true_cfg_scale=true_cfg_scale, guidance_scale=guidance_scale,
+                        num_inference_steps=num_inference_steps, generator=generator,
+                        height=full_image.height, width=full_image.width).images[0]
+    elif edit_method == "mirage_relaxed":
+        runner_kwargs.update(patch_ratio=0.5, write_margin_cells=3,
+                             mask_dilation_cells=2, branch_context_cells=6,
+                             correct_branch_schedule=True)
+        full_out = run_qwen_multi_branch(**runner_kwargs)
+    elif edit_method == "mirage":
+        full_out = run_qwen_multi_branch(**runner_kwargs)
+    else:
+        raise ValueError(f"Unknown edit method: {edit_method}")
     infer_elapsed = time.perf_counter() - infer_start
 
     print(f"[Runtime] {img_name} inference: {infer_elapsed:.3f}s")
@@ -315,6 +350,7 @@ def run_inference_loop(
     seed: int,
     patch_ratio: float,
     skip_existing: bool = False,
+    edit_method: str = "mirage",
 ):
     for idx, img_name in enumerate(image_names):
         output_path = os.path.join(results_full_dir, img_name)
@@ -341,6 +377,7 @@ def run_inference_loop(
             generator_device=generator_device,
             seed=seed,
             patch_ratio=patch_ratio,
+            edit_method=edit_method,
         )
 
 
@@ -404,6 +441,7 @@ def run_dynamic_queue(
     generator_device: str,
     seed: int,
     patch_ratio: float,
+    edit_method: str = "mirage",
 ):
     queue_dir = Path(work_queue_dir)
     queue_dir.mkdir(parents=True, exist_ok=True)
@@ -450,6 +488,7 @@ def run_dynamic_queue(
                 generator_device=generator_device,
                 seed=seed,
                 patch_ratio=patch_ratio,
+                edit_method=edit_method,
             )
             completed_by_worker += 1
         finally:
@@ -511,6 +550,7 @@ def main():
         "generator_device": generator_device,
         "seed": args.seed,
         "patch_ratio": args.patch_ratio,
+        "edit_method": args.edit_method,
     }
     if args.work_queue_dir:
         worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
