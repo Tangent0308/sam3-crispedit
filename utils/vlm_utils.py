@@ -11,6 +11,7 @@ from PIL import Image
 QWEN3_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 QWEN4_MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
 QWEN35_MODEL_ID = "Qwen/Qwen3.5-9B"
+QWEN38_MODEL_ID = "Qwen/Qwen3.8-27B"
 GEMMA4_MODEL_ID = "google/gemma-4-12B-it"
 REGIONREASONER_MODEL_ID = "lmsdss/RegionReasoner-7B"
 REGIONREASONER_IMAGE_SIZE = 840
@@ -69,6 +70,7 @@ def configure_backend(
         "qwen8b_vllm": "qwen3_vllm",
         "qwen4b-vllm": "qwen4_vllm",
         "qwen4b_vllm": "qwen4_vllm",
+        "qwen38-vllm": "qwen38_vllm",
     }.get(name, name)
     new_config = _BackendConfig(
         name=name,
@@ -201,12 +203,15 @@ class _Qwen3VllmBackend:
         self,
         config: _BackendConfig,
         default_model_id: str = QWEN3_MODEL_ID,
+        enable_thinking: Optional[bool] = None,
     ):
         from transformers import AutoProcessor
         from vllm import LLM
 
         self.model_id = config.model_id or default_model_id
+        self.enable_thinking = enable_thinking
         self.processor = AutoProcessor.from_pretrained(self.model_id)
+        large_vision_model = enable_thinking is False
         vllm_dtype = {
             "bf16": "bfloat16",
             "fp16": "float16",
@@ -216,10 +221,15 @@ class _Qwen3VllmBackend:
             model=self.model_id,
             dtype=vllm_dtype,
             tensor_parallel_size=1,
-            max_model_len=12288,
-            max_num_seqs=16,
+            max_model_len=8192 if large_vision_model else 12288,
+            max_num_seqs=8 if large_vision_model else 16,
             max_num_batched_tokens=8192,
             limit_mm_per_prompt={"image": 3},
+            # vLLM 0.11 can desynchronise its multimodal item metadata cache
+            # during long image-heavy retry loops (get_and_update_item then
+            # asserts a missing item).  The 8B planner has no useful repeated
+            # image-prefill across requests, so disable that cache there.
+            **({"mm_processor_cache_gb": 0} if not large_vision_model else {}),
             mm_processor_kwargs={
                 "min_pixels": QWEN_MIN_VISUAL_TOKENS
                 * QWEN3_VL_SPATIAL_COMPRESSION
@@ -229,8 +239,10 @@ class _Qwen3VllmBackend:
                 * QWEN3_VL_SPATIAL_COMPRESSION,
             },
             enable_prefix_caching=True,
-            gpu_memory_utilization=0.8,
+            gpu_memory_utilization=0.85 if large_vision_model else 0.8,
             seed=0,
+            enforce_eager=large_vision_model,
+            safetensors_load_strategy="prefetch",
         )
 
     def chat_batch(self, batch_messages, max_new_tokens=512):
@@ -248,6 +260,11 @@ class _Qwen3VllmBackend:
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
+                **(
+                    {"enable_thinking": self.enable_thinking}
+                    if self.enable_thinking is not None
+                    else {}
+                ),
             )
             requests.append(
                 {
@@ -788,6 +805,12 @@ def get_backend():
                 _backend_config,
                 default_model_id=QWEN4_MODEL_ID,
             )
+        elif _backend_config.name == "qwen38_vllm":
+            _backend = _Qwen3VllmBackend(
+                _backend_config,
+                default_model_id=QWEN38_MODEL_ID,
+                enable_thinking=False,
+            )
         elif _backend_config.name == "qwen35":
             _backend = _Qwen35Backend(_backend_config)
         elif _backend_config.name == "regionreasoner":
@@ -797,6 +820,7 @@ def get_backend():
             "qwen4": "qwen4b",
             "qwen3_vllm": "qwen8b-vllm",
             "qwen4_vllm": "qwen4b-vllm",
+            "qwen38_vllm": "qwen38-vllm",
         }.get(_backend_config.name, _backend_config.name)
         print(
             f"Loaded VLM backend={display_name} "

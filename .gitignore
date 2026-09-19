@@ -16,6 +16,11 @@ test_*.py
 *_test.py
 !tests/
 !tests/test_instruction_planning.py
+!tests/test_audit_low_change_veto.py
+!tests/test_evaluate_audit27.py
+!tests/test_split_audit_eval.py
+!tests/test_summarize_manual_review.py
+!tests/test_merge_audit_splits.py
 *.ckpt
 *.safetensors
 *.pt

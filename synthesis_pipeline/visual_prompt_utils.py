@@ -266,3 +266,65 @@ def audit_visual_inputs(
         full_tile_size,
     )
     return source_localization, detail_comparison, full_comparison
+
+
+def audit_two_image_inputs(
+    source: Image.Image,
+    edited: Image.Image,
+    mask: np.ndarray,
+    longest_side: int = 1280,
+    scope: str = "full",
+) -> tuple[Image.Image, Image.Image]:
+    """Show only the aligned pair, marking the source mask without hiding its pixels.
+
+    The contour is outside the target.  Both images use identical scaling so
+    the viewer can locate the corresponding region in the unmarked edit.
+    """
+    if mask.shape != (source.height, source.width):
+        raise ValueError("The source mask and image dimensions must match")
+    if not mask.any():
+        raise ValueError("Cannot audit an empty target mask")
+    if edited.size != source.size:
+        edited = edited.resize(source.size, Image.Resampling.LANCZOS)
+    if scope == "context_crop":
+        bbox = padded_mask_bbox(mask, padding_fraction=0.75, min_padding=80)
+        source = source.crop(bbox)
+        edited = edited.crop(bbox)
+        mask = mask[bbox[1] : bbox[3], bbox[0] : bbox[2]]
+    elif scope != "full":
+        raise ValueError(f"Unsupported two-image audit scope: {scope!r}")
+
+    scale = longest_side / max(source.size)
+    display_size = (
+        max(1, round(source.width * scale)),
+        max(1, round(source.height * scale)),
+    )
+    source_pixels = np.asarray(
+        source.convert("RGB").resize(display_size, Image.Resampling.LANCZOS),
+        dtype=np.uint8,
+    ).copy()
+    resized_mask = Image.fromarray(mask.astype(np.uint8) * 255, mode="L").resize(
+        display_size, Image.Resampling.NEAREST
+    )
+    inside = np.asarray(resized_mask, dtype=np.uint8) > 0
+    near = np.asarray(resized_mask.filter(ImageFilter.MaxFilter(7))) > 0
+    far = np.asarray(resized_mask.filter(ImageFilter.MaxFilter(13))) > 0
+    source_pixels[far & ~near] = (255, 255, 255)
+    source_pixels[near & ~inside] = (0, 0, 0)
+    edited_display = edited.convert("RGB").resize(
+        display_size, Image.Resampling.LANCZOS
+    )
+
+    def with_label(photo: Image.Image, label: str) -> Image.Image:
+        canvas = Image.new("RGB", (display_size[0], display_size[1] + 40), "white")
+        ImageDraw.Draw(canvas).text((10, 13), label, fill="black")
+        canvas.paste(photo, (0, 40))
+        return canvas
+
+    return (
+        with_label(
+            Image.fromarray(source_pixels, mode="RGB"),
+            "SOURCE: BLACK/WHITE OUTLINE = TARGET MASK",
+        ),
+        with_label(edited_display, "EDITED: SAME IMAGE COORDINATES"),
+    )

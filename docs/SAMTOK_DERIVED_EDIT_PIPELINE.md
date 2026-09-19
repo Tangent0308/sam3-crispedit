@@ -617,3 +617,383 @@ prompt 中增加了“新物体须能处于同一支撑环境”的约束。单�
   人工结论校准自动审核，而不是仅以 VLM 的 `pass` 作为准入标准。
 - 当前单 case 固定 seed 保证可复现，但不提供同一指令的多随机候选。若以后做 best-of-N，
   必须在 provenance 中记录每个 seed 和选择规则。
+
+## 9. 双图审核与指令重写候选试验（2026-09-19）
+
+这一节是与现行 `audit_edit_pairs.py` 并行的**试验审核器**
+`synthesis_pipeline/audit_edit_pairs_v2.py`，尚未自动替换生产准入。
+旧审核器在一次 VLM 请求中给三张复合图：精确 mask 边缘的前后对比、
+source/mask/edited/difference crop，以及全图前后对比；它还结合像素变化阈值
+和五个失败证据槽输出 pass/fail。三张复合图信息重复，尤其 difference 伪彩色
+可能干扰语义判断。新审核器仍然只调用 VLM **一次/条**，但只给两张同尺度图：
+
+1. 原图或相同坐标的上下文 crop：mask **外侧**的黑白轮廓标出待检对象，
+   轮廓内部保留原始照片像素，顶部写明 `SOURCE: BLACK/WHITE OUTLINE = TARGET MASK`。
+2. 对齐的编辑结果：不画轮廓、不画差异热图，顶部写明
+   `EDITED: SAME IMAGE COORDINATES`。
+
+默认 `--image-scope context_crop` 取 mask bbox，四周至少留 80 原图像素，
+或按 bbox 尺寸的 75% 留白（取较大值）；两图一起缩放到最长边 1280，
+可用 `--image-scope full` 看全图。传给模型的**就是这两张 PIL 图片**，
+没有额外 mask、cutout、overlay 或第三张图；保存的 `inputs/*_source.png`
+与 `*_edited.png` 是实际请求预览。
+
+审核 prompt 全文在 `audit_edit_pairs_v2.py` 的 `PROMPT` 常量中；
+对每条样本只插入 `editing_instruction`、`task_type`、
+`refer_object` 和对应的 `TYPE_RULES`。核心决策要求为：
+
+> Inspect the two images BEFORE interpreting the instruction. Name what is
+> really inside the source contour and describe every visible object or part
+> that appears, disappears, or changes at that location.
+>
+> `visual_quality` is fail if there is no recognizable edit, unexpected
+> change, artifact, or an implausible result. `instruction_match` is fail
+> if the original instruction's instance/anchor, edit type, requested
+> identity, extent, count, or attribute is not actually achieved.
+
+每个类型另有一句硬要求：add 必须是新物体且不能替换 anchor；remove
+必须让指定对象消失并合理补背景；replace 必须有可识别的新身份；
+attribute 必须保持对象身份只改变所需属性。JSON 分开输出
+`source_target`、`observed_edit`、`target_match`、
+`unexpected_change`、`artifact`、`visual_quality`、
+`instruction_match`、`observed_instruction` 和 `reason`。
+本地解析器在出现额外对象变化、可见瑕疵或无编辑时强制
+`visual_quality=fail`；最终 `quality=pass` 仅当两个维度都 pass。
+像素统计只作诊断，不再以某个固定像素阈值覆盖语义判断。
+
+改写是**候选标签，不是自动洗白**：仅当图像视觉合格、编辑落在原 mask
+对应对象上、类型仍相同，但原指令的目标身份/属性等没有实现时，
+同一 VLM 响应可给不超过 35 词的 `rewrite_candidate`，状态记为
+`manual_review_candidate`，原 `quality` 仍是 fail。候选必须经人核对
+新指令是否真实、唯一指代且没有替额外编辑辩护，才能另存为新训练标签。
+错实例、无变化、残留、脏边、凭空出现其他人/物等情形不得改写挽救。
+例如该 pilot 的 `006_gres_r6282_m0` 原指令要求巧克力椒盐卷饼，
+实际是巧克力环形糕点，可提出改写；`008_gres_r10443_m0`
+虽出现奶油色熊玩具，但原孩子的手变成与任何可见人物不相连的残留，
+所以不能只改写成“熊玩具”来当合格数据。
+
+27B 模型使用本地 `Qwen3.8-27B` 权重、Hugging Face 官方
+`AutoProcessor.apply_chat_template(..., enable_thinking=False)`、
+vLLM 离线多模态 `prompt + multi_modal_data={"image": [source, edited]}`
+格式；BF16、单张 H100 80 GB、batch 8、`max_model_len=8192`、
+`max_new_tokens=512`、temperature 0。旧环境的 vLLM 0.11 /
+Transformers 4.57 不支持该模型，因此试验在独立环境
+`/opt/tiger/tanyue/.venvs/qwen38_audit` 中使用 vLLM 0.28.0
+与 Transformers 5.17.0。官方模型与 vLLM 文档：
+https://huggingface.co/Qwen/Qwen3.8-27B
+和 https://docs.vllm.ai/en/stable/features/multimodal_inputs/ 。
+
+```bash
+DATA_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_20_instruction_v5_seed20260920
+VENV38=/opt/tiger/tanyue/.venvs/qwen38_audit
+PATH="$VENV38/bin:$PATH" CUDA_VISIBLE_DEVICES=0 "$VENV38/bin/python" \
+  synthesis_pipeline/audit_edit_pairs_v2.py \
+  --annotations-jsonl "$DATA_ROOT/annotations.jsonl" \
+  --source-dir "$DATA_ROOT/sources" --edited-dir "$DATA_ROOT/edited" \
+  --out-dir "$DATA_ROOT/audit_v3_crop_qwen38" \
+  --vlm qwen38-vllm \
+  --vlm-model-id /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B \
+  --batch-size 8 --image-scope context_crop --save-input-previews
+```
+
+同一命令改为 `--vlm qwen8b-vllm`、本地 8B 模型路径和不同
+`--out-dir` 即为同输入/同 prompt 对照。20 条已有编辑图的 pilot
+来自 GRES/VER 各 10 条；不重跑出图。下表的“准确率”只是与当时
+`manual_review.jsonl` 的一致率，样本很小，不代表生产集泛化：
+
+| 审核 | 输入张数 | 通过/20 | 人工 fail 被误收 | 与原人工结论一致 | VLM 推理/20 | 推理吞吐 |
+|---|---:|---:|---:|---:|---:|---:|
+| 旧三复合图 Qwen3-VL-8B | 3 | 18 | 12 | 7/20 (35%) | 15.636 s | 76.75 条/分 |
+| 新双图 Qwen3-VL-8B | 2 | 17 | 10 | 10/20 (50%) | 14.656 s | 81.88 条/分 |
+| 新双图 Qwen3.8-27B | 2 | 6 | 1 | 17/20 (85%) | 68.664 s | 17.48 条/分 |
+
+两条候选改写为 `006` 的 pretzel→ring-shaped pastry 和 `018`
+的 maple→green tree；均未自动转 pass。27B 的 2 条“误拒”里，
+`018` 是特定树种不可确认但视觉效果良好，因此可人工决定是否采纳候选；
+`013_ver_r3717_m1` 原人工记录写“邻人未改变”，但重新查看两图发现
+旁边黑袍人的头饰、衣服和下装确实一起改变，27B 拒绝有依据，
+不应机械地按旧人工标签算模型错误。27B 仍漏收 `016` 的附着不自然旗帜；
+需要继续扩大并复核人工基准集。27B 在这 20 条上的纯推理时间约为
+同 prompt 8B 的 4.69 倍；冷启动及共享盘权重读取另外计时。
+
+完整输出：`audit_v3_crop_qwen8b/`、`audit_v3_crop_qwen38/`，
+逐条并排对照 `audit_comparison_v3_crop.json`，
+人工与 27B 审核结果可视化 `gallery_audit_v3_crop_qwen38/index.html`。
+
+## 10. 新 52-case 双模型审核与人工逐条复核（2026-09-19）
+
+新批次保存在
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_52_instruction_v5_seed20260921/`。
+使用当前规划与 Qwen-Image-Edit 参数、seed 20260921，生成 26 张全新
+source 的 52 条编辑，GRES/VER 各 26 条，add/remove/replace/attribute
+各 13 条；每张 source 的两个 mask 都编辑，且与上一批 20 条的 source
+无重叠。逐条原始指令、mask、编辑图分别在 `annotations.jsonl`、
+`masks/`、`edited/`；规划 summary 在
+`planning/instruction_summary.json`。
+
+| 阶段 | 耗时 | 说明 |
+|---|---:|---|
+| 规划 | 649.03 s | 520 候选 region、994 次 8B VLM 请求，含重试与冷启动 |
+| 物化 | 63.19 s | 26 source / 52 case |
+| 8 卡编辑 | 548.31 s | 5.69 case/min，52/52 成功 |
+| 双图 8B 审核 | 159.70 s 墙钟 / 38.68 s 推理 | 80.66 case/min 纯推理 |
+| 双图 27B 审核 | 275.80 s 墙钟 / 153.18 s 推理 | 20.37 case/min 纯推理 |
+
+两次审核使用相同 prompt、两张相同范围的照片、batch 8、max tokens
+512、BF16、H100 80 GB。8B 初始响应有一条把“无可见变化”的
+`observed_edit` 写为 JSON null；修复解析器后只重解析原始响应，
+**没有额外模型调用**，所列时间仍为原推理时间。8B 使用 vLLM 0.11，
+27B 使用 vLLM 0.28；后者纯推理约慢 3.96 倍，但版本不同，
+不能把差异完全归因于参数量。8B 保存输入预览而 27B 不保存，
+所以墙钟时间还包含不同的预处理/写盘开销。
+
+人工先看隐藏 VLM 判定的 `blind_review_gallery/`，逐一核对全部 52
+条的原图 mask 轮廓、编辑图及原指令，并记录
+`manual_review_decisions.json` 与 `manual_review.jsonl`。
+对争议条目再查看 1280 边长的输入原图，复核后发现：
+`025` 的“locomotive number 61”是在标识机车，不是要求
+把数字 61 染红；结果整辆机车变红，因此由初审 fail 改为 pass，
+另给出更明确的人工改写。最终人工 pass 26、fail 26：
+add 5/13，remove 5/13，replace 8/13，attribute 8/13。
+
+| 审核 | 自动 pass/fail | 与人工同判 | 错收人工 fail | 错拒人工 pass |
+|---|---:|---:|---:|---:|
+| Qwen3-VL-8B | 46 / 6 | 32/52 (61.5%) | 20 | 0 |
+| Qwen3.8-27B | 27 / 25 | 35/52 (67.3%) | 9 | 8 |
+
+两模型彼此同判 29/52 (55.8%)。两者都 pass 的 25 条里，
+人工仍判 7 条 fail：`000` 悬空灯、`001` 马/羽饰残留、
+`003` 蛋糕移除后暗斑、`005` 厨师没消失、`012`
+悬空雪花、`046` 花盆和柱子混成圆筒、`051`
+尖塔没消失。27B 比 8B 少错收 11 条，但会过严拒绝一些
+大体自然的编辑，例如 `013` 因隐约的雪地残影拒绝、
+`040` 因桥墩和倒影“不完美”拒绝；同时对 `005`、
+`049`、`051` 的明显未完成编辑产生无依据的 pass。
+因此本批**不建议仅凭任何一个模型或双模型共识自动入库**。
+详细的逐条混淆、证据与耗时在 `dual_audit_comparison.json`，
+可视化在 `dual_audit_gallery/index.html`。该页每条 case 都展示
+8B、27B、人工的完整判断理由；还展开列出两模型的目标识别、
+实际观察、额外变化、瑕疵、改写建议，并可查看模型原始完整响应。
+`dual_audit_gallery/cases/` 中的单条图卡和 `contact_*.jpg`
+拼图也包含三方完整理由，方便脱离网页逐页查看。
+
+人工将“图像可用但原指令不符”单独记为 4 条：
+`009` 的红色吊坠、`015` 的玻璃碗变苹果、`028`
+的黑衣摄影师变化、`042` 的花束加在错误人物附近。
+按当前**同对象、同类型、无额外缺陷**的改写规则，
+只有 `009` 可安全挽救；27B 产生的
+“Change the gold pendant on the girl's red necklace to a red bead.”
+经人工核对有效。8B 唯一候选 `002` 忽略了蛋糕被缩小且发糊，
+无效；27B 另一个候选 `014` 把仍是鸡蛋的碗描述为“混合颜色的鸡蛋”，
+不构成有意义编辑，也无效。`015` 涉及 attribute→replace，
+`028` 不是清晰的同类型替换，`042` 错实例，均不由当前改写流程
+自动洗白。`025` 虽原指令可解释为正确，但人看时易歧义，
+另由人工澄清为
+“Recolor the Amtrak locomotive marked 61 beside the concrete pillar red.”
+
+`reviewed_accepted/accepted_annotations.jsonl` 单独放置人工通过的
+26 条及 `009` 的 1 条人工批准改写，共 27 条；
+`approved_model_rewrites.jsonl` 仅含 `009`。原始
+`annotations.jsonl` 与模型原判定未被覆盖。该文件是
+**pilot 的人工复核结果，不是自动生产准入率**。
+
+## 11. 8B 人工标准提示词与低变化否决试验（2026-09-19）
+
+为了保留 8B 的速度，`audit_edit_pairs_v2.py` 仍只用上节所述两张图、
+一次 Qwen3-VL-8B vLLM 请求。8B 的自动选择提示词为 `human_rubric`，全文见
+脚本中的 `HUMAN_RUBRIC_PROMPT` 与 `HUMAN_TYPE_RULES`。它把人工复核
+拆为固定顺序：先独立识别原图轮廓所圈对象和编辑图的同位置变化，
+再核对**指定实例/锚点、实际操作、完成程度**，最后检查明显残留、
+悬空、模糊补洞、错改与越界变化。微小纹理差异、淡阴影和大体合理的
+背景重建不应单独导致 fail。add/remove/replace/attribute 各有独立
+的类型检查；只要原指令与实际操作不符，不能靠改写把当前判定变 pass。
+
+在同一批 52 条、同一双图输入、batch 8、512 输出 token 上，
+按逐条人工结论比较：
+
+| 审核方案 | 与人工同判 | 错收人工 fail | 错拒人工 pass | 纯推理时间 |
+|---|---:|---:|---:|---:|
+| 原 8B 双图提示词 | 32/52 | 20 | 0 | 38.68 s |
+| 8B `human_rubric` 单次调用 | 35/52 | 17 | 0 | 44.44 s |
+| 加入像素比例文字提示 | 34/52 | 18 | 0 | 44.05 s |
+| 额外视觉清单字段 | 28/52 | 16 | 8 | 45.42 s |
+| `human_rubric` + 30% 低变化否决 | **39/52** | **13** | **0** | **44.44 s**，否决无需推理 |
+
+像素比例文字提示会使模型误把“变化大”当成“编辑正确”；视觉清单
+虽然增加了显式的旧对象存在判断，但错拒 8 条合格样本，故这两种
+prompt 变体都不作为默认。`human_rubric` 较原 prompt 纠正 3 条；
+它仍会自信地说画面中明明可见的厨师和尖塔已被移除。
+
+为拦截这一类近乎未编辑的 remove/replace，默认增加无需模型调用的
+保守否决：原 mask 内平均 RGB 差值至少为 0.05 的像素若不足 30%，
+则不能认定完整 remove/replace。`add` 的新物体可能在 anchor mask
+之外，`attribute` 可以只改小局部，所以这两类**不**用该阈值。
+52 条中它纠正 `005` 厨师、`034` 城堡、`037` 雪檐、`051`
+尖塔共 4 条模型错收，没有新增错拒；但 `001` 马的残留、`003`
+蛋糕暗斑、`046` 花盆与柱子粘连等仍被错收。阈值可以用
+`--low-change-veto-threshold 0` 关闭；当前 30% 只是 pilot 校准，
+不等于已有大规模泛化保证。
+
+另批先前生成的 20 条也重新跑了同一方案：原 8B 与新方案均为
+10/20 与人工同判、错收 10 条、错拒 0 条。试验前已看过这批样本
+的像素变化下界，因此它不是严格未触碰的阈值验证集；它至少表明
+prompt 的收益没有在这批样本上重现。综合 72 条，两方案分别为
+42/72 与 49/72 同判；新方案仍错收 23 条，**不能直接自动入库**。
+新 prompt 在 52 条上纯推理约 70.2 case/min，比原 prompt 的
+80.7 case/min 慢约 13%，但仍远快于生图阶段。
+
+本轮 8B `human_rubric` 提出 3 条改写候选（`002`、`016`、`050`），
+人工看后均不应通过：原对象发糊、麦克风覆盖人脸、喷泉遮盖原亭子。
+因此改写继续保持候选状态，绝不自动采纳。
+
+52 条逐条新旧理由和人工理由见
+`pilot_52_instruction_v5_seed20260921/audit_prompt_comparison_gallery/index.html`；
+原模型响应在各 `audit_two_image_8b_*` 目录。推荐运行方式：
+
+```bash
+DATA_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_52_instruction_v5_seed20260921
+CUDA_VISIBLE_DEVICES=7 /opt/tiger/tanyue/.venvs/mirage_official/bin/python \
+  synthesis_pipeline/audit_edit_pairs_v2.py \
+  --annotations-jsonl "$DATA_ROOT/annotations.jsonl" \
+  --source-dir "$DATA_ROOT/sources" --edited-dir "$DATA_ROOT/edited" \
+  --out-dir "$DATA_ROOT/audit_two_image_8b_human_rubric_lowchange_v5" \
+  --vlm qwen8b-vllm \
+  --vlm-model-id /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3-VL-8B-Instruct \
+  --prompt-variant human_rubric --low-change-veto-threshold 0.30
+```
+
+## 12. 27B 按人工标准重做审核的对照（2026-09-19）
+
+同一双图输入、单次调用、batch 8、512 输出 token 下，用人工复核的
+52 条和另批 20 条比较了四种 27B 提示词。`human_rubric` 是上节 8B
+使用的宽容画质标准；`human_rubric_semantic` 加强“属性确实变化、
+remove 不能凭空换人、add 必须落在指定锚点”；`legacy_tolerant`
+保留原版的严格语义检查，只把轻微阴影、边缘和纹理差异从硬失败改为
+可接受；`legacy_severity` 让模型另报瑕疵轻重。所有新运行都加上
+30% remove/replace 低变化否决，这一步不增加 VLM 调用。
+
+| 27B 方案 | 52 条同判 / 错收 / 错拒 | 20 条同判 / 错收 / 错拒 | 52 条纯推理 |
+|---|---|---|---:|
+| 原版 prompt | 35/52 / 9 / 8 | 17/20 / 1 / 2 | 153.18 s |
+| 原版 prompt + 低变化否决 | 37/52 / 7 / 8 | 17/20 / 1 / 2 | 同原版，无额外调用 |
+| `human_rubric` + 否决 | 38/52 / 11 / 3 | 未测 | 149.93 s |
+| `human_rubric_semantic` + 否决 | 39/52 / 9 / 4 | 13/20 / 6 / 1 | 134.82 s |
+| `legacy_tolerant` + 否决 | **42/52 / 9 / 1** | 15/20 / 4 / 1 | 143.35 s |
+| `legacy_severity` + 否决 | 38/52 / 13 / 1 | 未测 | 156.68 s |
+
+`legacy_tolerant` 在 52 条上纠正了多数过严错拒，且没有增加这批的
+错收：例如 `008` 女孩替换后的轻微发丝边缘、`013` 雪地残影、
+`031` 水面轻微模糊、`040` 桥梁倒影等可通过。但在另批 20 条，
+它把 `005` 明显补洞不自然、`008` 熊玩具与残留手臂、`012`
+不像特定雕像的替换错放了，错收从 1 增至 4。提示词收益**没有稳定
+跨批次复现**，不能只依据 52 条分数把它设为默认生产审核。
+`legacy_severity` 则出现了模型把明显缺陷标为 `minor` 的问题。
+
+当前试验审核脚本的 CLI 默认 `--prompt-variant auto`：8B 用
+`human_rubric`，27B 用原 `legacy` 严格语义提示词，两者均用保守的
+30% 低变化否决。27B 的这一默认组合在两批共 72 条中与人工同判
+54/72，错收 8 条；`legacy_tolerant` 同判 57/72 但错收 13 条。
+对于训练数据准入，当前更倾向前者的低错收策略；**两个数字都不足以
+支持全自动入库**，尤其是 27B 仍会对显而易见的实例残留产生幻觉。
+各种 prompt 可用 `--prompt-variant` 显式复现，实验输出没有覆盖原判定。
+
+52 条的原版/`legacy_tolerant`/人工逐条图文对照在
+`pilot_52_instruction_v5_seed20260921/audit_27b_prompt_comparison_gallery/index.html`；
+20 条的相同对照在
+`pilot_20_instruction_v5_seed20260920/audit_27b_prompt_comparison_gallery/index.html`。
+每条都保留模型完整理由和原始响应。`legacy_tolerant` 的 52 条中
+有一条响应把 `instruction_match` 输出为 JSON 布尔值而非字符串；
+解析器兼容该等价写法后，使用保存的响应重解析，**没有再次推理**。
+
+## 13. 新的 100 张图与 27B 审核的独立留出检验（2026-09-19）
+
+本轮重新采样，避开此前六批 pilot 的 139 个 source ID。先从 200
+张候选原图/400 个 mask case 生成区域指令，再选出 50 张原图、
+每张两个 mask 共 100 个全新编辑 case；GRES/VER 各 50 条，
+add/remove/replace/attribute 各 25 条。仍采用原来的
+Qwen-Image-Edit-2511、40 steps、seed 0、8 GPU 出图设置，
+100/100 编辑图成功落盘。规划约 507 秒、materialize 约 116 秒、
+8 卡生图约 997 秒（约 6.0 case/min）。
+
+在查看任何新审核结果前，逐张观察原图 mask 轮廓和编辑图，记录
+画面质量、原指令匹配与最终二值结论。100 张全部有逐图理由：
+53 张 pass、47 张 fail；按类型分别为 add 12/25、
+remove 9/25、replace 20/25、attribute 12/25 pass。
+首次盲审后，复看时纠正了 1 条把独立金属十字架误认作教堂尖塔的
+人工误判，修改记录保存在 `manual_review_decisions.json`；
+因此这些数字是助理逐图复核的工作标签，不是外部多评审者真值。
+remove 的主要问题是目标残留、依附物/背景补全不自然；add 常见
+悬空或大范围附加变化；attribute 常见根本没变、改到邻接区域或
+把对象改形。图与理由见
+`pilot_100_audit27_seed20260922/audit_comparison_gallery/index.html`，
+盲审原始图卡在 `blind_preview/gallery/index.html`。
+
+以**原图 source ID 为单位**分成 60 条开发集和 40 条独立留出集，
+两边无原图重复，四种编辑类型均衡。审核输入始终只有两张：
+带黑白 mask 外轮廓的原图 context crop、同坐标干净编辑图；
+Qwen3.8-27B 经 vLLM、batch 8、512 输出 token，**每条仅一次
+模型调用**。新版 `conservative_gate` 提示词要求先描述圈中
+原物、编辑后同位置的颜色/形状/残留/支撑，再主动寻找不相关变化、
+补洞和畸形；最后分别判断指令匹配与画面质量。四类仍使用各自的
+编辑标准。另将 mask 内变化像素比例低于 30% 的 remove/replace
+以及低于试验阈值的 attribute 判为 fail；这些是保存响应的
+后处理，不增加 VLM 调用。`parse_audit_json` 也只对严格的
+JSON 字段格式进行缺括号/行间逗号恢复；无法可靠修复时
+fail-closed 留作 parse_error，不猜判定。
+
+| 单次 27B 审核方案 | 开发集：同判 / 错收 / 错拒 | 留出集：同判 / 错收 / 错拒 |
+|---|---:|---:|
+| 原版 `legacy`，remove/replace 30% 否决 | 40/60 / 10 / 10 | **32/40 / 4 / 4** |
+| `evidence_gate`，另加 attribute 30% 否决 | 48/60 / 8 / 4 | 未在留出集运行 |
+| `conservative_gate`，另加 attribute 30% 否决 | **50/60 / 8 / 2** | 29/39 可解析 / **7** / 3；另 1 条 parse_error |
+| 原版 `legacy`，另加 attribute 20% 否决 | 41/60 / 9 / 10 | 32/40 / 4 / 4 |
+
+审慎版在开发集更好，却在独立留出集将错收从 4 提高到 7：
+它仍会把悬空物体判成自然、把近乎未变色的对象判成已变色、
+忽略画面别处新增物，或把残留目标说成已消失。因此**没有把
+`conservative_gate` 改成 27B 默认**，也不能用开发集
+50/60 的分数声称质量核验已可靠。20% attribute 否决在本批
+使原版整体由 72/100 同判、错收 14、错拒 14 变为
+73/100、错收 13、错拒 14；留出集无错收改善。
+该阈值属于本批的探索性后处理，不能视作独立验证过的生产阈值，
+尤其小而局部的真实 attribute 编辑可能触发误拒。默认仍为
+`legacy` 和 attribute 否决关闭；若优先减少错收，可显式
+使用试验性的 `--attribute-low-change-veto-threshold 0.2`。
+
+本批可复现的试验命令（正式准入仍需复核）：
+
+```bash
+DATA_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_100_audit27_seed20260922
+CUDA_VISIBLE_DEVICES=7 PATH=/opt/tiger/tanyue/.venvs/qwen38_audit/bin:$PATH \
+  /opt/tiger/tanyue/.venvs/qwen38_audit/bin/python \
+  synthesis_pipeline/audit_edit_pairs_v2.py \
+  --annotations-jsonl "$DATA_ROOT/annotations.jsonl" \
+  --source-dir "$DATA_ROOT/sources" --edited-dir "$DATA_ROOT/edited" \
+  --out-dir "$DATA_ROOT/audit27_legacy_example" \
+  --vlm qwen38-vllm \
+  --vlm-model-id /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B \
+  --prompt-variant legacy --image-scope context_crop \
+  --batch-size 8 --max-new-tokens 512 \
+  --low-change-veto-threshold 0.3 \
+  --attribute-low-change-veto-threshold 0.2
+```
+
+改写候选只在实际出图自然、同一目标、同一编辑类型时提出，
+**不会自动使原判定 pass**。原版 100 条提出 3 条，逐图核查
+2 条可用（蓝马甲替代绿马甲、花盆位于海报右侧）；审慎版提出
+4 条，仅 1 条可用。另有把未消失的小号或不自然变黑的香肠
+写成已成功编辑的无效候选，故改写仍必须单独复核。
+
+主要结果文件都在
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_100_audit27_seed20260922/`：
+`annotations.jsonl`、`edited/`、`manual_review.jsonl`、
+`evaluation/dev60_final_compare.json`、
+`evaluation/holdout40_final_compare.json`、
+`audit27_legacy_all100_attr02/edit_audit.jsonl` 和
+`audit27_conservative_all100_attr03/edit_audit.jsonl`。
+两模型方案的 100 张并排图卡、逐条完整理由和原始 VLM 响应均在
+`audit_comparison_gallery/index.html`；这些原始文件没有被覆盖。
+27B 原版纯推理约 21.8 case/min，审慎版开发集/留出集分别约
+19.7/19.0 case/min，且各次模型加载约 82 秒。当前自动审核
+即使取较保守方案仍会错收，正式训练数据应继续人工抽检，
+不能直接把模型 pass 全量入库。
