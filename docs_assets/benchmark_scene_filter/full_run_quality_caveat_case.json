@@ -1,0 +1,5 @@
+{
+  "cases": [
+    {"shard": "replace_01045.parquet", "row_idx": 60, "expected": "PASS", "featured": true}
+  ]
+}
