@@ -51,6 +51,9 @@ def main() -> None:
     annotations = load_jsonl(args.annotations_jsonl)
     reviews = load_jsonl(args.manual_review_jsonl)
     annotation_by_image = {str(row["image"]): row for row in annotations}
+    new_schema = bool(reviews) and all(
+        "visual_quality" in row and "instruction_match" in row for row in reviews
+    )
     review_by_image: dict[str, dict[str, Any]] = {}
     for row in reviews:
         image = str(row.get("image", ""))
@@ -58,11 +61,20 @@ def main() -> None:
             raise ValueError(f"Missing or duplicate review image: {image!r}")
         if image not in annotation_by_image:
             raise ValueError(f"Review is not present in annotations: {image}")
-        if row.get("quality") not in QUALITIES:
+        if row.get("quality") not in ({"pass", "fail"} if new_schema else QUALITIES):
             raise ValueError(f"Invalid quality for {image}: {row.get('quality')!r}")
-        for field in BOOLEAN_FIELDS:
-            if not isinstance(row.get(field), bool):
-                raise ValueError(f"{image}: {field} must be boolean")
+        if new_schema:
+            for field in ("visual_quality", "instruction_match"):
+                if row.get(field) not in {"pass", "fail"}:
+                    raise ValueError(f"{image}: {field} must be pass or fail")
+            if row["quality"] == "pass" and (
+                row["visual_quality"] != "pass" or row["instruction_match"] != "pass"
+            ):
+                raise ValueError(f"{image}: overall pass requires both criteria to pass")
+        else:
+            for field in BOOLEAN_FIELDS:
+                if not isinstance(row.get(field), bool):
+                    raise ValueError(f"{image}: {field} must be boolean")
         if not str(row.get("reason", "")).strip():
             raise ValueError(f"{image}: reason is required")
         review_by_image[image] = row
@@ -74,6 +86,36 @@ def main() -> None:
         raise ValueError(
             f"Expected {len(annotations)} reviews, found {len(reviews)}"
         )
+
+    if new_schema:
+        fields = ("quality", "visual_quality", "instruction_match")
+        summary = {
+            "cases": len(reviews),
+            "review_coverage": f"{len(reviews)}/{len(annotations)}",
+            "overall": {
+                field: dict(Counter(row[field] for row in reviews)) for field in fields
+            },
+            "by_task_type": {
+                name: {
+                    field: dict(Counter(review_by_image[image][field] for image, annotation in annotation_by_image.items() if annotation.get("task_type") == name))
+                    for field in fields
+                }
+                for name in sorted({str(row.get("task_type")) for row in annotations})
+            },
+            "by_source_subset": {
+                name: {
+                    field: dict(Counter(review_by_image[image][field] for image, annotation in annotation_by_image.items() if annotation.get("source_subset") == name))
+                    for field in fields
+                }
+                for name in sorted({str(row.get("source_subset")) for row in annotations})
+            },
+        }
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        args.output_json.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
 
     overall: Counter[str] = Counter()
     by_type: dict[str, Counter[str]] = defaultdict(Counter)

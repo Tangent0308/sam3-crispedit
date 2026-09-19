@@ -114,6 +114,32 @@ CUDA_VISIBLE_DEVICES=0 \
 The script reports backend loading and inference time separately and explicitly
 shuts down the vLLM engine process.
 
+An experimental two-image audit is also available in
+`synthesis_pipeline/audit_edit_pairs_v2.py`. It uses an outlined source and
+clean edited view in one VLM request, separates visual quality from original
+instruction compliance, and emits human-review-only rewrite candidates for
+visually sound edits with a mismatched result. It supports both
+`qwen8b-vllm` and `qwen38-vllm`; the latter requires the separate
+`/opt/tiger/tanyue/.venvs/qwen38_audit` environment. See section 9 of
+`docs/SAMTOK_DERIVED_EDIT_PIPELINE.md` sections 9–13 for the exact command,
+prompt policy, 52-case, 20-case, and source-disjoint 100-case comparisons,
+and limitations. Its
+`--prompt-variant auto` selects the human-style rubric for 8B and the more
+precise original rubric for 27B, plus a conservative no-op veto for
+remove/replace when fewer than 30% of source-mask pixels change. The
+`legacy_tolerant` 27B variant improves recall on one pilot but admits more
+bad images on another; it is available explicitly, not selected by default.
+This experiment does not automatically change the existing production audit
+or training labels.
+
+The fresh 100-case pilot is at
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_100_audit27_seed20260922/`.
+Its `audit_comparison_gallery/index.html` shows every source/edited pair
+beside both 27B decisions and the independent visual review. The more
+conservative prompt improved the 60-case development split but increased
+false acceptance on the 40-case source-disjoint holdout, so it is **not**
+the default; see section 13 before using model verdicts for admission.
+
 ## Visualize
 
 ```bash

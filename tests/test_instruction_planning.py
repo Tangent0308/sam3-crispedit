@@ -19,10 +19,197 @@ from synthesis_pipeline.generate_samtok_plan import (
     same_replacement_category,
     validation_feedback,
 )
-from synthesis_pipeline.visual_prompt_utils import audit_visual_inputs, instruction_target_crop
+from synthesis_pipeline.audit_edit_pairs_v2 import (
+    apply_low_change_veto,
+    audit_messages as audit_v2_messages,
+    build_prompt as build_audit_v2_prompt,
+    normalize_result as normalize_audit_v2_result,
+)
+from synthesis_pipeline.visual_prompt_utils import (
+    audit_two_image_inputs,
+    audit_visual_inputs,
+    instruction_target_crop,
+)
 
 
 class InstructionPlanningTest(unittest.TestCase):
+    def test_two_image_audit_marks_only_source_and_preserves_target_pixels(self):
+        array = np.full((100, 160, 3), (20, 80, 120), dtype=np.uint8)
+        array[35:65, 65:95] = (150, 100, 40)
+        source = Image.fromarray(array, mode="RGB")
+        edited = Image.new("RGB", source.size, (40, 130, 75))
+        mask = np.zeros((100, 160), dtype=bool)
+        mask[35:65, 65:95] = True
+        before, after = audit_two_image_inputs(source, edited, mask, longest_side=320)
+        self.assertEqual(before.size, after.size)
+        self.assertEqual(before.getpixel((160, 140)), (150, 100, 40))
+        self.assertEqual(after.getpixel((160, 140)), (40, 130, 75))
+        self.assertEqual(before.getpixel((127, 140)), (0, 0, 0))
+
+    def test_two_image_audit_prompt_and_rewrite_are_independent_of_verdict(self):
+        row = {
+            "task_type": "replace",
+            "editing_instruction": "Replace the center child with a small stuffed animal.",
+            "refer_object": ["center child"],
+        }
+        source = Image.new("RGB", (32, 32), "white")
+        edited = Image.new("RGB", (32, 32), "blue")
+        content = audit_v2_messages(source, edited, row)[0]["content"]
+        self.assertEqual(
+            [item["image"] for item in content if item["type"] == "image"],
+            [source, edited],
+        )
+        self.assertIn("Original instruction: Replace the center child", build_audit_v2_prompt(row))
+        answer = {
+            "source_target": "center child",
+            "observed_edit": "The child becomes a cream teddy bear.",
+            "target_match": True,
+            "unexpected_change": None,
+            "artifact": None,
+            "visual_quality": "pass",
+            "instruction_match": "fail",
+            "observed_instruction": "Replace the center child with a cream teddy bear.",
+            "reason": "The result is a larger bear.",
+        }
+        parsed = normalize_audit_v2_result(answer, "replace")
+        self.assertEqual(parsed["quality"], "fail")
+        self.assertEqual(parsed["salvage_status"], "manual_review_candidate")
+        answer["visual_quality"] = "fail"
+        self.assertIsNone(normalize_audit_v2_result(answer, "replace")["rewrite_candidate"])
+        answer["visual_quality"] = "pass"
+        answer["observed_instruction"] = "Add a cream bear beside the child."
+        self.assertIsNone(normalize_audit_v2_result(answer, "replace")["rewrite_candidate"])
+
+    def test_two_image_audit_vetoes_unrequested_change_and_no_edit_rewrite(self):
+        answer = {
+            "source_target": "brown teddy bear",
+            "observed_edit": "No visible change was made.",
+            "target_match": True,
+            "unexpected_change": None,
+            "artifact": None,
+            "visual_quality": "pass",
+            "instruction_match": "fail",
+            "observed_instruction": "Remove the brown teddy bear.",
+            "reason": "The edit is not visible.",
+        }
+        parsed = normalize_audit_v2_result(answer, "remove")
+        self.assertEqual(parsed["visual_quality"], "fail")
+        self.assertIsNone(parsed["rewrite_candidate"])
+        answer["observed_edit"] = "The teddy bear becomes a second baby."
+        answer["unexpected_change"] = "An unrequested baby appears."
+        parsed = normalize_audit_v2_result(answer, "remove")
+        self.assertEqual(parsed["visual_quality"], "fail")
+        self.assertEqual(parsed["quality"], "fail")
+
+    def test_two_image_audit_accepts_null_observed_edit_as_no_edit_failure(self):
+        answer = {
+            "source_target": "child in the dark coat",
+            "observed_edit": None,
+            "target_match": False,
+            "unexpected_change": None,
+            "artifact": None,
+            "visual_quality": "pass",
+            "instruction_match": "fail",
+            "observed_instruction": None,
+            "reason": "The child's skin tone is unchanged.",
+        }
+        parsed = normalize_audit_v2_result(answer, "attribute")
+        self.assertEqual(parsed["quality"], "fail")
+        self.assertEqual(parsed["visual_quality"], "fail")
+        self.assertIsNone(parsed["rewrite_candidate"])
+
+    def test_two_image_audit_low_change_veto_is_limited_to_remove_replace(self):
+        answer = {
+            "source_target": "the selected object",
+            "observed_edit": "The selected object disappears.",
+            "target_match": True,
+            "unexpected_change": None,
+            "artifact": None,
+            "visual_quality": "pass",
+            "instruction_match": "pass",
+            "observed_instruction": "Remove the selected object.",
+            "reason": "The object appears absent.",
+        }
+        for task_type in ("remove", "replace"):
+            parsed = normalize_audit_v2_result(answer, task_type)
+            gated = apply_low_change_veto(
+                parsed, task_type, {"inside_changed_fraction": 0.2}, 0.3
+            )
+            self.assertEqual(gated["quality"], "fail")
+            self.assertEqual(gated["instruction_match"], "fail")
+            self.assertIsNone(gated["rewrite_candidate"])
+            self.assertEqual(gated["metric_veto"]["threshold"], 0.3)
+        parsed = normalize_audit_v2_result(answer, "attribute")
+        self.assertEqual(
+            apply_low_change_veto(
+                parsed, "attribute", {"inside_changed_fraction": 0.2}, 0.3
+            )["quality"],
+            "pass",
+        )
+
+    def test_two_image_audit_checklist_old_target_veto(self):
+        answer = {
+            "source_target": "the selected person",
+            "edited_target_area": "The same person remains in the edited image.",
+            "old_target_visible": True,
+            "requested_change_visible": True,
+            "observed_edit": "The person seems to be removed.",
+            "target_match": True,
+            "unexpected_change": None,
+            "artifact": None,
+            "visual_quality": "pass",
+            "instruction_match": "pass",
+            "observed_instruction": None,
+            "reason": "The person is no longer visible.",
+        }
+        parsed = normalize_audit_v2_result(answer, "remove", require_checklist=True)
+        self.assertEqual(parsed["quality"], "fail")
+        self.assertIn("old_target_still_visible", parsed["checklist_vetoes"])
+
+    def test_two_image_audit_accepts_boolean_verdict_fields(self):
+        answer = {
+            "source_target": "the selected lamp",
+            "observed_edit": "The lamp pole vanishes, leaving floating globes.",
+            "target_match": True,
+            "unexpected_change": "The pole disappears without the requested bench.",
+            "artifact": "The globes float without support.",
+            "visual_quality": True,
+            "instruction_match": False,
+            "observed_instruction": None,
+            "reason": "A bench was not added and the lamps are unsupported.",
+        }
+        parsed = normalize_audit_v2_result(answer, "add")
+        self.assertEqual(parsed["visual_quality"], "fail")
+        self.assertEqual(parsed["instruction_match"], "fail")
+        self.assertEqual(parsed["quality"], "fail")
+
+    def test_two_image_audit_artifact_severity_parser(self):
+        answer = {
+            "source_target": "the selected camera",
+            "observed_edit": "The camera is removed with a faint soft edge.",
+            "target_match": True,
+            "unexpected_change": None,
+            "artifact": "A faint soft edge remains in the foliage.",
+            "artifact_severity": "minor",
+            "visual_quality": "pass",
+            "instruction_match": "pass",
+            "observed_instruction": None,
+            "reason": "The removal is otherwise coherent.",
+        }
+        self.assertEqual(
+            normalize_audit_v2_result(
+                answer, "remove", require_artifact_severity=True
+            )["quality"],
+            "pass",
+        )
+        answer["artifact_severity"] = "major"
+        self.assertEqual(
+            normalize_audit_v2_result(
+                answer, "remove", require_artifact_severity=True
+            )["quality"],
+            "fail",
+        )
+
     def test_crop_preserves_photo_and_input_has_exactly_two_images(self):
         pixels = np.full((120, 160, 3), (70, 120, 160), dtype=np.uint8)
         pixels[45:75, 55:90] = (140, 90, 50)

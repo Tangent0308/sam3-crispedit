@@ -115,6 +115,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parquet", type=Path, required=True)
     parser.add_argument("--positive-index", type=Path, required=True)
+    parser.add_argument(
+        "--exclude-annotations", type=Path, action="append", default=[],
+        help="Exclude source rows already used by these annotation JSONL files (repeatable).",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--num-cases", type=int, default=100)
     parser.add_argument(
@@ -1141,6 +1145,15 @@ def main() -> None:
     source_dir.mkdir(parents=True, exist_ok=True)
 
     positive_rows = load_jsonl(args.positive_index)
+    excluded_ids = {
+        int(row["parquet_row_index"])
+        for path in args.exclude_annotations
+        for row in load_jsonl(path)
+    }
+    positive_rows = [
+        row for row in positive_rows
+        if int(row["parquet_row_index"]) not in excluded_ids
+    ]
     candidate_cases = args.candidate_cases or args.num_cases * 5
     if candidate_cases < args.num_cases:
         raise ValueError("--candidate-cases must be at least --num-cases")
@@ -1411,6 +1424,7 @@ def main() -> None:
     elapsed = time.perf_counter() - started
     summary = {
         "seed": args.seed,
+        "excluded_source_rows": len(excluded_ids),
         "source_rows": len(selected),
         "cases": len(tasks),
         "candidate_source_rows": len(candidates),
