@@ -19,9 +19,14 @@ instruction-generation safeguards, per-case manual review policy, and the
   `num_masks - 1` exactly once. Missing or duplicate masks fail immediately.
 - Mask policy: source RLE masks are reused exactly; SAM/SAM2 is not run.
 - Editing: Qwen-Image-Edit-2511 with MIRAGE regional branches.
-- Planning localization: a standalone clean target-pixel cutout, clean context,
-  separate binary mask, and clean full source; colored overlays and multi-mask
-  SAMTok question/answer text are never shown to the instruction VLM.
+- Planning localization: exactly two images, the clean full source and an enlarged
+  photographic context crop with a thin external black/white mask contour and
+  margin label. No target pixels are painted or cut out; colored overlays and
+  multi-mask SAMTok question/answer text are never shown to the instruction VLM.
+- Instruction localization: `refer_object` must include a full-image locator,
+  and the full edit instruction must retain its distinguishing position and
+  landmark (allowing minor grammatical omissions). Each edit type receives
+  only its own task-specific guidance.
 - Regional writeback: remove/replace/attribute use a feathered exact mask; add
   retains bbox guidance because its mask is a placement anchor.
 - Audit: one Qwen3-VL-8B vLLM call per case, binary pass/fail output, an exact-mask

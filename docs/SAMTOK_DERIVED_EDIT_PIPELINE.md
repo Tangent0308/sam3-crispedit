@@ -88,9 +88,11 @@ SAMTok parquet
 ### 4.2 自动采样与指令生成
 
 `generate_samtok_plan.py` 以固定 seed 过采样候选，并给 Qwen3-VL-8B-Instruct
-提供三张无标注色视觉输入：单独放大的 clean target cutout、包含 clean context/cutout/
-binary mask 的定位 panel，以及 clean source 全图。只有 cutout 定义可编辑对象，全图只
-用于场景和同类实例关系。SAMTok 原始 question/answer 往往同时描述两个 mask，曾导致
+提供两张图：未标记的 clean source 全图，以及保留原始摄影像素、放大并带周边上下文的
+mask 邻域 crop。crop 只在 mask **外侧**画细黑白轮廓，在图像旁的白色边栏注明
+`MASK REGION: INSIDE BLACK/WHITE OUTLINE`；mask 内像素不涂色、不挖空。邻域
+裁剪至少外扩 48 像素或 mask 宽高的 40%，以保留附近相关物体。全图则用于判断
+同类实例和真实方位。SAMTok 原始 question/answer 往往同时描述两个 mask，曾导致
 planner 在两个合法对象间串实例；现在它们只保留在 provenance，不再进入单-mask prompt。
 
 模型除 `refer_object`、`editing_instruction` 和 `new_instruction` 外，还必须返回：
@@ -100,19 +102,37 @@ planner 在两个合法对象间串实例；现在它们只保留在 provenance�
 - `outside_dependencies` 与 `mask_compatibility`：判断指定 edit type 能否严格在当前
   mask 范围内成立。
 
-完整 instruction 限制为 4--22 words，regional instruction 为 3--16 words；不允许
+完整 instruction 限制为 4--24 words，regional instruction 为 3--18 words；不允许
 背景重建配方、默认保持条款、解释和无关对象列表。校验器检查 masked-content、
 refer-object 和 instruction 的主体一致性、动作类型、replace 的具体替代身份以及
 generic add 模板。remove/replace 只接受完整独立物体；局部部件保留给 add/attribute。
+`refer_object` 最多 14 words，必须含从原图全局视角成立的简短方位或地标关系，并
+使同类实例中目标唯一可辨；完整 instruction 必须保留这一指代的定位线索及主体特征，
+不能缩写成共享类别名。校验允许不改变定位的微小语法省略，但不允许丢掉方位/地标。
+区域分支已经单独接收 `refer_object`，所以 `new_instruction` 可以更短。
+若格式或指代校验失败，重试提示会指出具体原因，而非只给一段笼统的失败通知。
 无法在 mask 内自洽完成、格式持续失败或类型退化的候选会标为 incompatible，不会
 终止整批任务，也不会用坏 instruction 凑数。
+对 remove/replace 还加了保守的几何预筛：若 mask 内封闭的不可编辑孔洞至少有 128
+像素，且最大孔洞面积达到 mask 面积的 3%，则直接判为不兼容。此类孔洞可能包含
+放在目标上、但并不属于 mask 的物品；即使 VLM 误把它算作目标，替换/移除时也会留下
+不合理残留。该规则只会减少候选，不会扩大 mask 或改写原始标注。
+原图若是中间有贯穿黑色分隔线的左右拼版，也在规划前保守排除：这类源图中的两个
+几乎相同实例必须靠“左图/右图”指代，而当前训练指令设计针对单幅自然场景，直接
+使用“左侧”容易指错实例。
+文本校验还拦截明确的语义串位：把多个独立实例当成单一 mask 目标、add 再添加
+目标本身的副本、remove/replace 扩展到 mask 外的依附实例、replace 把人物肢体当
+完整物体、仅更换同一类物体的材料/样式、非写实或人物到玩具的替换，以及 attribute
+凭空增加原本不存在的穿戴物。模糊的案例仍需要后续图像审核，规则不宣称可替代
+人工逐条检查。
 
-默认先规划目标 case 数的 3 倍，再以整张 two-mask source 为单位筛选；只有两个 region
+默认先规划目标 case 数的 5 倍，再以整张 two-mask source 为单位筛选；只有两个 region
 都兼容才保留该 source。最终仍严格保持 GRES/VER 均衡、一图多用和四类数量均衡。
 候选不足会明确提示增大 `--candidate-cases`。
 
 规划和审核 VLM 都不接收红色 overlay。新计划记录
-`planning_visual_input=clean_crop_cutout_binary_mask_grounded_v3`。remove 不再通过文字
+`planning_visual_input=full_source_outlined_context_crop_v4`。规划 prompt 保留简短的通用
+视觉/输出规则，再只注入当前指定编辑类型的专属要求，不列举其他类型的约束。remove 不再通过文字
 扩展到 mask 外的骑手、手持物或其他依附内容；若只编辑 mask 会留下不合理依附关系，
 该 region/type 应判 incompatible。add 不提供候选物体例子，只要求直接命名适合场景的
 具体新增物；replace 必须改变身份、类别或型号，单纯颜色、材质、文字或图案变化属于
@@ -143,7 +163,7 @@ attribute。
   "mask_compatibility": "compatible",
   "mask": [{"size": [896, 1184], "counts": "..."}],
   "task_type": "add",
-  "planning_visual_input": "clean_crop_cutout_binary_mask_grounded_v3",
+  "planning_visual_input": "full_source_outlined_context_crop_v4",
   "source_subset": "gres",
   "parquet_row_index": 296,
   "mask_index": 0
@@ -227,7 +247,7 @@ CUDA_VISIBLE_DEVICES=0 $PYTHON synthesis_pipeline/generate_samtok_plan.py \
   --parquet "$PARQUET" \
   --positive-index /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/pilot_v2_all_regions/positive_rows.jsonl \
   --output-dir "$DATA_ROOT/planning" \
-  --num-cases 100 --candidate-cases 300 --seed 20260917 --batch-size 16 \
+  --num-cases 100 --candidate-cases 500 --seed 20260917 --batch-size 16 \
   --vlm qwen8b-vllm --vlm-device cuda:0 --vlm-dtype bf16 \
   --max-new-tokens 384
 ```
@@ -290,7 +310,7 @@ $PYTHON synthesis_pipeline/build_pilot_gallery.py \
 ## 6. 输出目录
 
 ```text
-pilot_100_v1/
+pilot_<name>/
   positive_rows.jsonl
   annotations.jsonl
   provenance.jsonl
@@ -301,7 +321,7 @@ pilot_100_v1/
     instruction_responses.jsonl
     instruction_summary.json
     instruction_sources/
-    instruction_target_panels/ # clean crop + separate binary mask; no colored overlay
+    instruction_target_crops/ # enlarged original-pixel crop with external B/W contour
   sources/                 # 50 shared source images
   masks/                   # 100 binary masks
   overlays/                # 100 target overlays
@@ -556,6 +576,34 @@ partial-unit 和 generic-replacement 校验后，重放这批缓存响应只剩 
 固定 pair bucket 有一项短缺；因此默认过采样从 2 倍提升到 3 倍，避免用坏指令补数。
 7 卡单条冷启动编辑回归为 109.58 秒；该速度包含每卡各自模型加载，不代表长任务
 steady-state 吞吐。
+
+### 7.8 双图轮廓输入与明确指代的规划回归（2026-09-19）
+
+规划 VLM 现在只看两张图：未标注的完整原图，以及保留原始照片像素、四周留有上下文的
+放大 crop。crop 的 mask 外侧用细黑白轮廓圈出，图像边框标明轮廓内为 mask；轮廓、
+文字均不覆盖 mask 内像素。通用 prompt 要求 `refer_object` 使用在完整原图中有效的
+最短唯一指代，完整指令保留其方位或地标，不再退化成同类物体的共享名称。四类编辑
+只注入各自的类型要求；新增内容不提供物体示例，remove/replace 须与 mask 范围相容。
+定向展示时还发现 add 会把“left of”用于新增物的位置，却遗漏目标自身所参照的
+地标；现在校验要求目标地标出现在完整指令的目标短语之后，并针对这种错误给出
+具体重试反馈，避免仅凭一个方向词误判指代清晰。
+
+对用户指出的 `ver_r9657_m1_attribute`，新输入得到的完整指令为：
+“Change the dark scaled serpent railing on the left staircase rail to a polished bronze finish.”
+左侧楼梯栏杆的方位保留在训练指令中；原先仅说 “the railing ornament” 的表述会被
+定位校验拒绝。该回归的两图输入与原始响应保存在
+`pilot_100_v2_cleanmask/regression_v9_planner_v4/`。
+
+扩大到 200 个候选 region 的规划 smoke test，用 10 个双 mask source 选出了 20 条
+指令：GRES/VER 各 5 个 source，add/remove/replace/attribute 各 5 条。规划墙钟
+234.75 秒，Qwen3-VL 推理 114.31 秒，共 365 次请求（含无效候选的重试）；这是
+**规划速度，不是出图吞吐**。计划及模型输入位于 `planner_v4_final_smoke_20/`。
+随后用该轮缓存响应重放更严格的定位/完整目标校验，仍可选出 20 条均衡计划，见
+`generated_plan_revalidated_v4.jsonl`。重放结果尚不代表最新 prompt 已重新出图。
+人工逐条读规划指令时发现列车→公交车不符合铁轨场景，因此又在 replace 专属
+prompt 中增加了“新物体须能处于同一支撑环境”的约束。单条定向重试没有再提出公交车，
+但给出仅变颜色的另一辆机车；此结果被现有校验正确拒绝。说明规划仍需要保守筛选，
+不能把这 20 条当作已通过图像编辑和审核的训练样本。
 <!-- PILOT_RESULTS_END -->
 
 ## 8. 已知限制与扩量建议

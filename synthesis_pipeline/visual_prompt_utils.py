@@ -9,7 +9,7 @@ editing so that small and partial edits remain judgeable by a VLM.
 from __future__ import annotations
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 
 def padded_mask_bbox(
@@ -139,6 +139,47 @@ def instruction_target_panel(
         ],
         tile_size,
     )
+
+
+def instruction_target_crop(
+    source: Image.Image, mask: np.ndarray, tile_size: int = 768
+) -> Image.Image:
+    """Magnify a photographic context crop and mark the exact mask externally.
+
+    No source pixel inside the mask is painted or replaced.  The black/white
+    contour lies just outside the mask, and the label lives outside the photo.
+    """
+    bbox = padded_mask_bbox(mask, padding_fraction=0.4, min_padding=48)
+    crop = source.convert("RGB").crop(bbox)
+    mask_crop = Image.fromarray(
+        mask[bbox[1] : bbox[3], bbox[0] : bbox[2]].astype(np.uint8) * 255,
+        mode="L",
+    )
+    scale = min(tile_size / crop.width, tile_size / crop.height)
+    display_size = (
+        max(1, round(crop.width * scale)),
+        max(1, round(crop.height * scale)),
+    )
+    displayed = np.asarray(
+        crop.resize(display_size, Image.Resampling.LANCZOS), dtype=np.uint8
+    ).copy()
+    displayed_mask = mask_crop.resize(display_size, Image.Resampling.NEAREST)
+    inside = np.asarray(displayed_mask, dtype=np.uint8) > 0
+    near = np.asarray(displayed_mask.filter(ImageFilter.MaxFilter(5))) > 0
+    far = np.asarray(displayed_mask.filter(ImageFilter.MaxFilter(11))) > 0
+    displayed[far & ~near] = (255, 255, 255)
+    displayed[near & ~inside] = (0, 0, 0)
+
+    header_height = 42
+    canvas = Image.new("RGB", (tile_size, tile_size + header_height), "white")
+    draw = ImageDraw.Draw(canvas)
+    draw.text((10, 13), "MASK REGION: INSIDE BLACK/WHITE OUTLINE", fill="black")
+    offset = (
+        (tile_size - display_size[0]) // 2,
+        header_height + (tile_size - display_size[1]) // 2,
+    )
+    canvas.paste(Image.fromarray(displayed, mode="RGB"), offset)
+    return canvas
 
 
 def _difference_map(

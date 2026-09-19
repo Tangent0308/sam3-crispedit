@@ -4,7 +4,7 @@ This is a pilot sampler, not a production eligibility filter. It samples an
 equal number of two-mask GRES and VER rows so that every selected source can be
 reused twice and the requested edit-case count is exact. Within each subset the
 rows are stratified by minimum region area to retain both tiny/hard and larger
-targets. Qwen3-VL sees the clean source plus an annotation-safe target panel
+targets. Qwen3-VL sees the clean source plus one outlined photographic crop
 and writes one localized edit instruction for every original mask.
 """
 
@@ -21,6 +21,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
+import cv2
 import numpy as np
 import pyarrow.parquet as pq
 from PIL import Image
@@ -34,16 +35,17 @@ from synthesis_pipeline.prepare_samtok_data import (
     resize_mask,
 )
 from synthesis_pipeline.visual_prompt_utils import (
-    instruction_target_panel,
-    isolated_target_image,
+    instruction_target_crop,
 )
 import utils.vlm_utils as vlm
 
 
 TASK_TYPES = ("add", "remove", "replace", "attribute")
-PLANNING_VISUAL_INPUT_VERSION = "clean_crop_cutout_binary_mask_grounded_v3"
+PLANNING_VISUAL_INPUT_VERSION = "full_source_outlined_context_crop_v4"
+LARGE_HOLE_MIN_PIXELS = 128
+LARGE_HOLE_MIN_FRACTION = 0.03
 FORBIDDEN_OUTPUT_PATTERN = re.compile(
-    r"\b(marked|mask|overlay|annotations?|highlighted|bbox|coordinates?|target region|"
+    r"\b(mask|overlay|annotations?|highlighted|bbox|coordinates?|target region|"
     r"source crop|(?:full|clean) source image|source image|image [123]|"
     r"(?:from|in) the image)\w*\b|"
     r"\b(?:localization|mask|target|left|middle|right|top|bottom|upper|lower|first|"
@@ -52,55 +54,60 @@ FORBIDDEN_OUTPUT_PATTERN = re.compile(
 )
 TYPE_GUIDANCE = {
     "add": (
-        "Use the masked content only as the placement anchor. Directly name the exact "
-        "physical item to add and its short spatial relation to that anchor; an "
-        "unspecified generic item is invalid."
+        "Use the outlined content as the placement anchor. Name one concrete, "
+        "scene-appropriate new item that is absent from the clean source, and say "
+        "where to add it relative to the uniquely identified anchor. The added "
+        "item should be visible at full-image scale. A direction for the new item "
+        "cannot stand in for the anchor's own locator relative to the scene. "
+        "Do not add another copy of "
+        "the anchor. If no coherent addition can be anchored here, mark incompatible."
     ),
     "remove": (
-        "Remove only a complete, independently removable physical object contained by "
-        "the mask. A body fragment, surface patch, or attached section is incompatible. Never ask to "
-        "remove a rider, held item, supporting person, or other content outside it. If "
-        "removing only the masked pixels would leave an implausible dependent object, "
-        "mark this mask incompatible with remove."
+        "The outline must contain a complete, independently removable object. "
+        "If it covers only a fragment or its removal would leave a dependent "
+        "object outside the outline, including an inner outlined hole, "
+        "implausibly suspended, mark incompatible. "
+        "Otherwise ask simply to remove that uniquely identified object; do not "
+        "request removal of anything outside the outline or describe reconstruction."
     ),
     "replace": (
-        "Replace only a complete physical object with a different identity, category, "
-        "or model. A color, material, pattern, text, or styling change to the same kind "
-        "of object is an attribute edit and is invalid for replace. If the mask is a "
-        "fragment or omits a dependency, mark it incompatible."
+        "The outline must contain one complete physical object with no missing "
+        "dependent object outside it, including in an inner outlined hole. "
+        "Otherwise mark incompatible. Both instruction fields must explicitly say "
+        "Replace [uniquely identified old object] with [concrete new object]; "
+        "never stop after naming the old object. Choose a photorealistic, "
+        "scene-plausible replacement of roughly compatible apparent size that can "
+        "physically occupy the same support and setting. A change "
+        "only to its color, material, pattern, text, or styling is insufficient. "
+        "Do not request changes outside the outline."
     ),
     "attribute": (
-        "Change one conspicuous visual attribute of only the content contained by the "
-        "mask. If the requested local attribute cannot be changed coherently within "
-        "that extent, mark it incompatible. Directly specify the desired color, "
-        "material, pattern, or other value; 'different color' is invalid."
+        "Change one conspicuous visual property of the outlined content while "
+        "retaining its identity and shape. Name the exact desired property value, "
+        "not merely 'different'. The change must remain visible at full-image "
+        "scale and fit entirely within the outline; otherwise mark incompatible."
     ),
 }
 
-PROMPT = """You are designing one difficult, localized image-editing training example.
+PROMPT = """Design one localized image-editing training example.
 
-IMAGE 1 contains ONLY the original photographic pixels inside one mask, magnified on a gray checkerboard. IMAGE 2 is a three-part verification panel: LEFT is an unmodified clean context crop; MIDDLE repeats the isolated mask pixels; RIGHT is the aligned black/white binary shape. IMAGE 3 is the clean full source for context. Only IMAGE 1 and IMAGE 2 MIDDLE define the editable content. Objects visible only in the context crop or full source are outside the mask.
+IMAGE 1 is the clean, unmarked full source. IMAGE 2 is a magnified crop of its original photographic pixels with surrounding context retained. The thin black/white outline in IMAGE 2 marks the exact existing mask; only pixels INSIDE it are the selected content. Inner outlined holes are outside the mask. The label and outline are annotations, not colors or objects in the scene. Use the full source to understand other instances and spatial relations.
 Required edit type: <<<TASK_TYPE>>>
 
-Task-specific rule:
+Rules for this edit type:
 <<<TYPE_GUIDANCE>>>
 
-Requirements:
-- First inventory only what is actually visible in IMAGE 1. Do not name a rider, board, held item, supporting person, nearby object, or context object unless its own photographic pixels are visibly present in IMAGE 1. Treat connected pixels as one object when they form its parts (for example, a differently colored handle is still part of its tool).
-- Never infer color, material, texture, identity, or object name from the black/white mask. Every descriptive attribute in the output must be visibly confirmed in the clean source or clean crop.
-- The final text must NOT mention the panel, crop, mask, annotation, bbox, coordinates, image number, or target region.
-- `masked_content` must describe the full connected photographic extent in IMAGE 1 from end to end, not only its most salient tip or subpart. Set `edit_unit_status` to `complete_object` for a whole independent object, `complete_part` for a coherent local part of a larger object, or `incomplete` for a fragment/mixed extent. Remove and replace require `complete_object`; add and attribute may use `complete_part`.
-- Inspect the context for an object physically carried or supported BY the masked content but absent from IMAGE 1. Record it in `outside_dependencies`, or write `none`. A floor, table, road, shelf, or other surface that supports the target is not a dependency; neither is an independent object merely touching or near it. For remove/replace, a true outside dependency that would visibly float or become impossible makes the mask incompatible.
-- `refer_object` must name the masked content itself in at most 10 words, with only enough visible context to distinguish its instance. The instruction must clearly edit that same named subject, not a context object or one of its unmasked possessions.
-- For remove, replace, and attribute, every explicitly changed object or part must lie inside the mask. Do not expand the request to unmasked attached, held, worn, supported, or nearby content.
-- For remove or replace, a person without their vehicle, a mount without its rider, or an object without a visibly attached/held dependent part is incompatible. Set `mask_compatibility` to `incompatible` when this edit cannot be completed coherently within the exact extent. Do not repair incompatibility by changing a different object or expanding the scope.
-- When compatible, write a direct instruction of 4-22 words. State the action, exact target, and requested result. Omit reconstruction recipes, preservation clauses, explanations, and lists of things that should stay unchanged.
-- Keep `new_instruction` to 3-16 words and make it perform the same edit.
-- For replace, directly name the concrete replacement; phrases such as a different/another/similar object, model, person, or one are invalid.
-- The edit must remain visible at full-image scale. For add, invent a suitable item from this scene rather than following any example catalog.
-- Use ASCII English.
+Output requirements:
+- `masked_content`: inventory the full photographic extent inside the outline, not just its most salient tip. Do not include adjacent or attached content outside it. Derive color and identity from photographic pixels, never from the outline or label.
+- If the outlined pixels really contain multiple independent objects, mark incompatible rather than treating their group as one editable instance.
+- `edit_unit_status`: `complete_object` for a whole independent object, `complete_part` for a coherent local part, or `incomplete` for a fragment or mixed extent.
+- `outside_dependencies`: name any visible object supported or carried BY the selected content but outside the outline, or write `none`. A surface supporting the selected content is not its dependency. An object held by a DIFFERENT person is independent, not a dependency, and must not enter the target description.
+- `refer_object`: in at most 14 words, name exactly the selected content and include the shortest sufficient locator based on IMAGE 1. Prefer its full-image position; include a different, stable landmark only when needed. The phrase must uniquely identify this instance even to someone seeing only the clean full source; shared color, texture, category, or vague depth words such as "background" alone are not enough. If similar instances exist, contrast their left/right/center positions or relation to a distinctive landmark. Do not use the target itself as its own landmark, list unrelated possessions, or use a position relative only to the crop.
+- `mask_compatibility`: `compatible` only when this edit can be done coherently for this exact content and extent; otherwise `incompatible`. Give the rejection reason in `compatibility_reason`.
+- If compatible, `editing_instruction` must be a direct 4-24-word command that repeats the `refer_object` wording as closely as grammar allows, retaining its distinguishing position and landmark, and clearly states the result. `new_instruction` must express the same edit in 3-18 words; the regional editor receives `refer_object` separately. Avoid explanations, background recipes, and default-preservation clauses.
+- Instruction text must stand alone on IMAGE 1: no mask, contour, label, crop, image number, panel, bbox, or coordinates. Use ASCII English.
 
-Return exactly one JSON object and no markdown. Use exactly these keys: `masked_content`, `edit_unit_status`, `outside_dependencies`, `refer_object`, `mask_compatibility`, `compatibility_reason`, `editing_instruction`, `new_instruction`. Fill every value with your actual decision; never copy field descriptions or requirement wording.
+Return exactly one JSON object with these keys and no markdown: `masked_content`, `edit_unit_status`, `outside_dependencies`, `refer_object`, `mask_compatibility`, `compatibility_reason`, `editing_instruction`, `new_instruction`. For an incompatible case, leave both instruction fields empty.
 """
 
 
@@ -116,7 +123,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Number of region candidates to plan before mask-compatibility filtering. "
-            "Defaults to three times --num-cases; use a larger multiple of 20 if needed."
+            "Defaults to five times --num-cases; use a larger multiple of 20 if needed."
         ),
     )
     parser.add_argument("--seed", type=int, default=20260917)
@@ -148,6 +155,45 @@ def normalized_area(rle: dict[str, Any]) -> float:
         value["counts"] = value["counts"].encode("ascii")
     height, width = [int(number) for number in value["size"]]
     return float(mask_utils.area(value)) / float(height * width)
+
+
+def largest_internal_hole(mask: np.ndarray) -> tuple[int, float]:
+    """Measure enclosed uneditable islands within a target mask."""
+    binary = mask.astype(bool)
+    if not binary.any():
+        return 0, 0.0
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (~binary).astype(np.uint8), connectivity=8
+    )
+    exterior = (
+        set(labels[0, :])
+        | set(labels[-1, :])
+        | set(labels[:, 0])
+        | set(labels[:, -1])
+    )
+    largest = max(
+        (
+            int(stats[index, cv2.CC_STAT_AREA])
+            for index in range(1, len(stats))
+            if index not in exterior
+        ),
+        default=0,
+    )
+    return largest, largest / int(binary.sum())
+
+
+def has_central_panel_seam(source: Image.Image) -> bool:
+    """Conservatively identify side-by-side montages with a black divider."""
+    pixels = np.asarray(source.convert("RGB"), dtype=np.uint8)
+    dark_fraction = (pixels.max(axis=2) < 48).mean(axis=0)
+    width = pixels.shape[1]
+    center_band = dark_fraction[int(width * 0.4) : int(width * 0.6)]
+    run = 0
+    for fraction in center_band:
+        run = run + 1 if fraction >= 0.9 else 0
+        if run >= 2:
+            return True
+    return False
 
 
 def sample_rows(
@@ -198,54 +244,42 @@ def image_bytes_from_cell(value: Any) -> bytes:
 
 def build_prompt(row: dict[str, Any], task_type: str) -> str:
     return (
-        PROMPT.replace("TASK_TYPE", task_type)
-        .replace("TYPE_GUIDANCE", TYPE_GUIDANCE[task_type])
+        PROMPT.replace("<<<TASK_TYPE>>>", task_type)
+        .replace("<<<TYPE_GUIDANCE>>>", TYPE_GUIDANCE[task_type])
     )
 
 
 def instruction_messages(
     source: Image.Image,
-    target_panel: Image.Image,
+    target_crop: Image.Image,
     row: dict[str, Any],
     task_type: str,
     previous_response: str | None = None,
-    target_cutout: Image.Image | None = None,
+    validation_feedback: str | None = None,
 ) -> list[dict[str, Any]]:
     prompt = build_prompt(row, task_type)
-    if previous_response:
+    if previous_response is not None:
         prompt += (
-            "\n\nYour previous response was invalid because it leaked annotation "
-            "language, was too long, omitted required fields, or used the wrong edit "
-            "action. Re-inventory the full connected extent of IMAGE 1 pixels and make "
-            "refer_object name that same instance in at most 10 words. Ensure at least "
-            "one concrete subject noun from refer_object also appears in the full "
-            "instruction. If "
-            "the required edit cannot stay within the mask, return "
-            "mask_compatibility=incompatible instead of choosing another object or "
-            "expanding the scope. Do not mark a mask incompatible merely because the "
-            "previous wording was invalid. For replace, directly choose a concrete "
-            "new category, identity, or named model; never say only different/another "
-            "person, object, model, or one, and never use a mere color/material/text "
-            "change. Otherwise keep the full instruction to 4-22 words "
-            "and omit preservation clauses and explanations. Both instruction fields "
-            "must perform the required task type. Do not refer to any panel, crop, "
-            "mask, annotation, image number, or target region. "
-            "Previous response:\n" + previous_response[:1600]
+            "\n\nYour previous JSON failed validation. "
+            + (f"Specific issue: {validation_feedback} " if validation_feedback else "")
+            + "Do not repeat the same JSON. Reinspect IMAGE 2: inventory "
+            "only the photographic content inside its outline. Give refer_object a "
+            "short, unique locator from IMAGE 1, then retain its distinguishing "
+            "position and landmark in editing_instruction. Keep the full "
+            "instruction to 4-24 words and the "
+            "regional instruction to 3-18 words. Follow the stated edit-type rule; "
+            "do not choose a different object. If this exact edit is genuinely "
+            "infeasible, mark incompatible, but do not reject it merely because "
+            "your earlier wording was invalid. Do not mention input annotations."
         )
-    visual_content = []
-    if target_cutout is not None:
-        visual_content.append({"type": "image", "image": target_cutout})
-    visual_content.extend(
-        [
-            {"type": "image", "image": target_panel},
-            {"type": "image", "image": source},
-            {"type": "text", "text": prompt},
-        ]
-    )
     return [
         {
             "role": "user",
-            "content": visual_content,
+            "content": [
+                {"type": "image", "image": source},
+                {"type": "image", "image": target_crop},
+                {"type": "text", "text": prompt},
+            ],
         }
     ]
 
@@ -273,7 +307,7 @@ GENERIC_INSTRUCTION_PATTERN = re.compile(
     r"\binvent the addition\b|\bfixed or suggested catalog\b|"
     r"\bscene-(?:appropriate|plausible) (?:addition|object|item|detail)\b|"
     r"\bsmall,? clearly visible addition\b|"
-    r"\b(?:different|another|similar) (?:model|person|object|item|one)\b|"
+    r"\b(?:new|different|another|similar) (?:model|person|object|item|thing|one)\b|"
     r"\b(?:different|another|new) colou?r\b|"
     r"\bnew one\b|\bsame (?:object|item|one)\b",
     flags=re.IGNORECASE,
@@ -289,8 +323,35 @@ PARTIAL_EDIT_UNIT_PATTERN = re.compile(
     r"\b(?:section|portion|fragment|patch|corner)\b|"
     r"\b(?:body|door|front|quarter|rear|side) panel\b|"
     r"\b(?:window|door) frame\b|"
-    r"^(?:a |an |the )?(?:person|woman|man|boy|girl)'s "
-    r"(?:head|neck|arm|hand|leg|foot|torso)\b",
+    r"^(?:a |an |the )?\w+'s "
+    r"(?:(?:left|right|upper|lower)\s+)*"
+    r"(?:back|head|neck|arm|hand|leg|foot|tail|paw|wing|torso)\b|"
+    r"^(?:a |an |the )?(?:back|head|wing|paw|tail|torso|body)\s+of\s+"
+    r"(?:a |an |the )?\w+\b",
+    flags=re.IGNORECASE,
+)
+INDEPENDENT_OUTSIDE_PATTERN = re.compile(
+    r"\b(?:held|carried|worn|supported)\s+by\s+"
+    r"(?:(?:a|an|the)\s+)?(?:other|another|different)\s+"
+    r"(?:person|man|woman|boy|girl|individual)\b",
+    flags=re.IGNORECASE,
+)
+MULTI_INSTANCE_PATTERN = re.compile(
+    r"^(?:a |an |the )?(?:two|three|four|several|multiple|a pair of)\b",
+    flags=re.IGNORECASE,
+)
+GROUP_TARGET_PATTERN = re.compile(
+    r"\band\s+(?:(?:a|an|the)\s+)?(?:calf|cub|foal|rider|passenger|"
+    r"child|baby|man|woman|person|boy|girl|dog|horse|giraffe|zebra|"
+    r"elephant)\b",
+    flags=re.IGNORECASE,
+)
+NON_PHOTOREALISTIC_REPLACEMENT = re.compile(
+    r"\b(?:cartoon|anime|animated|illustrated|comic)\b",
+    flags=re.IGNORECASE,
+)
+HUMAN_TO_TOY_PATTERN = re.compile(
+    r"\b(?:toy|plush|figurine|doll)\b",
     flags=re.IGNORECASE,
 )
 FALSE_INCOMPATIBILITY_REASON_PATTERN = re.compile(
@@ -349,6 +410,26 @@ SUBJECT_STOPWORDS = {
     "with",
     "yellow",
 }
+LOCATOR_PATTERN = re.compile(
+    r"\b(?:left(?:most)?|right(?:most)?|center|central|middle|upper|lower|"
+    r"top|bottom|front|rear|back|foreground|background|nearest|closest|"
+    r"farther|farthest|beside|near|next to|above|below|beneath|behind|"
+    r"between|adjacent|opposite|first|last|handstand|upside[ -]down)\b",
+    flags=re.IGNORECASE,
+)
+STRONG_LOCATOR_PATTERN = re.compile(
+    r"\b(?:left(?:most)?|right(?:most)?|center|central|middle|upper|lower|"
+    r"top|bottom|front|rear|back|nearest|closest|farther|farthest|beside|near|next to|"
+    r"above|below|beneath|behind|between|adjacent|opposite|first|last|"
+    r"handstand|upside[ -]down)\b",
+    flags=re.IGNORECASE,
+)
+RELATION_ANCHOR_PATTERN = re.compile(
+    r"\b(?:left|right)\s+of\b|"
+    r"\b(?:near|beside|behind|above|below|beneath|opposite)\b|"
+    r"\b(?:next|adjacent)\s+to\b",
+    flags=re.IGNORECASE,
+)
 REPLACEMENT_GENERIC_WORDS = SUBJECT_STOPWORDS | {
     "another",
     "clean",
@@ -358,12 +439,40 @@ REPLACEMENT_GENERIC_WORDS = SUBJECT_STOPWORDS | {
     "golden",
     "identical",
     "large",
+    "leather",
     "material",
     "metal",
     "metallic",
     "modern",
+    "patterned",
+    "plastic",
+    "wood",
+    "wooden",
+    "glass",
+    "steel",
+    "brass",
+    "bronze",
+    "ceramic",
+    "stone",
+    "fabric",
+    "silver",
+    "gold",
+    "automated",
+    "automatic",
+    "foreground",
+    "background",
+    "upper",
+    "lower",
+    "center",
+    "central",
+    "middle",
+    "leftmost",
+    "rightmost",
     "new",
     "one",
+    "object",
+    "item",
+    "thing",
     "ornate",
     "same",
     "scene",
@@ -374,6 +483,7 @@ REPLACEMENT_GENERIC_WORDS = SUBJECT_STOPWORDS | {
     "tall",
     "texture",
     "textured",
+    "young",
 }
 HUMAN_IDENTITY_TERMS = {
     "adult",
@@ -400,6 +510,263 @@ def ascii_text(value: Any) -> str:
     return str(value).translate(
         str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-"})
     ).strip()
+
+
+def contains_exact_reference(instruction: str, refer_object: str) -> bool:
+    """Require the full discriminative target phrase, not a shared head noun."""
+    instruction_words = re.findall(r"[a-z0-9]+", instruction.lower())
+    reference_words = re.findall(r"[a-z0-9]+", refer_object.lower())
+    return bool(reference_words) and any(
+        instruction_words[start : start + len(reference_words)] == reference_words
+        for start in range(len(instruction_words) - len(reference_words) + 1)
+    )
+
+
+def contains_distinctive_reference(instruction: str, refer_object: str) -> bool:
+    """Allow a small grammatical omission, never a lost locator or vague noun."""
+    if contains_exact_reference(instruction, refer_object):
+        return True
+    reference_words_all = re.findall(r"[a-z0-9]+", refer_object.lower())
+    instruction_words_all = re.findall(r"[a-z0-9]+", instruction.lower())
+    # A bare direction word may describe the *new item's placement* rather than
+    # the intended source instance. Keep the anchor noun of each relation and
+    # require it to occur after the target phrase in the full instruction.
+    first_relation = RELATION_ANCHOR_PATTERN.search(refer_object)
+    target_prefix = refer_object[: first_relation.start()] if first_relation else refer_object
+    target_terms = [
+        token for token in re.findall(r"[a-z0-9]+", target_prefix.lower())
+        if token not in SUBJECT_STOPWORDS and token not in {"the", "a", "an"}
+    ]
+    target_position = next(
+        (index for index, token in enumerate(instruction_words_all)
+         if target_terms and token == target_terms[0]),
+        -1,
+    )
+    for relation in RELATION_ANCHOR_PATTERN.finditer(refer_object):
+        following = refer_object[relation.end() :]
+        phrase = re.split(
+            r"[,.;]|\b(?:with|on|in|at|by|near|beside|behind|above|below|"
+            r"beneath|between|opposite|next|adjacent|left|right|standing|"
+            r"sitting|holding|wearing)\b",
+            following,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        anchor_terms = [
+            token for token in re.findall(r"[a-z0-9]+", phrase.lower())
+            if token not in {"the", "a", "an"}
+        ]
+        if not anchor_terms or target_position < 0:
+            return False
+        if anchor_terms[-1] not in instruction_words_all[target_position + 1 :]:
+            return False
+    horizontal = list(
+        re.finditer(r"\b(?:left(?:most)?|right(?:most)?|center|central|middle)\b", refer_object, re.IGNORECASE)
+    )
+    locators = horizontal or list(STRONG_LOCATOR_PATTERN.finditer(refer_object))
+    if not any(
+        re.search(re.escape(locator.group(0)), instruction, re.IGNORECASE)
+        for locator in locators
+    ):
+        return False
+    filler = {"a", "an", "and", "at", "by", "for", "from", "in", "of", "on", "the", "to", "with"}
+    reference_terms = [word for word in reference_words_all if word not in filler]
+    instruction_terms = Counter(instruction_words_all)
+    overlap = sum((Counter(reference_terms) & instruction_terms).values())
+    return bool(reference_terms) and overlap / len(reference_terms) >= 0.5
+
+
+def validation_feedback(value: dict[str, Any] | None, task_type: str) -> str:
+    """Give the same VLM a concrete correction instead of a generic retry."""
+    if not value:
+        return "Return one complete JSON object with the requested keys."
+    for key in (
+        "masked_content", "edit_unit_status", "outside_dependencies",
+        "refer_object", "mask_compatibility",
+    ):
+        field = ascii_text(value.get(key, ""))
+        if not field:
+            return f"Fill the missing {key} field."
+        if not field.isascii():
+            return f"Rewrite {key} using ASCII English only."
+        if key in {"masked_content", "refer_object"} and FORBIDDEN_OUTPUT_PATTERN.search(field):
+            return f"Remove annotation or panel language from {key}; use only scene facts."
+    status = str(value["edit_unit_status"]).lower().strip()
+    dependencies = str(value["outside_dependencies"]).lower().strip()
+    compatibility = str(value["mask_compatibility"]).lower().strip()
+    if compatibility == "incompatible":
+        if not ascii_text(value.get("compatibility_reason", "")):
+            return "Explain why this exact mask cannot support the edit in compatibility_reason."
+        return "Ensure the incompatibility reason describes a real mask or scene limitation."
+    if MULTI_INSTANCE_PATTERN.search(str(value["masked_content"])):
+        return "The outlined content contains multiple objects; mark it incompatible rather than editing the group as one instance."
+    if task_type in {"remove", "replace"} and GROUP_TARGET_PATTERN.search(
+        " ".join(str(value.get(key, "")) for key in ("refer_object", "editing_instruction"))
+    ):
+        return "The instruction names another dependent instance outside the mask; target only the complete outlined object or mark incompatible."
+    if task_type in {"remove", "replace"} and (
+        status != "complete_object"
+        or dependencies not in {"none", "no", "nothing", "n/a", "null"}
+    ):
+        return "This edit needs a complete standalone object with no outside dependency; mark genuinely incomplete masks incompatible."
+    if task_type in {"remove", "replace"} and PARTIAL_EDIT_UNIT_PATTERN.search(str(value["masked_content"])):
+        return "The outlined content is only a body or object part; mark this edit incompatible instead of replacing a whole identity."
+    refer = remove_panel_location(ascii_text(value["refer_object"]))
+    refer_words = len(refer.split())
+    if not 2 <= refer_words <= 14:
+        return f"refer_object has {refer_words} words; shorten it to 2-14 words while keeping a unique full-image locator."
+    if not STRONG_LOCATOR_PATTERN.search(refer):
+        return "refer_object lacks a decisive full-image position or landmark; include one and carry it into the full instruction."
+    for key in ("editing_instruction", "new_instruction"):
+        field = ascii_text(value.get(key, ""))
+        if not field:
+            return f"Fill {key} with the required edit and result."
+        if not field.isascii():
+            return f"Rewrite {key} using ASCII English only."
+        if FORBIDDEN_OUTPUT_PATTERN.search(field):
+            return f"Remove annotation or panel language from {key}; use clean-source directions only."
+    full = ascii_text(value["editing_instruction"])
+    regional = ascii_text(value["new_instruction"])
+    if not 4 <= len(full.split()) <= 24:
+        return "Keep editing_instruction to 4-24 words without losing the target locator."
+    if not 3 <= len(regional.split()) <= 18:
+        return "Keep new_instruction to 3-18 words while retaining the same edit."
+    if not contains_distinctive_reference(full, refer):
+        if task_type == "add" and RELATION_ANCHOR_PATTERN.search(refer):
+            return (
+                f"In editing_instruction, repeat the anchor's refer_object phrase "
+                f"'{refer}' immediately after naming the new item; a direction "
+                "for placing the new item does not locate the anchor."
+            )
+        horizontal = re.search(
+            r"\b(?:left(?:most)?|right(?:most)?|center|central|middle)\b",
+            refer, re.IGNORECASE,
+        )
+        locator = horizontal or STRONG_LOCATOR_PATTERN.search(refer)
+        if locator and not re.search(re.escape(locator.group(0)), full, re.IGNORECASE):
+            return (
+                f"Keep refer_object concise and put its '{locator.group(0)}' "
+                "locator in the target phrase of editing_instruction; do not "
+                "expand refer_object instead."
+            )
+        return "Keep the same masked object and its distinguishing landmark in editing_instruction; do not target a nearby object."
+    if task_type == "add" and adds_same_category(full, refer):
+        return "The requested new item repeats the already-masked target category; choose a different small addition anchored to this instance."
+    if task_type == "attribute" and adds_unmasked_wearable(full, str(value["masked_content"])):
+        return "The requested wearable is absent from the masked content; change an existing visible property instead."
+    if task_type == "replace" and not re.search(r"\breplace\b.+\bwith\b", full, re.IGNORECASE):
+        return "Name a concrete new object after 'with' in both replacement instructions."
+    if task_type == "replace":
+        refer_tokens = set(re.findall(r"[a-z]+", refer.lower()))
+        replacement_text = replacement_text_from_instruction(full)
+        replacement_tokens = set(re.findall(r"[a-z]+", replacement_text))
+        if not (replacement_tokens - refer_tokens - REPLACEMENT_GENERIC_WORDS):
+            return "The instruction names only the old target; put a concrete new object after the final 'with'."
+        if same_replacement_category(refer, replacement_text):
+            return "The proposed replacement keeps the same object category and changes only styling; choose a genuinely different category or identity."
+        if NON_PHOTOREALISTIC_REPLACEMENT.search(replacement_text):
+            return "Choose a photorealistic replacement that belongs naturally in this scene."
+        if (
+            set(re.findall(r"[a-z]+", refer.lower())) & HUMAN_IDENTITY_TERMS
+            and HUMAN_TO_TOY_PATTERN.search(replacement_text)
+        ):
+            return "Replacing a full-size person with a toy is implausible here; choose a scene-plausible, similarly sized object."
+    if GENERIC_INSTRUCTION_PATTERN.search(full) or GENERIC_INSTRUCTION_PATTERN.search(regional):
+        return "Name the concrete visual result, not a generic item or unspecified change."
+    if PRESERVATION_BOILERPLATE_PATTERN.search(full):
+        return "Delete default-preservation clauses and keep only the requested edit."
+    return "Follow the task-specific action and name a concrete visible result for the same masked target."
+
+
+def _singular_token(token: str) -> str:
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+    if token.endswith("s") and not token.endswith("ss") and len(token) > 3:
+        return token[:-1]
+    return token
+
+
+def adds_same_category(instruction: str, refer_object: str) -> bool:
+    """Reject a second copy of the masked object in an add instruction."""
+    action = re.search(
+        r"\b(?:add|attach|place|put|give|tie|hang|mount|stick|install)\b",
+        instruction, re.IGNORECASE,
+    )
+    if not action:
+        return False
+    tail = instruction[action.end() :]
+    item_phrase = re.split(
+        r"\b(?:to|on|near|under|above|beside|behind|between|at|in|against|"
+        r"around|next to)\b",
+        tail,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    ignored = REPLACEMENT_GENERIC_WORDS | {
+        "a", "an", "the", "birdlike", "glowing", "hexagonal", "perched",
+        "hanging", "resting", "attached", "positioned", "patterned",
+        "striped", "spotted", "tiny", "vintage", "wooden",
+    }
+    item_terms = [
+        _singular_token(token)
+        for token in re.findall(r"[a-z]+", item_phrase.lower())
+        if token not in ignored
+    ]
+    refer_terms = {
+        _singular_token(token)
+        for token in re.findall(r"[a-z]+", refer_object.lower())
+        if token not in ignored
+    }
+    return bool(item_terms) and item_terms[-1] in refer_terms
+
+
+def adds_unmasked_wearable(instruction: str, masked_content: str) -> bool:
+    """An attribute instruction cannot introduce an absent worn object."""
+    match = re.search(r"\bwear\s+(?:a|an|the)\s+([^.,;]+)", instruction, re.IGNORECASE)
+    if not match:
+        return False
+    phrase = re.split(
+        r"\b(?:on|with|near|beside|around|under|over|while)\b",
+        match.group(1), maxsplit=1, flags=re.IGNORECASE,
+    )[0]
+    words = re.findall(r"[a-z]+", phrase.lower())
+    if not words:
+        return False
+    wearable = _singular_token(words[-1])
+    masked_words = {
+        _singular_token(token)
+        for token in re.findall(r"[a-z]+", masked_content.lower())
+    }
+    return wearable not in masked_words
+
+
+def same_replacement_category(refer_object: str, replacement_text: str) -> bool:
+    """Catch a material/style variant of the same head object category."""
+    old_segment = re.split(
+        r"\b(?:with|on|near|beside|behind|in|at|under|above|by|of)\b",
+        refer_object,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    old_terms = [
+        _singular_token(token)
+        for token in re.findall(r"[a-z]+", old_segment.lower())
+        if token not in REPLACEMENT_GENERIC_WORDS
+    ]
+    new_terms = [
+        _singular_token(token)
+        for token in re.findall(r"[a-z]+", replacement_text.lower())
+        if token not in REPLACEMENT_GENERIC_WORDS
+    ]
+    return bool(old_terms and new_terms) and old_terms[-1] == new_terms[0]
+
+
+def replacement_text_from_instruction(instruction: str) -> str:
+    lowered = instruction.lower()
+    article_markers = list(re.finditer(r"\bwith\s+(?:a|an|the)\s+", lowered))
+    if article_markers:
+        return lowered[article_markers[-1].end() :]
+    return lowered.rsplit(" with ", 1)[-1]
 
 
 def normalize_generated(
@@ -448,6 +815,8 @@ def normalize_generated(
     if compatibility not in {"compatible", "incompatible"}:
         return None
     normalized["mask_compatibility"] = compatibility
+    if INDEPENDENT_OUTSIDE_PATTERN.search(normalized["outside_dependencies"]):
+        normalized["outside_dependencies"] = "none"
     outside_dependencies = normalized["outside_dependencies"].strip().lower()
     has_outside_dependencies = outside_dependencies not in {
         "none",
@@ -466,6 +835,15 @@ def normalize_generated(
         normalized["editing_instruction"] = ""
         normalized["new_instruction"] = ""
         return normalized
+    if MULTI_INSTANCE_PATTERN.search(normalized["masked_content"]):
+        return None
+    if task_type in {"remove", "replace"} and GROUP_TARGET_PATTERN.search(
+        " ".join(
+            str(value.get(key, ""))
+            for key in ("refer_object", "editing_instruction", "new_instruction")
+        )
+    ):
+        return None
     if task_type in {"remove", "replace"} and edit_unit_status != "complete_object":
         return None
     if task_type in {"remove", "replace"} and PARTIAL_EDIT_UNIT_PATTERN.search(
@@ -474,7 +852,9 @@ def normalize_generated(
         return None
     if task_type in {"remove", "replace"} and has_outside_dependencies:
         return None
-    if not 2 <= len(normalized["refer_object"].split()) <= 10:
+    if not 2 <= len(normalized["refer_object"].split()) <= 14:
+        return None
+    if not STRONG_LOCATOR_PATTERN.search(normalized["refer_object"]):
         return None
     masked_tokens = {
         token
@@ -496,7 +876,7 @@ def normalize_generated(
         normalized[key] = text
     full_words = len(normalized["editing_instruction"].split())
     regional_words = len(normalized["new_instruction"].split())
-    if not 4 <= full_words <= 22 or not 3 <= regional_words <= 16:
+    if not 4 <= full_words <= 24 or not 3 <= regional_words <= 18:
         return None
     if any(
         GENERIC_INSTRUCTION_PATTERN.search(normalized[key])
@@ -510,6 +890,18 @@ def normalize_generated(
     )
     if not refer_tokens or not (refer_tokens & instruction_tokens):
         return None
+    if not contains_distinctive_reference(
+        normalized["editing_instruction"], normalized["refer_object"]
+    ):
+        return None
+    if task_type == "add" and adds_same_category(
+        normalized["editing_instruction"], normalized["refer_object"]
+    ):
+        return None
+    if task_type == "attribute" and adds_unmasked_wearable(
+        normalized["editing_instruction"], normalized["masked_content"]
+    ):
+        return None
     if task_type == "replace" and not re.search(
         r"\breplace\b.+\bwith\b", normalized["editing_instruction"], re.IGNORECASE
     ):
@@ -518,13 +910,7 @@ def normalize_generated(
         lowered_instruction = normalized["editing_instruction"].lower()
         if re.search(r"\breplace\b.+\bto\b", lowered_instruction):
             return None
-        article_markers = list(
-            re.finditer(r"\bwith\s+(?:a|an|the)\s+", lowered_instruction)
-        )
-        if article_markers:
-            replacement_text = lowered_instruction[article_markers[-1].end() :]
-        else:
-            replacement_text = lowered_instruction.rsplit(" with ", 1)[-1]
+        replacement_text = replacement_text_from_instruction(lowered_instruction)
         replacement_tokens = {
             token
             for token in re.findall(r"[a-z]+", replacement_text)
@@ -537,6 +923,14 @@ def normalize_generated(
             not replacement_tokens
             or "one" in re.findall(r"[a-z]+", replacement_text)
             or not novel_replacement_tokens
+        ):
+            return None
+        if same_replacement_category(normalized["refer_object"], replacement_text):
+            return None
+        if NON_PHOTOREALISTIC_REPLACEMENT.search(replacement_text):
+            return None
+        if refer_tokens & HUMAN_IDENTITY_TERMS and HUMAN_TO_TOY_PATTERN.search(
+            replacement_text
         ):
             return None
         refer_human_identity = refer_tokens & HUMAN_IDENTITY_TERMS
@@ -741,13 +1135,13 @@ def main() -> None:
     args = parse_args()
     started = time.perf_counter()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    panel_dir = args.output_dir / "instruction_target_panels"
+    crop_dir = args.output_dir / "instruction_target_crops"
     source_dir = args.output_dir / "instruction_sources"
-    panel_dir.mkdir(parents=True, exist_ok=True)
+    crop_dir.mkdir(parents=True, exist_ok=True)
     source_dir.mkdir(parents=True, exist_ok=True)
 
     positive_rows = load_jsonl(args.positive_index)
-    candidate_cases = args.candidate_cases or args.num_cases * 3
+    candidate_cases = args.candidate_cases or args.num_cases * 5
     if candidate_cases < args.num_cases:
         raise ValueError("--candidate-cases must be at least --num-cases")
     candidates = sample_rows(positive_rows, candidate_cases, args.seed)
@@ -766,24 +1160,27 @@ def main() -> None:
             original = handle.convert("RGB")
         canvas_size = qwen_canvas_size(*original.size)
         source = original.resize(canvas_size, Image.Resampling.LANCZOS)
+        source_panel_seam = has_central_panel_seam(source)
         source_name = f"source_{row['source_subset']}_r{row_index}.jpg"
         source.save(source_dir / source_name, quality=92)
         for mask_index, raw_rle in enumerate(row["masks"]):
             task_type = TASK_TYPES[(source_position * 2 + mask_index) % len(TASK_TYPES)]
             mask = resize_mask(decode_rle(raw_rle), canvas_size)
-            target_panel = instruction_target_panel(source, mask)
-            target_cutout = isolated_target_image(source, mask)
-            panel_name = f"{row['source_subset']}_r{row_index}_m{mask_index}_{task_type}.jpg"
-            target_panel.save(panel_dir / panel_name, quality=95)
+            hole_pixels, hole_fraction = largest_internal_hole(mask)
+            target_crop = instruction_target_crop(source, mask)
+            crop_name = f"{row['source_subset']}_r{row_index}_m{mask_index}_{task_type}.png"
+            target_crop.save(crop_dir / crop_name)
             tasks.append(
                 {
                     "row": row,
                     "mask_index": mask_index,
                     "task_type": task_type,
                     "source": source.copy(),
-                    "target_panel": target_panel,
-                    "target_cutout": target_cutout,
-                    "panel_name": panel_name,
+                    "target_crop": target_crop,
+                    "crop_name": crop_name,
+                    "source_panel_seam": source_panel_seam,
+                    "largest_hole_pixels": hole_pixels,
+                    "largest_hole_fraction": hole_fraction,
                 }
             )
 
@@ -797,6 +1194,53 @@ def main() -> None:
             f"Candidate task type assignment is not balanced: {candidate_type_counts}"
         )
 
+    raw_rows = []
+    pending = []
+    geometry_prefiltered_count = 0
+    source_layout_prefiltered_count = 0
+    for task in tasks:
+        rejection_reason = None
+        attempt_name = None
+        if task["source_panel_seam"]:
+            source_layout_prefiltered_count += 1
+            rejection_reason = "source is a side-by-side panel montage with a central seam"
+            attempt_name = "source_layout_prefilter"
+        elif (
+            task["task_type"] in {"remove", "replace"}
+            and task["largest_hole_pixels"] >= LARGE_HOLE_MIN_PIXELS
+            and task["largest_hole_fraction"] >= LARGE_HOLE_MIN_FRACTION
+        ):
+            geometry_prefiltered_count += 1
+            rejection_reason = (
+                "large uneditable island inside target mask: "
+                f"{task['largest_hole_fraction']:.1%} of masked area"
+            )
+            attempt_name = "mask_geometry_prefilter"
+        if rejection_reason:
+            task["generated"] = {
+                "masked_content": "not evaluated",
+                "edit_unit_status": "incomplete",
+                "outside_dependencies": "unknown",
+                "refer_object": "not evaluated",
+                "mask_compatibility": "incompatible",
+                "compatibility_reason": rejection_reason,
+                "editing_instruction": "",
+                "new_instruction": "",
+            }
+            raw_rows.append(
+                {
+                    "parquet_row_index": task["row"]["parquet_row_index"],
+                    "mask_index": task["mask_index"],
+                    "task_type": task["task_type"],
+                    "target_crop": task["crop_name"],
+                    "attempt": attempt_name,
+                    "parsed": task["generated"],
+                    "raw_response": "",
+                }
+            )
+        else:
+            pending.append(task)
+
     vlm.configure_backend(
         name=args.vlm,
         model_id=args.vlm_model_id,
@@ -807,8 +1251,7 @@ def main() -> None:
     backend = vlm.get_backend()
     backend_load_seconds = time.perf_counter() - load_started
     inference_seconds = 0.0
-    raw_rows = []
-    pending = list(tasks)
+    vlm_request_count = 0
     for attempt in range(3):
         if not pending:
             break
@@ -816,16 +1259,17 @@ def main() -> None:
         ranges = range(0, len(pending), args.batch_size)
         for start in tqdm(ranges, desc=f"instruction VLM attempt {attempt + 1}"):
             batch = pending[start : start + args.batch_size]
+            vlm_request_count += len(batch)
             inference_started = time.perf_counter()
             outputs = backend.chat_batch(
                 [
                     instruction_messages(
                         task["source"],
-                        task["target_panel"],
+                        task["target_crop"],
                         task["row"],
                         task["task_type"],
                         task.get("previous_response"),
-                        task["target_cutout"],
+                        task.get("validation_feedback"),
                     )
                     for task in batch
                 ],
@@ -833,19 +1277,26 @@ def main() -> None:
             )
             inference_seconds += time.perf_counter() - inference_started
             for task, raw in zip(batch, outputs):
-                generated = normalize_generated(parse_json_object(raw), task["task_type"])
+                raw_value = parse_json_object(raw)
+                generated = normalize_generated(raw_value, task["task_type"])
+                feedback = (
+                    validation_feedback(raw_value, task["task_type"])
+                    if generated is None else None
+                )
                 raw_record = {
                     "parquet_row_index": task["row"]["parquet_row_index"],
                     "mask_index": task["mask_index"],
                     "task_type": task["task_type"],
-                    "target_panel": task["panel_name"],
+                    "target_crop": task["crop_name"],
                     "attempt": attempt + 1,
                     "parsed": generated,
+                    "validation_feedback": feedback,
                     "raw_response": raw,
                 }
                 raw_rows.append(raw_record)
                 if generated is None:
                     task["previous_response"] = raw
+                    task["validation_feedback"] = feedback
                     retry_pending.append(task)
                 else:
                     task["generated"] = generated
@@ -861,7 +1312,7 @@ def main() -> None:
                     "parquet_row_index": task["row"]["parquet_row_index"],
                     "mask_index": task["mask_index"],
                     "task_type": task["task_type"],
-                    "target_panel": task["panel_name"],
+                    "target_crop": task["crop_name"],
                     "attempt": "deterministic_fallback",
                     "parsed": generated,
                     "raw_response": task.get("previous_response"),
@@ -966,6 +1417,8 @@ def main() -> None:
         "candidate_cases": candidate_cases,
         "compatible_candidate_cases": compatible_candidate_cases,
         "validation_failed_candidate_cases": validation_failure_count,
+        "geometry_prefiltered_candidate_cases": geometry_prefiltered_count,
+        "source_layout_prefiltered_candidate_cases": source_layout_prefiltered_count,
         "incompatible_candidate_counts_by_type": dict(
             sorted(incompatible_by_type.items())
         ),
@@ -976,7 +1429,18 @@ def main() -> None:
         "image_column_read_seconds": round(image_read_seconds, 3),
         "backend_load_seconds": round(backend_load_seconds, 3),
         "inference_seconds": round(inference_seconds, 3),
-        "inference_cases_per_minute": round(candidate_cases / inference_seconds * 60.0, 3),
+        "vlm_request_count": vlm_request_count,
+        "inference_cases_per_minute": round(
+            (
+                candidate_cases
+                - geometry_prefiltered_count
+                - source_layout_prefiltered_count
+            ) / inference_seconds * 60.0,
+            3,
+        ) if inference_seconds else 0.0,
+        "inference_requests_per_minute": round(
+            vlm_request_count / inference_seconds * 60.0, 3
+        ) if inference_seconds else 0.0,
         "wall_seconds": round(elapsed, 3),
         "plan_jsonl": str(plan_path),
     }
