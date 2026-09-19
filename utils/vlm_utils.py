@@ -265,6 +265,7 @@ class _Qwen3VllmBackend:
                     if self.enable_thinking is not None
                     else {}
                 ),
+                **getattr(self, "chat_template_overrides", {}),
             )
             requests.append(
                 {
@@ -276,8 +277,8 @@ class _Qwen3VllmBackend:
             requests,
             SamplingParams(
                 max_tokens=max_new_tokens,
-                temperature=0.0,
                 seed=0,
+                **getattr(self, "sampling_overrides", {"temperature": 0.0}),
             ),
             use_tqdm=False,
         )

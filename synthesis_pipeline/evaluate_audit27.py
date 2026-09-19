@@ -48,6 +48,8 @@ def confusion(manual: dict[str, dict], audit: dict[str, dict], field: str) -> di
         "cases": len(manual),
         **{key: counts[key] for key in ("true_pass", "true_fail", "false_accept", "false_reject", "missing_or_parse_error", "missing_manual_label")},
         "accuracy": round((counts["true_pass"] + counts["true_fail"]) / scored, 4) if scored else None,
+        "coverage": round(scored / len(manual), 4) if manual else None,
+        "accuracy_including_missing": round((counts["true_pass"] + counts["true_fail"]) / len(manual), 4) if manual else None,
         "false_accept_rate_among_bad_pairs": round(counts["false_accept"] / actual_fail, 4) if actual_fail else None,
     }
 

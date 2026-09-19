@@ -93,6 +93,7 @@ def region_write_weight(
     device,
     dtype,
     region_masks=None,
+    core_dilation: int = 0,
 ) -> torch.Tensor:
     """Build a feathered write map from exact masks or fallback region boxes.
 
@@ -122,6 +123,11 @@ def region_write_weight(
         )
         weight = torch.maximum(weight, (mask_tensor > 0.5).to(weight.dtype))
 
+    if core_dilation > 0:
+        weight = torch.nn.functional.max_pool2d(
+            weight, kernel_size=2 * core_dilation + 1,
+            stride=1, padding=core_dilation,
+        )
     if margin > 0:
         dilated = weight
         for step in range(1, margin + 1):

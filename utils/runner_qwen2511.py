@@ -230,6 +230,10 @@ def run_qwen_multi_branch(
     negative_prompt: Optional[Union[str, List[str]]] = " ",
     generator: Optional[torch.Generator] = None,
     patch_ratio: float = 0.8,
+    write_margin_cells: int = WRITE_MARGIN_CELLS,
+    mask_dilation_cells: int = 0,
+    branch_context_cells: int = BRANCH_CONTEXT_CELLS,
+    correct_branch_schedule: bool = False,
 ):
 
     device = _get_device(pipe)
@@ -282,10 +286,10 @@ def run_qwen_multi_branch(
         )
         y1_b, y2_b, x1_b, x2_b = latent_bbox
         crop_bbox = (
-            max(0, y1_b - BRANCH_CONTEXT_CELLS),
-            min(full_latent_hw[0], y2_b + BRANCH_CONTEXT_CELLS),
-            max(0, x1_b - BRANCH_CONTEXT_CELLS),
-            min(full_latent_hw[1], x2_b + BRANCH_CONTEXT_CELLS),
+            max(0, y1_b - branch_context_cells),
+            min(full_latent_hw[0], y2_b + branch_context_cells),
+            max(0, x1_b - branch_context_cells),
+            min(full_latent_hw[1], x2_b + branch_context_cells),
         )
         state_offset = (y1_b - crop_bbox[0], x1_b - crop_bbox[2])
 
@@ -386,10 +390,11 @@ def run_qwen_multi_branch(
         region_write_weight(
             full_latent_hw,
             [state["latent_bbox"] for state in crop_states],
-            WRITE_MARGIN_CELLS,
+            write_margin_cells,
             device=full_image_grid.device,
             dtype=full_image_grid.dtype,
             region_masks=region_masks,
+            core_dilation=mask_dilation_cells,
         ).clamp(max=BOX_WRITE_WEIGHT),
         max(num_steps - patch_until, 1),
     )
@@ -423,7 +428,8 @@ def run_qwen_multi_branch(
             )
 
             for state in crop_states:
-                branch_timestep = t.expand(state["latents"].shape[0]).to(
+                branch_t = state["scheduler"].timesteps[step_index] if correct_branch_schedule else t
+                branch_timestep = branch_t.expand(state["latents"].shape[0]).to(
                     state["latents"].dtype
                 )
                 noise_pred = _predict_noise(
@@ -439,7 +445,7 @@ def run_qwen_multi_branch(
 
                 if composer is None:
                     state["latents"] = state["scheduler"].step(
-                        noise_pred, t, state["latents"], return_dict=False
+                        noise_pred, branch_t, state["latents"], return_dict=False
                     )[0].to(latent_dtype)
                     continue
 
