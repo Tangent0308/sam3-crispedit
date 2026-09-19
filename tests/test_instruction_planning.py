@@ -19,7 +19,7 @@ from synthesis_pipeline.generate_samtok_plan import (
     same_replacement_category,
     validation_feedback,
 )
-from synthesis_pipeline.visual_prompt_utils import instruction_target_crop
+from synthesis_pipeline.visual_prompt_utils import audit_visual_inputs, instruction_target_crop
 
 
 class InstructionPlanningTest(unittest.TestCase):
@@ -38,6 +38,16 @@ class InstructionPlanningTest(unittest.TestCase):
             [item["image"] for item in messages[0]["content"] if item["type"] == "image"],
             [source, crop],
         )
+
+    def test_audit_tight_crop_actually_magnifies_small_target(self):
+        source = Image.new("RGB", (200, 200), (10, 50, 80))
+        edited = source.copy()
+        mask = np.zeros((200, 200), dtype=bool)
+        mask[95:105, 95:105] = True
+        local, context, full = audit_visual_inputs(source, edited, mask)
+        self.assertEqual(local.getpixel((100, 100)), (10, 50, 80))
+        self.assertEqual(context.getpixel((100, 100)), (10, 50, 80))
+        self.assertEqual(full.getpixel((320, 350)), (10, 50, 80))
 
     def test_each_prompt_only_contains_its_required_edit_type(self):
         for task_type in ("add", "remove", "replace", "attribute"):

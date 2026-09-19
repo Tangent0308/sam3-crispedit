@@ -34,10 +34,23 @@ def padded_mask_bbox(
     )
 
 
-def _letterbox(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+def _letterbox(
+    image: Image.Image,
+    size: tuple[int, int],
+    *,
+    magnify: bool = False,
+    resample: Image.Resampling = Image.Resampling.LANCZOS,
+) -> Image.Image:
     image = image.convert("RGB")
-    fitted = image.copy()
-    fitted.thumbnail(size, Image.Resampling.LANCZOS)
+    if magnify:
+        scale = min(size[0] / image.width, size[1] / image.height)
+        fitted = image.resize(
+            (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+            resample,
+        )
+    else:
+        fitted = image.copy()
+        fitted.thumbnail(size, resample)
     canvas = Image.new("RGB", size, (238, 238, 238))
     offset = ((size[0] - fitted.width) // 2, (size[1] - fitted.height) // 2)
     canvas.paste(fitted, offset)
@@ -45,7 +58,7 @@ def _letterbox(image: Image.Image, size: tuple[int, int]) -> Image.Image:
 
 
 def _panel(
-    images_and_labels: list[tuple[Image.Image, str]], tile_size: int
+    images_and_labels: list[tuple[Image.Image, str]], tile_size: int, *, magnify: bool = False
 ) -> Image.Image:
     header_height = 36
     gap = 4
@@ -55,7 +68,20 @@ def _panel(
     for index, (image, label) in enumerate(images_and_labels):
         x = index * (tile_size + gap)
         draw.text((x + 8, 11), label, fill="black")
-        canvas.paste(_letterbox(image, (tile_size, tile_size)), (x, header_height))
+        resample = (
+            Image.Resampling.NEAREST
+            if label == "BINARY TARGET MASK"
+            else Image.Resampling.LANCZOS
+        )
+        canvas.paste(
+            _letterbox(
+                image,
+                (tile_size, tile_size),
+                magnify=magnify,
+                resample=resample,
+            ),
+            (x, header_height),
+        )
     return canvas
 
 
@@ -123,6 +149,7 @@ def target_footprint_comparison(
             (edged_crop(edited), "EDITED; SAME TARGET EDGE"),
         ],
         tile_size,
+        magnify=True,
     )
 
 
@@ -229,6 +256,7 @@ def audit_visual_inputs(
             ),
         ],
         448,
+        magnify=True,
     )
     full_comparison = _panel(
         [
