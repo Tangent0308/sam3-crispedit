@@ -90,7 +90,7 @@ AUDIT_FAILURE_KEYS = (
     "preservation_or_artifact_failure",
 )
 
-AUDIT_VERSION = "edit_pair_exact_edge_v14_cached"
+AUDIT_VERSION = "edit_pair_exact_edge_magnified_v15_cached"
 
 COLOR_WORDS = {
     "black",
