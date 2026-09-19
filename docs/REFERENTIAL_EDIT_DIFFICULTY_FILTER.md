@@ -70,7 +70,8 @@ cd /opt/tiger/tanyue/sam3-crispedit-vllm-labeling-pipelines
   --vllm-max-num-seqs 4 \
   --vllm-max-model-len 8192 \
   --max-new-tokens 256 \
-  --parse-retries 1
+  --parse-retries 1 \
+  --progress-mininterval 5
 ```
 
 输出包含 `run_config.json`、`run_summary.json`、逐 shard 的 `audit/` 和轻量 `manifest/`。
@@ -122,6 +123,59 @@ cd /opt/tiger/tanyue/sam3-crispedit-vllm-labeling-pipelines
 
 图中的 target 只用于离线人工核对，从未输入筛选模型。可视化可用
 [visualize_benchmark_scene_filter.py](../scripts/visualize_benchmark_scene_filter.py) 重新生成。
+
+## 全量实验（2026-09-19）
+
+对上一轮 Qwen3.8 prefilter 的全部 215,779 条 `PASS` 运行上述命令：8 个单卡 vLLM worker、
+batch size 4，经 tmux 后台执行。启动脚本、tqdm 日志和结果分别位于：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/launch_20260919.sh
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/pipeline_20260919.log
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/
+```
+
+运行时间为 02:59:34–08:52:27 UTC（约 5 小时 53 分钟）；run ID 为
+`benchmark_scene_20260919_025934`。结果见输出目录中的 `run_summary.json`，逐样本判定见
+`manifest/`，模型理由及原始响应见 `audit/`。
+
+| 类型 | 输入 | PASS | DROP |
+| --- | ---: | ---: | ---: |
+| add | 43,243 | 1,630 | 41,613 |
+| remove | 41,889 | 4,099 | 37,790 |
+| replace | 44,784 | 726 | 44,058 |
+| color | 17,503 | 4,725 | 12,778 |
+| motion | 26,712 | 614 | 26,098 |
+| background | 20,633 | 0 | 20,633 |
+| style | 21,015 | 0 | 21,015 |
+| **合计** | **215,779** | **11,794（5.47%）** | **203,985** |
+
+985 个 shard 全部完成，实际与预期行数一致；174,131 条调用模型，其余 41,648 条
+background/style 按规则直接 `DROP`。8 个 worker 均以 exit code 0 退出，解析错误为 0。
+逐 shard 核对 `audit/` 与 `manifest/` 的 `row_idx`、判定、`scene_pass` 和上游 `PASS`，
+以及 174,131 条模型 JSON 的 `verdict` 与最终判定，均无不一致。
+
+以下图片从本次全量结果抽取，每类 6 例；左为 source、右为 target，target 仍只供人工复核。
+案例索引在 [full_run_representative_cases.json](../docs_assets/benchmark_scene_filter/full_run_representative_cases.json)。
+
+![全量 PASS 代表样本](../docs_assets/benchmark_scene_filter/full_run/final_pass_examples.jpg)
+
+![全量 DROP 代表样本](../docs_assets/benchmark_scene_filter/full_run/final_drop_examples.jpg)
+
+人工复核发现一个[边界样本](../docs_assets/benchmark_scene_filter/full_run/quality_caveat/final_pass_examples.jpg)：
+`replace_01045.parquet:60` 要求替换一碗奶黄色糖果，但 target 改了多碗。source 中确实需要从
+多个碗中定位目标，因此场景筛选判为 `PASS`；本阶段不验证 target 是否严格执行指令。
+
+可视化使用同一脚本复现，例如：
+
+```bash
+/opt/tiger/tanyue/sam3-crispedit/.venv-scaleedit-vllm/bin/python \
+  scripts/visualize_benchmark_scene_filter.py \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
+  --audit-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/audit \
+  --case-file docs_assets/benchmark_scene_filter/full_run_representative_cases.json \
+  --output-dir docs_assets/benchmark_scene_filter/full_run
+```
 
 ## 验证
 

@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {"shard": "add_00592.parquet", "row_idx": 129, "expected": "PASS", "featured": true},
+    {"shard": "color_00057.parquet", "row_idx": 196, "expected": "PASS", "featured": true},
+    {"shard": "motion change_00057.parquet", "row_idx": 142, "expected": "PASS", "featured": true},
+    {"shard": "remove_00609.parquet", "row_idx": 139, "expected": "PASS", "featured": true},
+    {"shard": "replace_01366.parquet", "row_idx": 230, "expected": "PASS", "featured": true},
+    {"shard": "replace_01132.parquet", "row_idx": 157, "expected": "PASS", "featured": true},
+    {"shard": "add_00590.parquet", "row_idx": 19, "expected": "DROP", "featured": true},
+    {"shard": "color_00082.parquet", "row_idx": 48, "expected": "DROP", "featured": true},
+    {"shard": "motion change_00056.parquet", "row_idx": 73, "expected": "DROP", "featured": true},
+    {"shard": "remove_00501.parquet", "row_idx": 131, "expected": "DROP", "featured": true},
+    {"shard": "background change_00052.parquet", "row_idx": 19, "expected": "DROP", "featured": true},
+    {"shard": "style_00080.parquet", "row_idx": 58, "expected": "DROP", "featured": true}
+  ]
+}
