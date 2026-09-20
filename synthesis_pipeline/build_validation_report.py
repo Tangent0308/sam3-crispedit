@@ -3,10 +3,14 @@
 import argparse
 import html
 import json
-import os
 from pathlib import Path
 
 from synthesis_pipeline.evaluate_audit27 import confusion, read_jsonl
+from synthesis_pipeline.merge_verified_edits import (
+    comparison_sheet,
+    jpeg_bytes,
+    preview_data_uri,
+)
 
 
 def main():
@@ -72,24 +76,25 @@ def main():
     )
     out = data / "report"
     out.mkdir(exist_ok=True)
+    (out / "cases").mkdir(exist_ok=True)
     cards = []
     verified_cards = []
     verified = []
     escape = lambda x: html.escape(str(x))
     for image, row in rows.items():
-        stem = Path(image).stem
-        images = [
-            data / "audit/inputs_overview" / f"{stem}_{suffix}.png"
-            for suffix in ["source", "edited"]
-        ]
-        if not all(p.exists() for p in images):
-            images = [
-                data / "audit/inputs_crop" / f"{stem}_{suffix}.png"
-                for suffix in ["source", "edited"]
-            ]
-        pictures = "".join(
-            f'<a href="{os.path.relpath(p, out)}"><img src="{os.path.relpath(p, out)}" loading="lazy"></a>'
-            for p in images
+        case_name = Path(image).stem + ".jpg"
+        sheet = comparison_sheet(
+            data / "sources" / row["source_image"],
+            data / "edited" / image,
+            row["mask"],
+        )
+        (out / "cases" / case_name).write_bytes(jpeg_bytes(sheet))
+        embedded = preview_data_uri(sheet)
+        pictures = (
+            f'<a href="cases/{escape(case_name)}" download>'
+            f'<img src="{embedded}" loading="lazy" '
+            'alt="Full scene above and target crop below; source left, edited right">'
+            "</a>"
         )
         decisions = []
         for name, audit in audits.items():
@@ -134,7 +139,7 @@ def main():
         ):
             verified_cards.append(cards[-1])
     (out / "index.html").write_text(
-        '<meta charset="utf-8"><title>New-pair validation</title><style>body{font-family:sans-serif;margin:24px}.pair{display:flex}.pair a{width:50%}img{width:100%}pre{white-space:pre-wrap}article{border-top:3px solid #777;margin-top:36px}</style><h1>New generation: exact inputs, complete decisions and instruction review</h1>'
+        '<meta charset="utf-8"><title>New-pair validation</title><style>body{font-family:sans-serif;max-width:1250px;margin:24px auto;padding:0 16px}.pair img{width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere}article{border-top:3px solid #777;margin-top:36px}</style><h1>New generation: full scene above, target crop below, source left, edited right</h1><p>Images are embedded in this HTML. Complete model decisions, prompts and independent instruction reviews follow each image.</p>'
         + "".join(cards)
     )
     (data / "assistant_verified_annotations.jsonl").write_text(
@@ -142,7 +147,7 @@ def main():
     )
     (out / "verified.html").write_text(
         '<meta charset="utf-8"><title>Assistant-verified edit pairs</title>'
-        "<style>body{font-family:sans-serif;margin:24px}.pair{display:flex}.pair a{width:50%}img{width:100%}pre{white-space:pre-wrap}article{border-top:3px solid #777;margin-top:36px}</style>"
+        "<style>body{font-family:sans-serif;max-width:1250px;margin:24px auto;padding:0 16px}.pair img{width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere}article{border-top:3px solid #777;margin-top:36px}</style>"
         f"<h1>{len(verified)} assistant-verified pairs</h1>"
         "<p>Model-generated instructions selected after direct visual review. This is a curated release, not an automatic pipeline acceptance-rate claim.</p>"
         + "".join(verified_cards)
