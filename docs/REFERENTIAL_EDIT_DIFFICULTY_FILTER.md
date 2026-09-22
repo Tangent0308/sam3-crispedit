@@ -14,11 +14,12 @@
 ```text
 raw:       /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
 prefilter: /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/manifest
+output:    /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit
 model:     /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B
 ```
 
-上一轮 prefilter 共保留 215,779 条，其中 add/remove/replace/color/motion 174,131 条，
-background/style 41,648 条。
+合并后的 pair-quality prefilter 共保留 285,677 条；其中 244,029 条
+add/remove/replace/color/motion 调用模型，41,648 条 background/style 按规则直接 `DROP`。
 
 ## 方法
 
@@ -96,11 +97,8 @@ cd /opt/tiger/tanyue/sam3-crispedit-vllm-labeling-pipelines
 | 最终合并评测 | 86 | **86/86** | `PASS 21 / DROP 65`，0 解析错误 |
 
 最终完整评测使用 Qwen3.8-27B、8 个单卡 vLLM worker、batch size 4；84 条调用模型，2 条按类型
-直接 `DROP`，8 个 worker 均以 exit code 0 退出。结果位于：
-
-```text
-/opt/tiger/tanyue/crispedit-difficult-local-edit-binary-86-final-20260918
-```
+直接 `DROP`，8 个 worker 均以 exit code 0 退出。临时实验输出已在全量结果验收后清理；固定案例、
+统计和可视化均保留在仓库的 `docs_assets/benchmark_scene_filter/`。
 
 `color_00059.parquet:216` 曾被初标为 `DROP`，复核 source/target 后改为 `PASS`：中央骑士周围有多名
 相似穿甲人物，编辑骑士盔甲既是细粒度局部编辑，也需要用语义角色在相似实例中定位。这里修正的
@@ -124,20 +122,22 @@ cd /opt/tiger/tanyue/sam3-crispedit-vllm-labeling-pipelines
 图中的 target 只用于离线人工核对，从未输入筛选模型。可视化可用
 [visualize_benchmark_scene_filter.py](../scripts/visualize_benchmark_scene_filter.py) 重新生成。
 
-## 全量实验（2026-09-19）
+## 全量实验与合并结果
 
-对上一轮 Qwen3.8 prefilter 的全部 215,779 条 `PASS` 运行上述命令：8 个单卡 vLLM worker、
-batch size 4，经 tmux 后台执行。启动脚本、tqdm 日志和结果分别位于：
+首次运行于 2026-09-19 对 215,779 条 `PASS` 使用 8 个单卡 vLLM worker、batch size 4；
+新增 313 shard 于 2026-09-22 完成。两批结果已经合并到唯一生产目录，历史脚本、日志和原始
+summary 统一归档：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/launch_20260919.sh
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/pipeline_20260919.log
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/
+结果          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit
+audit         /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/audit
+manifest      /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/manifest
+合并汇总      /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/run_summary.json
+历史运行记录  /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/run_history
 ```
 
-运行时间为 02:59:34–08:52:27 UTC（约 5 小时 53 分钟）；run ID 为
-`benchmark_scene_20260919_025934`。结果见输出目录中的 `run_summary.json`，逐样本判定见
-`manifest/`，模型理由及原始响应见 `audit/`。
+首次运行时间为 02:59:34–08:52:27 UTC（约 5 小时 53 分钟），run ID 为
+`benchmark_scene_20260919_025934`。以下分类型结果只对应首次 985 shard：
 
 | 类型 | 输入 | PASS | DROP |
 | --- | ---: | ---: | ---: |
@@ -154,6 +154,21 @@ batch size 4，经 tmux 后台执行。启动脚本、tqdm 日志和结果分别
 background/style 按规则直接 `DROP`。8 个 worker 均以 exit code 0 退出，解析错误为 0。
 逐 shard 核对 `audit/` 与 `manifest/` 的 `row_idx`、判定、`scene_pass` 和上游 `PASS`，
 以及 174,131 条模型 JSON 的 `verdict` 与最终判定，均无不一致。
+
+新增运行的 run ID 为 `benchmark_scene_20260922_040503`，输入为第一阶段保留的 69,898 行，
+结果为 PASS 7,723、DROP 62,175，parse error 为 0，8 个 worker 均正常退出。合并后的最终口径为：
+
+| 项目 | 数量 |
+| --- | ---: |
+| source shard / 行 | 1,298 / 330,245 |
+| 第一阶段 PASS，即本阶段输入 | 285,677 |
+| 第二阶段 PASS | 19,517（6.83%） |
+| 第二阶段 DROP | 266,160（93.17%） |
+| 模型调用 | 244,029 |
+| parse error | 0 |
+
+逐 shard 验证确认第一阶段输出与 raw 的 `row_idx` 完整对齐，第二阶段 `row_idx` 恰好等于
+第一阶段 PASS 行集合；1,298 个 audit/manifest shard 均存在且没有 `.tmp` 残留。
 
 以下图片从本次全量结果抽取，每类 6 例；左为 source、右为 target，target 仍只供人工复核。
 案例索引在 [full_run_representative_cases.json](../docs_assets/benchmark_scene_filter/full_run_representative_cases.json)。

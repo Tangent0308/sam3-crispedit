@@ -1,7 +1,7 @@
 {
   "seed": 20260910,
   "sampling": "8 uniformly random non-empty qc=OK masks per raw edit category",
-  "source_input": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-additional-100k-input",
+  "source_input": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M",
   "mask_dir": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask",
   "cases": [
     {"shard": "add_00443.parquet", "row_idx": 173, "category": "add"},
