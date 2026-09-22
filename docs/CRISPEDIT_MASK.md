@@ -16,10 +16,11 @@ ScaleEdit v18 依赖的后续实现已原样隔离在 `scaleedit/sam3_backend.py
 
 | 内容 | 路径 |
 | --- | --- |
-| 原始数据 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M` |
-| 新增 100k 输入视图 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-additional-100k-input` |
+| 原始数据（1,298 shard / 330,245 行） | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M` |
+| 新增 100k 子集清单 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M/additional_100k_20260907_plan.json` |
 | 原 fact prefilter audit / manifest | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit` / `manifest` |
-| Qwen3.8 pair-quality prefilter | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter` |
+| Qwen3.8 pair-quality prefilter（1,298 shard） | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter` |
+| 难定位局部编辑筛选（1,298 shard） | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit` |
 | Qwen3.5 grounding | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding` |
 | 最终 mask | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask` |
 | runtime previews | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-previews` |
@@ -393,17 +394,23 @@ bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine
 
 ### Qwen3.8 pair-quality 全量重跑
 
-2026-09-16 至 2026-09-18 使用上述 8 卡 vLLM 配置完成全部 985 个 shard、250,421 行。
-输出与运行记录如下：
+2026-09-16 至 2026-09-18 首先完成 985 个 shard、250,421 行；2026-09-19 对新增的
+313 个 shard、79,824 行运行相同方法。2026-09-22 已将两批数据合并为唯一生产路径：
 
 ```text
+原始数据          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
 audit / manifest  /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter
 运行脚本          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/run_full_prefilter.sh
-运行日志          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/full_prefilter.log
 运行汇总          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/run_summary.json
-深度校验          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/validation_summary.json
-run id            pair_prefilter_20260916_041550
+历史记录          /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/run_history
 ```
+
+合并后共 1,298 个同名 source/audit/manifest shard、330,245 行：PASS 285,677
+（86.50%），FAIL 44,567，UNSURE 1，非 PASS 合计 44,568（13.50%），parse error 为 0。
+逐 shard 检查确认原始行数、`row_idx` 和 audit/manifest verdict 全部对齐。根目录
+`run_summary.json` 是合并统计；两次原始 run ID、配置、汇总和日志保存在 `run_history/`。
+
+以下统计只对应首次 985-shard 运行，用于保留实验对照：
 
 全量结果为 PASS/keep 215,779（86.17%），FAIL/drop 34,642（13.83%）。没有 UNSURE、
 ERROR 或 parse error；8 个 worker 退出码均为 0。输入、audit 和 manifest 均为 985 个同名
@@ -505,7 +512,8 @@ grounding 和 SAM3 mask。新增数据只包含 `add/remove/replace/motion chang
 使用 vLLM，SAM3 使用 8 个单卡 worker。输入和最终产物路径为：
 
 ```text
-新增输入视图    /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-additional-100k-input
+统一原始数据    /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
+新增子集清单    /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M/additional_100k_20260907_plan.json
 prefilter audit /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit
 keep manifest   /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest
 grounding       /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding
@@ -640,13 +648,9 @@ bbox、source 坐标系 mask overlay 和二值 mask；具体选择记录在
 
 ### Qwen3.8 pair-quality 前置实验
 
-2026-09-16 使用 Qwen3.8-27B、vLLM 和 8 个单卡 worker 做了两组测试。所有结果均为
-0 parse error、0 worker error；实验目录分别为：
-
-```text
-/opt/tiger/tanyue/crispedit-pair-prefilter-qwen38-refined-20260916
-/opt/tiger/tanyue/crispedit-pair-prefilter-qwen38-batch4-smoke-20260916
-```
+2026-09-16 使用 Qwen3.8-27B、vLLM 和 8 个单卡 worker 做了两组测试，均为 0 parse error、
+0 worker error。临时推理目录已在全量验收后清理；固定案例、统计和可视化保留在
+`docs_assets/prefilter/`。
 
 第一组是 32 条人工分层回归：12 条旧方法疑似误杀、6 条明确 drop、7 条明确 keep 和
 7 条边界/历史 bad case。新方法没有丢失 8 条旧方法已保留的样本，并把 15 条旧 drop

@@ -39,7 +39,8 @@ ScaleEdit mask sidecar（当前最新全量运行）
 ```
 
 CrispEdit 新增的 100k 已经是 `CrispEdit-2M` 和 `CrispEdit-2M-mask` 中 394 个不重复
-shard 的子集，因此导出时不会再次拼接 `CrispEdit-2M-additional-100k-input`，避免重复样本。
+shard 的子集且已包含在统一的 `CrispEdit-2M` 中，因此导出时不会再次拼接其他输入目录，
+避免重复样本。
 
 ## 2. 严格筛选策略
 
