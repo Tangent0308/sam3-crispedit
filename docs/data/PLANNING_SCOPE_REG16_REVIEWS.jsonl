@@ -1,0 +1,6 @@
+{"image":"000_gres_r5612_m0_add.png","source_scope":"pass","reason":"正常对照：饮品杯的可见杯口可以作为新增吸管宿主，范围核对没有因为整个杯mask而禁止局部新增。未在本轮重新出此图，不记为本轮成图通过。"}
+{"image":"001_gres_r5612_m1_remove.png","source_scope":"blocked","reason":"杯内吸管上端在原mask外；早先成图出现吸管残留。本次独立范围核对指出细长延伸未全覆盖并拒绝，未继续生成。这是提前阻断不可执行任务，不是成功补全了原mask或修好了杯底成图。"}
+{"image":"002_gres_r10938_m0_replace.png","source_scope":"pass","reason":"保留中间轨道黄条纹机车换红色柴油机车的正常对照；SAM完整对象候选通过，没有因额外门控一概拒绝替换。未在本轮重新出此图，不作新的成图质量判定。"}
+{"image":"003_gres_r10938_m1_attribute.png","source_scope":"blocked","reason":"由整块列车正面改色缩小为正面的涂漆车身面板，避免把窗、灯等一起涂色；但SAM仍无法可靠提取请求表面，最终unresolved。文字有改进，尚未得到可执行修复图。"}
+{"image":"008_gres_r1214_m0_add.png","source_scope":"pass","visual_quality":"pass","instruction_match":"pass","reason":"旧方案指定left wrist而实际落在另一侧手腕；本次不再猜左右手，规划为左侧黑T恤男子胸前加银色胸针。重新生成并完成后合成，胸针确实在指定男子胸前，实例、落点与指令对应，未改旁边人物或甜甜圈。任务内容已重新规划，不声称这是同一手表任务的参数对照。"}
+{"image":"011_ver_r6200_m1_attribute.png","source_scope":"blocked","reason":"保留小路灯金属框的窄表面指令，没有为了匹配整个mask而扩成整盏灯改色；SAM仍未可靠召回金属框，阻断生成。这是召回损失，不计为成功修复。"}

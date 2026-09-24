@@ -9,8 +9,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
-from diffusers import QwenImageEditPlusPipeline
-
 from utils.runner_qwen2511 import run_qwen_multi_branch
 from utils.context_edit import edit_context_crop
 
@@ -92,6 +90,10 @@ def parse_args():
         help="Hugging Face model id.",
     )
     parser.add_argument(
+        "--model-family",choices=["auto","qwen2511","qwen21"],default="auto",
+        help="Select the official Diffusers pipeline for the model family.",
+    )
+    parser.add_argument(
         "--device",
         default="cuda",
         choices=["cuda", "cpu"],
@@ -122,7 +124,7 @@ def parse_args():
         help="Fraction of inference steps assigned to region branches.",
     )
     parser.add_argument("--edit-method", default="mirage",
-                        choices=["mirage", "mirage_relaxed", "official_full", "context_edit", "context_edit_v2", "context_adaptive"],
+                        choices=["mirage", "mirage_relaxed", "official_full", "context_edit", "context_edit_v2", "context_adaptive", "context_guarded_v2", "context_grounded_v3", "context_grounded_v4", "context_grounded_v3_qwen21", "context_grounded_v4_qwen21"],
                         help="Editing algorithm; mirage preserves historical behavior.")
     parser.add_argument(
         "--num-steps",
@@ -133,8 +135,8 @@ def parse_args():
     parser.add_argument(
         "--true-cfg-scale",
         type=float,
-        default=4.0,
-        help="True CFG scale.",
+        default=None,
+        help="True CFG scale; defaults to 1.0 for Qwen-Image-2.1 and 4.0 for 2511.",
     )
     parser.add_argument(
         "--guidance-scale",
@@ -145,8 +147,8 @@ def parse_args():
     parser.add_argument(
         "--negative-prompt",
         type=str,
-        default=" ",
-        help="Negative prompt. Keep a blank string by default.",
+        default=None,
+        help="Negative prompt; omitted for official Qwen-Image-2.1 no-CFG sampling.",
     )
     parser.add_argument(
         "--seed",
@@ -193,20 +195,10 @@ def load_qwen_pipeline(
     device: str,
     torch_dtype,
     cpu_offload: str,
+    model_family: str = "auto",
 ):
-    pipeline = QwenImageEditPlusPipeline.from_pretrained(
-        model_id, torch_dtype=torch_dtype
-    )
-
-    if cpu_offload != "none":
-        if cpu_offload == "sequential":
-            pipeline.enable_sequential_cpu_offload()
-        else:
-            pipeline.enable_model_cpu_offload()
-    else:
-        pipeline = pipeline.to(device)
-
-    return pipeline
+    from utils.qwen_pipeline_loader import load_qwen_pipeline as load
+    return load(model_id,device,torch_dtype,cpu_offload,model_family)
 
 
 def collect_crop_inputs(crop_records, case_task_type=None):
@@ -262,6 +254,9 @@ def infer_one_image(
     edit_method: str = "mirage",
 ):
     instruction_record = inst_map[img_name]
+    if isinstance(instruction_record,dict):
+        from utils.context_edit import validate_refinement_execution
+        validate_refinement_execution(instruction_record,edit_method)
     if isinstance(instruction_record, str):
         source_image_name = img_name
         full_prompt = instruction_record
@@ -299,7 +294,7 @@ def infer_one_image(
         generator=generator,
         patch_ratio=patch_ratio,
     )
-    if edit_method in {"context_edit", "context_edit_v2", "context_adaptive"}:
+    if edit_method in {"context_edit", "context_edit_v2", "context_adaptive", "context_guarded_v2", "context_grounded_v3", "context_grounded_v4", "context_grounded_v3_qwen21", "context_grounded_v4_qwen21"}:
         masks = []
         for record in crop_records:
             with Image.open(record["_mask_path"]) as handle:
@@ -308,18 +303,55 @@ def infer_one_image(
                 masks.append(np.asarray(handle.convert("L")) > 127)
         if not masks or not isinstance(instruction_record, dict):
             raise ValueError("Context editing requires a typed annotation and target mask")
+        protected = None
+        if edit_method in {'context_guarded_v2', 'context_grounded_v3', 'context_grounded_v4', 'context_grounded_v3_qwen21', 'context_grounded_v4_qwen21'}:
+            from synthesis_pipeline.audit_edit_pairs import mask_array
+            protected = np.zeros((full_image.height, full_image.width), dtype=bool)
+            for other_name, other in inst_map.items():
+                if (other_name != img_name and isinstance(other, dict) and other.get('mask')
+                    and other.get('source_image', other_name) == source_image_name):
+                    protected |= mask_array(full_image.size, other['mask'])
+        if edit_method in {'context_grounded_v3', 'context_grounded_v4', 'context_grounded_v3_qwen21', 'context_grounded_v4_qwen21'}:
+            # Crop records may predate an explicit semantic-mask refinement.
+            masks = [mask_array(full_image.size, instruction_record['mask'])]
         full_out = edit_context_crop(
             pipe, full_image, instruction_record, np.logical_or.reduce(masks),
             generator, num_inference_steps, true_cfg_scale, guidance_scale, negative_prompt,
             remove_context_window=edit_method == "context_edit_v2",
             target_guide=edit_method == "context_adaptive" and case_task_type == "attribute",
             attribute_mask_composition=edit_method == "context_adaptive" and case_task_type == "attribute",
+            guarded_composition=edit_method == 'context_guarded_v2',
+            replacement_context_window=edit_method == 'context_guarded_v2',
+            grounded_composition=edit_method in {'context_grounded_v3', 'context_grounded_v4', 'context_grounded_v3_qwen21', 'context_grounded_v4_qwen21'},
+            regional_denoising=edit_method in {'context_grounded_v4', 'context_grounded_v4_qwen21'},
+            protected_mask=protected,
+            diagnostics_dir=(Path(results_full_dir).parent / 'diagnostics' / Path(img_name).stem)
+            if edit_method in {'context_guarded_v2', 'context_grounded_v3', 'context_grounded_v4', 'context_grounded_v3_qwen21', 'context_grounded_v4_qwen21'} else None,
         )
     elif edit_method == "official_full":
-        full_out = pipe(image=full_image, prompt=full_prompt, negative_prompt=negative_prompt,
-                        true_cfg_scale=true_cfg_scale, guidance_scale=guidance_scale,
-                        num_inference_steps=num_inference_steps, generator=generator,
-                        height=full_image.height, width=full_image.width).images[0]
+        from utils.qwen_pipeline_loader import is_qwen21_pipeline
+
+        call_kwargs = dict(
+            image=full_image,
+            prompt=full_prompt,
+            true_cfg_scale=true_cfg_scale,
+            num_inference_steps=num_inference_steps,
+            generator=generator,
+            height=full_image.height,
+            width=full_image.width,
+        )
+        if is_qwen21_pipeline(pipe):
+            # QwenImage21Pipeline has no legacy `guidance_scale` argument.  Its
+            # official no-CFG recipe also avoids encoding a negative prompt.
+            call_kwargs["use_kv_cache"] = True
+            if true_cfg_scale > 1 and negative_prompt is not None:
+                call_kwargs["negative_prompt"] = negative_prompt
+        else:
+            call_kwargs.update(
+                negative_prompt=negative_prompt,
+                guidance_scale=guidance_scale,
+            )
+        full_out = pipe(**call_kwargs).images[0]
     elif edit_method == "mirage_relaxed":
         runner_kwargs.update(patch_ratio=0.5, write_margin_cells=3,
                              mask_dilation_cells=2, branch_context_cells=6,
@@ -514,7 +546,20 @@ def main():
         device=args.device,
         torch_dtype=torch_dtype,
         cpu_offload=args.cpu_offload,
+        model_family=args.model_family,
     )
+    from utils.qwen_pipeline_loader import is_qwen21_pipeline
+    qwen21=is_qwen21_pipeline(pipeline)
+    if qwen21 and args.edit_method not in {
+        'official_full','context_grounded_v3_qwen21','context_grounded_v4_qwen21'}:
+        raise ValueError(
+            'Qwen-Image-2.1 supports official_full or a qwen21 grounded variant')
+    true_cfg_scale=args.true_cfg_scale
+    if true_cfg_scale is None:
+        true_cfg_scale=1.0 if qwen21 else 4.0
+    negative_prompt=args.negative_prompt
+    if negative_prompt is None and not qwen21:
+        negative_prompt=' '
 
     generator_device = "cuda" if args.device == "cuda" else "cpu"
 
@@ -544,9 +589,9 @@ def main():
         "crop_map": crop_map,
         "results_full_dir": args.results_full_dir,
         "num_inference_steps": args.num_steps,
-        "true_cfg_scale": args.true_cfg_scale,
+        "true_cfg_scale": true_cfg_scale,
         "guidance_scale": args.guidance_scale,
-        "negative_prompt": args.negative_prompt,
+        "negative_prompt": negative_prompt,
         "generator_device": generator_device,
         "seed": args.seed,
         "patch_ratio": args.patch_ratio,

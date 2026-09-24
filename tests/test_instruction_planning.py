@@ -15,7 +15,10 @@ from synthesis_pipeline.generate_samtok_plan import (
     has_central_panel_seam,
     instruction_messages,
     largest_internal_hole,
+    mask_geometry_hint,
     normalize_generated,
+    protected_dependency_conflicts,
+    ambiguous_anatomical_side,
     same_replacement_category,
     validation_feedback,
 )
@@ -30,6 +33,78 @@ from synthesis_pipeline.visual_prompt_utils import (
     audit_visual_inputs,
     instruction_target_crop,
 )
+
+
+def test_geometry_describes_membership_not_the_complement():
+    mask = np.ones((90, 90), dtype=bool)
+    mask[:, 40:45] = False
+    hint = mask_geometry_hint(mask)
+    assert '94.4%' in hint
+    assert 'left, right, top, bottom' in hint
+    assert 'middle-left 100%' in hint
+    assert hint in build_prompt({'mask_geometry_hint': hint}, 'attribute')
+
+
+def test_edge_connected_target_contour_closes_outside_photo():
+    from synthesis_pipeline.visual_prompt_utils import instruction_target_crop
+    source = Image.new('RGB', (100, 100), (30, 70, 120))
+    crop = instruction_target_crop(source, np.ones((100, 100), dtype=bool), tile_size=128)
+    pixels = np.asarray(crop)
+    # Header occupies 42px; photograph has an 8px external margin on all sides.
+    assert np.all(pixels[50:162, 8:120] == (30, 70, 120))
+    assert np.all(pixels[48:50, 8:120] == 0)
+    assert np.all(pixels[50:162, 6:8] == 0)
+
+
+def test_retry_contains_the_actual_invalid_answer():
+    source = Image.new('RGB', (32, 32))
+    value = '{"editing_instruction":"Make the box white."}'
+    messages = instruction_messages(source, source, {}, 'attribute', value, 'Retain left-side locator')
+    assert value in messages[0]['content'][-1]['text']
+    assert 'Retain left-side locator' in messages[0]['content'][-1]['text']
+
+
+def test_same_category_with_multiple_adjectives_is_not_replacement():
+    assert same_replacement_category('curved wall with metallic strips', 'smooth white curved wall')
+    assert same_replacement_category('crane near archway', 'realistic lattice tower crane')
+    assert not same_replacement_category('red bus behind motorcycle', 'black police cruiser')
+
+
+def test_removed_owner_cannot_protect_its_explicitly_held_object():
+    value = {'masked_content': 'Woman holding white game controllers in both hands.',
+             'edit_unit_status': 'complete_object',
+             'protected_objects': ['woman in black cardigan', 'white game controllers', 'floor lamp']}
+    assert protected_dependency_conflicts(value, 'remove') == ['white game controllers']
+    assert protected_dependency_conflicts(value, 'attribute') == []
+    assert protected_dependency_conflicts(value, 'replace') == ['white game controllers']
+    assert protected_dependency_conflicts({**value, 'edit_unit_status':'complete_part'}, 'remove') == []
+
+
+def test_dependency_guard_does_not_infer_ownership_of_neighbor():
+    value = {'masked_content': 'Woman holding a cup beside a man wearing a black cardigan.',
+             'edit_unit_status': 'complete_object', 'protected_objects':['man', 'lamp']}
+    assert protected_dependency_conflicts(value, 'remove') == []
+
+
+def test_anatomical_side_policy_keeps_global_instance_locators():
+    assert ambiguous_anatomical_side({'editing_instruction':
+        'Add a watch to the left wrist of the man on the left.'})
+    assert not ambiguous_anatomical_side({'editing_instruction':
+        'Add a watch to the wrist holding the donut of the man on the left.'})
+    assert not ambiguous_anatomical_side({'editing_instruction':
+        'Change the left armrest of the central chair to gold.'})
+
+
+def test_scope_prompt_is_type_specific_and_requires_visible_evidence():
+    add = build_prompt({}, 'add')
+    attribute = build_prompt({}, 'attribute')
+    replace = build_prompt({}, 'replace')
+    assert 'attachment surface actually exists and is visible' in add
+    assert 'anatomical left/right' in add
+    assert 'smallest complete visible part actually selected' in attribute
+    assert 'use surface refinement' in attribute
+    assert 'cannot repair that external interaction' in replace
+    assert 'smallest complete visible part actually selected' not in add
 
 
 class InstructionPlanningTest(unittest.TestCase):

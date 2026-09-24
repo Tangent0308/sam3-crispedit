@@ -1,0 +1,3 @@
+{"image":"007_gres_r1316_m1_remove.png","baseline":"pass","candidate":"pass","reviewer":"Codex visual inspection","reason":"裁判及所持防护装备一起删除，旧版遗留黑色悬空碎片已消失；其他球员保留，地面基本自然。 增加可见姿态约束后结论不变，父女例仍有多余腿/鞋。"}
+{"image":"022_gres_r5692_m0_remove.png","baseline":"fail","candidate":"fail","reviewer":"Codex visual inspection","reason":"计划已改为只删父亲、保留女孩；女孩不再大片缺损，但raw和final仍有三条腿/鞋的重复结构，尚未过关。 增加可见姿态约束后结论不变，父女例仍有多余腿/鞋。"}
+{"image":"023_gres_r5692_m1_remove.png","baseline":"pass","candidate":"pass","reviewer":"Codex visual inspection","reason":"只删孩子，父亲保留，手臂与衣服补全大体合理，没有再把被抱者和抱人者视作同一目标。 增加可见姿态约束后结论不变，父女例仍有多余腿/鞋。"}

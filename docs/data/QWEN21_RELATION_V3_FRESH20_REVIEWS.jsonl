@@ -1,0 +1,20 @@
+{"image":"000_gres_r369_m0_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"背景人物、其长板和木杆删除，前景人物及其装备保留；道路和栏杆补全基本自然。 本次V3已再次逐张查看，结论不变。"}
+{"image":"001_gres_r369_m1_remove.png","result":"fail","reviewer":"Codex visual inspection","reason":"V3删去了绿轮长板，却保留了前景人物，脚下悬空；V2此例完成删除。本次退化，不能把配件消失等同于主体删除。"}
+{"image":"002_gres_r8442_m0_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"左边伸入画面的手臂和肩部删除，柱面衔接可接受，孩子和动物保留。 本次V3已再次逐张查看，结论不变。"}
+{"image":"003_gres_r8442_m1_remove.png","result":"fail","reviewer":"Codex visual inspection","reason":"人物删除，但补出的栏杆有不合理横向/斜向交叉和连接，局部结构仍不自然，fail。"}
+{"image":"004_gres_r10193_m0_remove.png","result":"fail","reviewer":"Codex visual inspection","reason":"成年鹅和前方幼鹅一起被删除，不符合独立幼鹅应保留的目标。原始mask确实覆盖幼鹅位置；这是语义与几何范围冲突，不能只责怪VLM看错轮廓。 本次V3已再次逐张查看，结论不变。"}
+{"image":"005_gres_r10193_m1_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"右侧成年鹅删除，左侧成年鹅和幼鹅保留；补全区域整体可接受。新露出的幼鹅部分存在推断，未发现明确画质错误。 本次V3已再次逐张查看，结论不变。"}
+{"image":"006_gres_r3785_m0_remove.png","result":"fail","reviewer":"Codex visual inspection","reason":"V3指令要求移除座圈和盖，结果主要是把盖子翻起，座圈与盖仍可见；未按remove执行。V2较宽的部件删除指令得到的画面可用，本次任务解释和生成均变化，不能只做像素级归因。"}
+{"image":"007_gres_r3785_m1_remove.png","result":"fail","reviewer":"Codex visual inspection","reason":"V3将主目标从整个马桶收窄为水箱，修正了部分范围错误；但仍要求保留放在水箱上的香薰，结果香薰悬空，未解决依附支撑关系，fail。"}
+{"image":"008_gres_r12019_m0_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"左长颈鹿删除，后方树干/网面补全基本可用，另一只保留。 本次V3已再次逐张查看，结论不变。"}
+{"image":"009_gres_r12019_m1_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"右长颈鹿删除，背景植被与围栏衔接可接受，左侧长颈鹿保留。 本次V3已再次逐张查看，结论不变。"}
+{"image":"010_gres_r2164_m0_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"前景黑衣人删除，原被遮挡的后方人物手臂和躯干补全大体合理，无明显目标残留。 本次V3已再次逐张查看，结论不变。"}
+{"image":"011_gres_r2164_m1_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"后方人物与其手持控制器删除，前景人物与背景壁炉保留，补全基本可用。 本次V3已再次逐张查看，结论不变。"}
+{"image":"012_gres_r11067_m0_remove.png","result":"fail","reviewer":"Codex visual inspection","reason":"下方甜甜圈删除，但保留的上方甜甜圈呈悬空状态，阴影无法代替实际支撑；删除语义完成不等于画质过关。 本次V3已再次逐张查看，结论不变。"}
+{"image":"013_gres_r11067_m1_remove.png","result":"fail","reviewer":"Codex visual inspection","reason":"上方甜甜圈删除不完整/补全不自然，留下大块折片样棕色结构与盘面形成突兀切口，fail。 本次V3已再次逐张查看，结论不变。"}
+{"image":"014_gres_r201_m0_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"左下角蹲着的人删除，地砖和墙边延续自然，后方人物保留。 本次V3已再次逐张查看，结论不变。"}
+{"image":"015_gres_r201_m1_remove.png","result":"fail","reviewer":"Codex visual inspection","reason":"目标位置生成了穿红色背心的人，而非移除人物；木棍虽消失，主体删除失败。V2删除完成，本次退化。"}
+{"image":"016_gres_r284_m0_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"前方小斑马删除，后方斑马、树木和地面保留，未见明显残留。 本次V3已再次逐张查看，结论不变。"}
+{"image":"017_gres_r284_m1_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"后方指定斑马删除，前方幼斑马和右侧另一只斑马保留；补全合理。 本次V3已再次逐张查看，结论不变。"}
+{"image":"018_gres_r1906_m0_remove.png","result":"fail","reviewer":"Codex visual inspection","reason":"仍只移除部分手臂和控制器，目标男孩的头、躯干和裤子保留，未完成删除。"}
+{"image":"019_gres_r1906_m1_remove.png","result":"pass","reviewer":"Codex visual inspection","reason":"蓝色连帽衫男孩删除，前景另一男孩及背景坐着的人保留，窗户与背景补全大体自然。 本次V3已再次逐张查看，结论不变。"}

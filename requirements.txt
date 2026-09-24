@@ -6,6 +6,7 @@ pyarrow>=20.0
 pycocotools>=2.0.7
 qwen-vl-utils>=0.0.14
 safetensors>=0.5
+scipy>=1.14
 torch>=2.7
 torchvision>=0.22
 tqdm>=4.67

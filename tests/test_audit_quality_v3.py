@@ -5,6 +5,9 @@ from synthesis_pipeline.audit_quality_v3 import (
     parse_compact,
     parse_rewrite,
     apply_target_change_gate,
+    apply_add_scope_gate,
+    rewrite_policy_error,
+    apply_flat_fill_gate,
 )
 
 
@@ -124,3 +127,45 @@ def test_target_gate_rejects_outside_only_changes_without_blocking_add_anchors()
     )
     assert apply_target_change_gate(audit, "add", metrics, 0.02)["quality"] == "pass"
     assert audit["quality"] == "pass"
+
+
+def test_add_size_policy_is_explicit_and_does_not_mutate_model_decision():
+    audit = {'visual_quality': 'pass', 'quality': 'pass', 'reason': 'A new sign appears.'}
+    metrics = {'changed_to_target_area_ratio': 20}
+    assert apply_add_scope_gate(audit, 'add', metrics, 3)['quality'] == 'fail'
+    assert apply_add_scope_gate(audit, 'add', metrics, 0)['quality'] == 'pass'
+    assert apply_add_scope_gate(audit, 'replace', metrics, 3)['quality'] == 'pass'
+    assert audit['quality'] == 'pass'
+
+
+def test_rewrite_cannot_automatically_change_operation_or_add_interaction():
+    row = {'task_type': 'remove'}
+    val = {'task_type': 'replace', 'editing_instruction': 'Replace the right woman with a man in pink.'}
+    assert rewrite_policy_error(row, val) == 'task_type_change_requires_manual_verification'
+    assert rewrite_policy_error(row, val, True) is None
+    row = {'task_type': 'replace'}
+    assert rewrite_policy_error(row, {'task_type': 'replace', 'editing_instruction':
+        'Replace the backpack wearer with a woman walking a dog.'}) == 'replacement_introduces_multiple_interacting_entities'
+    assert rewrite_policy_error(row, {'task_type': 'replace', 'editing_instruction':
+        'Replace the left doll with a plush bear.'}) is None
+
+
+def test_flat_fill_gate_is_only_for_new_texture_collapse():
+    audit = {'visual_quality': 'pass', 'quality': 'pass', 'reason': 'Red target.'}
+    metrics = {'source_dominant_color_fraction': .1, 'edited_dominant_color_fraction': .95}
+    assert apply_flat_fill_gate(audit, 'attribute', metrics, True)['quality'] == 'fail'
+    assert apply_flat_fill_gate(audit, 'replace', metrics, True)['quality'] == 'pass'
+    metrics['source_dominant_color_fraction'] = .9
+    assert apply_flat_fill_gate(audit, 'attribute', metrics, True)['quality'] == 'pass'
+
+
+def test_outline_rewrite_and_count_drift_cannot_be_training_labels():
+    assert parse_rewrite('{"task_type":"remove","instruction":"Remove the white outline around the hot dog."}') is None
+    row = {'task_type': 'replace', 'edit_unit_status': 'complete_object'}
+    val = {'task_type': 'replace', 'editing_instruction': 'Replace the two buses with a police car.'}
+    assert rewrite_policy_error(row, val) == 'rewrite_changes_single_target_count'
+def test_rewrite_cannot_add_revealed_background_person_as_second_replacement():
+    from synthesis_pipeline.audit_quality_v3 import rewrite_policy_error
+    row=dict(task_type='replace',edit_unit_status='complete_object')
+    val=dict(task_type='replace',editing_instruction='Replace the woman with a parked bicycle and a different pedestrian.')
+    assert rewrite_policy_error(row,val)=='replacement_introduces_multiple_entities'

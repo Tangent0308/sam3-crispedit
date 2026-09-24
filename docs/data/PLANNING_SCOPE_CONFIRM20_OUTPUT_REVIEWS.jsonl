@@ -1,0 +1,9 @@
+{"image":"000_gres_r564_m0_add.png","variant":"final","visual_quality":"fail","instruction_match":"pass","output_reason":"红毛线帽确实戴在指定老人头上，但帽子织纹和边缘明显比同距离人物、沙发的低照度噪声画面更锐利，像外贴素材。范围正确，照片融合仍不合格。"}
+{"image":"001_gres_r564_m1_remove.png","variant":"final","visual_quality":"fail","instruction_match":"pass","output_reason":"笔记本主体和底座删除了，没有误删旁边人物；但填补桌面形成过亮、光滑且下缘硬切的补丁，与原暗桌面不协调，邻近裤子上的线条也需警惕。不是范围错误，属于背景与边界补全问题。"}
+{"image":"007_gres_r1440_m1_attribute.png","variant":"final","visual_quality":"pass","instruction_match":"pass","output_reason":"指定的中间男子T恤变蓝，白色图案、肤色、手和邻人保持，褶皱仍在，整体可用。领口和手臂内侧有少量红色边缘/小片残留，记录为后续边界优化对象；没有把微小残边与严重结构破坏等同。"}
+{"image":"008_gres_r7600_m0_add.png","variant":"final","visual_quality":"pass","instruction_match":"pass","output_reason":"铃铛挂在左侧马头的缰具上，能看到挂环与缰具连接，未放到右马或女子身上；银色材质与场景基本融合。定位和可见支撑关系成立。"}
+{"image":"015_ver_r11132_m1_attribute.png","variant":"final","visual_quality":"fail","instruction_match":"pass","output_reason":"改的是正确的左下河水，但变成近乎均匀的高饱和青色填充，失去原水面明暗与反射层次，像涂色块，不是自然的水色变化。此问题需在编辑阶段修复。"}
+{"image":"016_ver_r9043_m0_add.png","variant":"final","visual_quality":"pass","instruction_match":"pass","output_reason":"红色野餐篮落在左前景草地，接触地面，尺度基本合理，没有放到河水或对岸；原场景本来清晰且高饱和，篮子成像与之大体一致。"}
+{"image":"017_ver_r9043_m1_remove.png","variant":"final","visual_quality":"pass","instruction_match":"pass","output_reason":"桥后指定的一组高树均已移除，后方楼体立面和窗列延续基本合理，保留桥、路灯与前景黄树，未发现显著树冠残留。"}
+{"image":"018_ver_r8332_m0_replace.png","variant":"final","visual_quality":"pass","instruction_match":"pass","output_reason":"中央白帽男子替换成蓝裙女子，后方标牌仍由其原本持有人持有；新人物体态和衣褶自然，邻近行人、道路保持，整体可用。原源图的模糊脸与新生成脸不同不属于目标外修改。"}
+{"image":"019_ver_r8332_m1_attribute.png","variant":"final","visual_quality":"pass","instruction_match":"fail","output_reason":"新黄色下装的衣褶和人体关系基本自然，但原紫色花纹下装更像围裹裙，原标签却称pants；结果生成了明显有裤腿的纯黄裤子，且原花纹消失。说明不可靠的类别词会诱发结构/材质改变，不能按纯属性改色合格导出；此例是下一步命名和属性保持的重点回归。"}

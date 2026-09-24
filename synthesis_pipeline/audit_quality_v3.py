@@ -55,6 +55,43 @@ Use the original image to identify the target unambiguously, especially among si
 Keep one short imperative sentence, preferably under 25 words and never over 35. Do not mention masks, outlines, image numbers, unchanged regions, reconstruction procedures, or speculative details. The instruction must be actionable from the original image alone. Do not shrink the target's definition to excuse remnants, describe an unsupported floating object as intentional, or silently omit a substantial collateral change. Partial removal, ghosts, wrong-instance changes and broadly damaged results must return null for both fields, not a clever caption. If a clean useful edit cannot be established from the pixels, return null for both fields.
 Return only JSON: {"task_type":"add|remove|replace|attribute or null","instruction":"concise English imperative or null"}."""
 
+CORRESPONDENCE_PROMPT = """Compare BEFORE (image 1, target outlined) with AFTER (image 2, clean), at matching coordinates. The outline is not a real color, shape or object.
+Do this in order:
+1. Find the whole target in BEFORE, then track that SAME instance in AFTER. Compare nearby same-category instances too.
+2. Establish the actual operation. Search BEFORE for anything you think is new: an already-visible person/object revealed behind a removed target is background, NOT a replacement. If the original target remains and another object appears beside it, that is addition, NOT replacement. A surface/shape rendering change to the same recognizable object is attribute, NOT replacement.
+3. Inspect the old footprint, its boundary, adjacent instances, and contact with the scene. Fail a remaining target fragment, ghost/double edge, newly smeared fill, clipped feet/support, an unsupported floating insertion, or an unrelated instance changed/deleted. Compare with BEFORE: do not call pre-existing blur, partial visibility, or perspective a new defect. Small plausible texture variations are fine. Do not require a perfect photograph.
+4. Only now compare with the requested instruction. Visual quality may pass when the request differs, but not when the target is unchanged, the wrong instance changed, or unrelated objects were damaged. The edit must be a visible local change associated with the outlined target/anchor.
+Requested type: {task_type}
+Request: {instruction}
+For this requested type: {type_check}
+Return ONLY three fields. Write reason first, with concrete BEFORE -> AFTER evidence and the decisive boundary/contact/neighbor finding, not a restatement of the request:
+{{"reason":"brief visual comparison", "visual_quality":"pass|fail", "instruction_match":"pass|fail"}}"""
+
+TYPE_CHECK = {
+    'add': 'A genuinely new item appears at the named anchor, which remains. Its contact/placement must be plausible.',
+    'remove': 'The entire named target disappears. Other previously visible objects must remain; revealed background is not a new object.',
+    'replace': 'The named old target disappears and a genuinely different identity occupies its place; retaining it beside an addition does not qualify.',
+    'attribute': 'The same named instance has the requested visible property change, without changing another instance or its basic identity.',
+}
+
+FORENSIC_PROMPT = """Decide whether this pair is usable as a LOCALIZED image-edit training example. Image 1 is BEFORE; its black/white contour is an annotation identifying the intended target/anchor. Image 2 is AFTER. No instruction is supplied: judge the actual change, not what might have been requested.
+Compare the two pictures at identical positions. First identify what genuinely changed. Track neighboring instances individually: a second removed or recolored object is a defect even if the intended target looks good. Look along the entire old silhouette for surviving fragments, double contours, pasted edges, and texture that abruptly stops. Inspect the edited object's bottom/contact point and any narrow attachments; do not assume a support exists when it is not visible. Compare apparent defects with BEFORE so source blur/occlusion is not unfairly penalized. Background already visible BEFORE can be revealed by removal, not counted as a new replacement.
+PASS requires an obvious useful change at the target, broadly natural edges, coherent physical placement and preserved unrelated instances. FAIL a barely visible/no edit, wrong instance, recognizable leftover piece, ghosted boundary, smeared reconstruction, clipped or floating object, or substantial collateral edit. Do not excuse a visible defect merely because most of the picture is unchanged. Minor plausible texture variation is acceptable. If the change cannot be established clearly, fail.
+Return exactly three fields, describing observations before the verdict:
+{"observed_change":"short factual BEFORE -> AFTER difference", "reason":"specific boundary, physical contact and neighbor evidence; decisive defect if present", "quality":"pass|fail"}."""
+
+CORRESPONDENCE_REWRITE_PROMPT = """Write a short edit instruction for this BEFORE/AFTER pair. Image 1 is the original with an annotation outline around the target/anchor. Image 2 is the clean result. Ignore the outline when identifying objects or their color.
+First track the same target across BOTH images, and search the original for any object you think is newly introduced. A background person/object already partly visible BEFORE and exposed by a removal is NOT a replacement. A retained object plus a new nearby item is ADD, not replace. The same recognizable object with a new finish, shape detail, or style is ATTRIBUTE, not replace. Do not infer materials, relationships or activities that the pixels cannot establish.
+Use remove only when the complete target disappears; replace only when a different identity actually substitutes for it; add only for a genuinely new item; attribute for a changed property of the same instance. If multiple unrelated changes occurred, the wrong instance changed, fragments remain, a new object floats unsupported, or the change is indistinct, return null for both fields. Do not rescue a bad image by changing the target definition.
+One imperative sentence, at most 25 words: operation + target uniquely locatable in the ORIGINAL full scene + visible result if applicable. Use the shortest sufficient position or stable landmark; shared category/color alone cannot identify one of several similar objects. No preservation boilerplate, reconstruction recipes, annotations, or speculative detail. You are not given the old instruction.
+Return only JSON: {"task_type":"add|remove|replace|attribute or null","instruction":"English command or null"}."""
+
+BALANCED_EVIDENCE_PROMPT = """Judge the photographic quality of a localized edit from BEFORE (image 1) and AFTER (image 2). No desired instruction is supplied. The thin black/white outline is a label drawn only on BEFORE; its absence AFTER is NOT an edit. Ignore that annotation and compare photographic content at identical coordinates.
+First establish a visible change to the outlined instance or its immediate placement area. If the object looks essentially unchanged apart from small rendering differences, fail rather than inventing an operation. Track other instances in BEFORE before deciding they were added or removed: a partly visible background object becoming exposed is not newly inserted.
+Then inspect the changed footprint and its boundary. Fail clearly visible leftover target pieces, double edges, pasted flat slivers, broken continuation of a tabletop/wall/rail, conspicuous blurred fill, or unrelated objects being damaged. A smooth boundary cannot excuse a recognizable leftover part inside the footprint. Compare with BEFORE: source blur, compression, perspective and pre-existing occlusion are not new defects.
+Pass a clearly visible useful edit that looks broadly natural at the source image's level of detail. Judge visible defects, not speculative scene rules: do not demand a visible stand, shadow, attachment or all wheels if occlusion/resolution can reasonably explain their absence. A distant vehicle is not floating simply because its wheels are higher in image coordinates. Do not reject an ordinary object solely for being unusual at its location. Conversely, a clear detached sliver or a plainly broken contact is a defect. Do not invent hidden supports to excuse an obvious one.
+Return only three fields, observations first: {"observed_change":"Actual photographic BEFORE -> AFTER change, or no clear change","reason":"Specific visible defect and its location, or why boundaries and neighboring objects look acceptable; no guesses about intention","quality":"pass|fail"}."""
+
 
 def read(path):
     return [json.loads(x) for x in Path(path).read_text().splitlines() if x.strip()]
@@ -152,7 +189,7 @@ def parse_rewrite(raw):
     # Do not ban legitimate scene objects such as a surgical mask. Reject
     # explicit annotation references rather than arbitrary word substrings.
     if re.search(
-        r"\b(masked|highlighted|selected|outlined)\b|\b(?:target mask|mask region|marked region|black/white outline|image\s*[12])\b",
+        r"\b(masked|highlighted|selected|outlined|annotation|contour)\b|\b(?:target mask|mask region|marked region|(?:black|white|black/white|black and white) outline|image\s*[12])\b",
         instruction.lower(),
     ):
         return None
@@ -176,6 +213,31 @@ def corrected_annotation(row, rewrite, quality_audit):
         "verification": "model_accepted_not_manually_verified",
     }
     return result
+
+
+def rewrite_policy_error(row, rewrite, allow_task_type_change=False):
+    """Conservative admission rules, not a claim of semantic verification.
+
+    A mistaken replacement label for revealed background must not silently
+    enter training. Cross-operation salvage remains available for explicit
+    experiments/manual review rather than automatic acceptance.
+    """
+    if not rewrite:
+        return 'null_or_invalid_response'
+    if rewrite['task_type'] != row['task_type'] and not allow_task_type_change:
+        return 'task_type_change_requires_manual_verification'
+    if row.get('edit_unit_status') in {'complete_object', 'complete_part'} and re.search(
+        r'^(?:remove|replace)\s+(?:the\s+)?(?:two|three|four|both|all|[2-9])\b',
+        rewrite['editing_instruction'], re.I,
+    ):
+        return 'rewrite_changes_single_target_count'
+    if rewrite['task_type'] == 'replace':
+        replacement = re.split(r'\bwith\b', rewrite['editing_instruction'], flags=re.I)[-1]
+        if re.search(r'\b(?:and|plus|along with|together with)\s+(?:a|an|another|a different|the)\b',replacement,re.I):
+            return 'replacement_introduces_multiple_entities'
+        if re.search(r'\b(?:walking|pushing|riding|carrying|holding)\b\s+(?:a|an|the)\b', replacement, re.I):
+            return 'replacement_introduces_multiple_interacting_entities'
+    return None
 
 
 def apply_target_change_gate(audit, task_type, metrics, threshold):
@@ -205,6 +267,35 @@ def apply_target_change_gate(audit, task_type, metrics, threshold):
     return result
 
 
+def apply_add_scope_gate(audit, task_type, metrics, maximum):
+    """Reject outsized additions under an explicit fine-grained data policy.
+
+    This measures change extent, not perceptual quality or exact object area.
+    It is opt-in because some valid add datasets intentionally use tiny anchors.
+    """
+    if audit is None or task_type != 'add' or maximum <= 0:
+        return audit
+    ratio = metrics.get('changed_to_target_area_ratio')
+    if ratio is None or ratio <= maximum:
+        return audit
+    return {**audit, 'visual_quality': 'fail', 'quality': 'fail',
+            'instruction_match': 'fail', 'scope_gate': 'oversized_addition',
+            'reason': audit.get('reason', '') +
+            f' [Fine-grained scope gate: changed area is {ratio:.2f}x anchor area; maximum {maximum:.2f}x.]'}
+
+
+def apply_flat_fill_gate(audit, task_type, metrics, enabled=False):
+    if audit is None or task_type != 'attribute' or not enabled:
+        return audit
+    old = metrics.get('source_dominant_color_fraction', 1.)
+    new = metrics.get('edited_dominant_color_fraction', 0.)
+    if old >= .35 or new < .85:
+        return audit
+    return {**audit, 'visual_quality': 'fail', 'quality': 'fail', 'instruction_match': 'fail',
+            'flat_fill_gate': 'rejected', 'reason': audit.get('reason', '') +
+            f' [Texture gate: dominant RGB bin rises from {old:.1%} to {new:.1%}; likely flat fill replacing photographic detail.]'}
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data-root", type=Path, required=True)
@@ -217,6 +308,12 @@ def main():
         help="legacy_full, compact_full, compact_crop, compact_overview, quality_full, quality_crop",
     )
     p.add_argument("--rewrite-from", type=Path)
+    p.add_argument('--rewrite-policy', choices=['legacy', 'correspondence'], default='correspondence')
+    p.add_argument('--allow-task-type-change', action='store_true',
+                   help='Experimental cross-operation rewrites; otherwise require manual verification')
+    p.add_argument('--max-add-change-ratio', type=float, default=0,
+                   help='Optional fine-grained size gate: changed pixels / anchor area; 0 disables')
+    p.add_argument('--reject-flat-attribute', action='store_true', help='Conservative photographic texture-collapse gate')
     p.add_argument(
         "--rewrite-scope", choices=["full", "crop", "overview"], default="overview"
     )
@@ -248,6 +345,8 @@ def main():
     args = p.parse_args()
     if not 0 <= args.target_change_threshold <= 1:
         p.error("--target-change-threshold must be between 0 and 1")
+    if args.max_add_change_ratio < 0:
+        p.error('--max-add-change-ratio must be nonnegative')
     if args.batch_size < 1 or args.thinking_max_tokens < 1:
         p.error("Batch size and token limit must be positive")
     rows = read(args.annotations_jsonl or args.data_root / "annotations.jsonl")
@@ -263,6 +362,13 @@ def main():
                 result["locality_metrics"],
                 args.target_change_threshold,
             )
+            metrics = result['locality_metrics']
+            if args.max_add_change_ratio and 'changed_to_target_area_ratio' not in metrics:
+                raise ValueError('Scope metrics missing from saved audit; regenerate metrics/audit before enabling the size gate')
+            if args.reject_flat_attribute and 'edited_dominant_color_fraction' not in metrics:
+                raise ValueError('Texture metrics missing from saved audit; regenerate metrics/audit before enabling the texture gate')
+            result['audit'] = apply_add_scope_gate(result['audit'], result['task_type'], metrics, args.max_add_change_ratio)
+            result['audit'] = apply_flat_fill_gate(result['audit'], result['task_type'], metrics, args.reject_flat_attribute)
         approved = {
             image
             for image, r in quality_audits.items()
@@ -276,7 +382,7 @@ def main():
         parts = variant.rsplit("_", 1)
         if (
             len(parts) != 2
-            or parts[0] not in {"legacy", "compact", "grounded", "quality", "rewrite"}
+            or parts[0] not in {"legacy", "compact", "grounded", "quality", "rewrite", "correspondence", "forensic", "balanced"}
             or parts[1] not in {"full", "crop", "overview"}
         ):
             p.error(f"Unsupported variant: {variant}")
@@ -335,6 +441,9 @@ def main():
                 "grounded",
                 "quality",
                 "rewrite",
+                "correspondence",
+                "forensic",
+                "balanced",
             } or scope not in {"full", "crop", "overview"}:
                 raise ValueError(variant)
             out = args.out_root / variant
@@ -378,6 +487,17 @@ def main():
                             instruction=row["editing_instruction"],
                             task_type=row["task_type"],
                         )
+                    if mode == 'correspondence':
+                        prompt = CORRESPONDENCE_PROMPT.format(
+                            instruction=row['editing_instruction'], task_type=row['task_type'],
+                            type_check=TYPE_CHECK[row['task_type']],
+                        )
+                    if mode == 'rewrite' and args.rewrite_policy == 'correspondence':
+                        prompt = CORRESPONDENCE_REWRITE_PROMPT
+                    if mode == 'forensic':
+                        prompt = FORENSIC_PROMPT
+                    if mode == 'balanced':
+                        prompt = BALANCED_EVIDENCE_PROMPT
                     if scope == "overview":
                         prompt = (
                             "Each input contains the FULL SCENE above and its aligned magnified target context below. They are two views of the SAME photograph. Use the FULL SCENE for unambiguous position/instance references, and the detail for appearance. Never say highlighted or selected; use visible distinguishing attributes or stable relations to neighboring objects.\n"
@@ -408,6 +528,7 @@ def main():
                     parse_text = text if not args.thinking or "</think>" in text else ""
                     if mode == "rewrite":
                         val = parse_rewrite(parse_text)
+                        policy_error = rewrite_policy_error(row, val, args.allow_task_type_change)
                         result = {
                             "image": row["image"],
                             "original_instruction": row["editing_instruction"],
@@ -416,7 +537,8 @@ def main():
                             "editing_instruction": (
                                 val["editing_instruction"] if val else None
                             ),
-                            "status": "candidate" if val else "rejected_or_parse_error",
+                            "status": "candidate" if policy_error is None else "rejected_policy_or_parse",
+                            "policy_error": policy_error,
                             "raw_response": text,
                             "prompt": j[2],
                         }
@@ -426,9 +548,9 @@ def main():
                                 parse_audit_json(parse_text), row["task_type"]
                             )
                             if mode == "legacy"
-                            else parse_compact(parse_text, mode == "quality")
+                            else parse_compact(parse_text, mode in {"quality", "forensic", "balanced"})
                         )
-                        if mode != "quality":
+                        if mode not in {"quality", "forensic", "balanced"}:
                             val = apply_low_change_veto(
                                 val, row["task_type"], j[1], 0.3
                             )
@@ -436,6 +558,8 @@ def main():
                         val = apply_target_change_gate(
                             val, row["task_type"], j[1], args.target_change_threshold
                         )
+                        val = apply_add_scope_gate(val, row['task_type'], j[1], args.max_add_change_ratio)
+                        val = apply_flat_fill_gate(val, row['task_type'], j[1], args.reject_flat_attribute)
                         result = {
                             "image": row["image"],
                             "task_type": row["task_type"],
@@ -452,6 +576,11 @@ def main():
                     result["reasoning_complete"] = (
                         "</think>" in text if args.thinking else None
                     )
+                    result['edited_path'] = str((edited_dir / row['image']).resolve())
+                    result['source_path'] = str((args.data_root / 'sources' / row['source_image']).resolve())
+                    result['input_scope'] = scope
+                    result['input_images'] = [str(args.out_root / f'inputs_{scope}' / f'{Path(row["image"]).stem}_{suffix}.png')
+                                              for suffix in ('source', 'edited')]
                     results.append(result)
                     with output.open("a") as f:
                         f.write(json.dumps(result, ensure_ascii=False) + "\n")
@@ -491,6 +620,10 @@ def main():
                     r.get("reasoning_complete") is False for r in results
                 ),
                 target_change_threshold=args.target_change_threshold,
+                max_add_change_ratio=args.max_add_change_ratio,
+                rewrite_policy=args.rewrite_policy,
+                allow_task_type_change=args.allow_task_type_change,
+                reject_flat_attribute=args.reject_flat_attribute,
                 sampling=getattr(backend, "sampling_overrides", {"temperature": 0.0}),
             )
             (out / "summary.json").write_text(json.dumps(summary, indent=2))

@@ -1,0 +1,14 @@
+{"id":16,"run":"replacement_union","visual_quality":"pass","instruction_match":"pass","reason":"红白巴士替换为黑色警车，前景摩托车和驾驶者以及右侧蓝色巴士保留。使用旧目标与新警车轮廓的并集回贴，未看到可辨认的巴士残留或明显贴边。"}
+{"id":23,"run":"generation/context_grounded_v3","visual_quality":"pass","instruction_match":"pass","reason":"右下人物的头发变为浅铂金色，发丝、明暗和头部轮廓仍成立，脸和肩部未被统一填色。有效 mask 收紧到头发；本次已经改变了原先不合理的整个人物区域属性任务，不能算原指令的等条件成功。"}
+{"id":27,"run":"generation_round2/context_grounded_v3","visual_quality":"pass","instruction_match":"pass","reason":"第二轮指定长颈鹿消失，树干、地面与旁边长颈鹿仍在，未见首轮重叠残躯。树干附近露出的远处小头在原图已有对应背景实例，不能将背景显露误判为目标残留。"}
+{"id":33,"run":"generation_round2/context_grounded_v3","visual_quality":"fail","instruction_match":"fail","reason":"球体和木棍均已移除，证明结构部件补全有效；但木棍底部原位置出现突出的粉色小片，粉色底座边缘和新背景衔接不连贯，仍不能交付为合格 remove。追加轮廓参考仍有相似缺陷，Poisson 实验也未获改善。"}
+{"id":43,"run":"generation_round2/context_grounded_v3","visual_quality":"fail","instruction_match":"fail","reason":"目标是右下第二根香肠，结果仍有原来的明显高光，matte 改变不成立，边缘还出现细小不自然色带。紧 crop、动作前置和第三轮轮廓参考都未可靠完成这个实例的属性编辑，不用改写指令掩盖无效变化。"}
+{"id":47,"run":"generation_round2/context_grounded_v3","visual_quality":"fail","instruction_match":"fail","reason":"右侧女孩消失，但其手臂后方的纸张/木桌仍被错误延展成浅色块，补全的椅背与原结构衔接不自然。第三轮轮廓参考反而保留女孩并复制白色描边，因此继续展示较好的第二轮，但仍标 fail。"}
+{"id":52,"run":"generation/context_grounded_v3","visual_quality":"pass","instruction_match":"pass","reason":"蔬菜摊左中女子穿上绿色背心和红色 T 恤，人物姿态与旁边摊位保持可辨认，衣物有正常褶皱和光照。这是人物换装 attribute，不把相同人物换衣服误标为 replace。"}
+{"id":64,"run":"replacement_union","visual_quality":"pass","instruction_match":"pass","reason":"前方戴帽背包者替换成复古自行车，车轮与路面接触合理；后方原本可见的条纹衣行人保留下来。新旧轮廓并集与邻居保护避免旧版把该行人一起删除。"}
+{"id":67,"run":"generation_round2/context_grounded_v3","visual_quality":"fail","instruction_match":"fail","reason":"目标白椅虽有变化，但原位置仍有椅背/横杆状结构，桌椅之间的关系混乱，没有得到一个清晰移除后的空位。拥挤场景中仅使用坐标文字和邻居像素保护不够可靠。"}
+{"id":70,"run":"generation/context_grounded_v3","visual_quality":"pass","instruction_match":"pass","reason":"指定小号喇叭口新增紫色蝴蝶结，与乐器有明确接触，周围演奏者与其他乐器保持原有关系；属于原本已通过的 add 回归。"}
+{"id":75,"run":"recomposed_sign","visual_quality":"pass","instruction_match":"pass","reason":"圆形 S 标牌由绿变红，白色 S、轮廓和支杆保留。首轮曾将支杆一起变红；将有效 mask 细分为圆形牌面后复用同一 raw 回贴，已修正这个多改问题，不增加扩散调用。"}
+{"id":94,"run":"replacement_union","visual_quality":"pass","instruction_match":"fail","reason":"旧版有限矩形回贴造成的枝条截断已消失，较粗分叉枝条现在连续自然；但原始 SAMTok 答案同时提及 wire 与 stick，旧 refer_object 又称 stick。本轮暂不把语义绑定未完全核定的 wire→branch 当成已确认 replace，保留待核对而非靠视觉自然就通过。"}
+{"id":97,"run":"generation/context_grounded_v3","visual_quality":"pass","instruction_match":"pass","reason":"中央人物携带的包主体变为红色，保留褶皱、光照、手与包的接触和少量原有边饰，没有明显平涂轮廓或邻近人物改动。按主体颜色明确改变且大体自然的标准通过，不苛求每个装饰像素同色。"}
+{"id":99,"run":"generation/context_grounded_v3","visual_quality":"pass","instruction_match":"pass","reason":"金色壁炉左侧拱形镜面变为磨砂玻璃效果，雕花边框未一起涂灰。有效 mask 收紧到玻璃而不是整面镜框，表面仍有光照变化；与原先连边框一起平涂的失败任务不同。"}

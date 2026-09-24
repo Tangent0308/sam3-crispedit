@@ -326,6 +326,14 @@ def locality_metrics(
     def changed_where(selection: np.ndarray) -> float:
         return float((delta[selection] >= 0.05).mean()) if selection.any() else 0.0
 
+    def dominant_color_fraction(pixels):
+        # Coarse RGB bins detect a flat painted fill, not ordinary compression noise.
+        values = np.clip(pixels[mask] * 255, 0, 255).astype(np.uint8) // 16
+        if not len(values):
+            return 0.0
+        bins = values.astype(np.int32) @ np.array([256, 16, 1])
+        return float(np.bincount(bins, minlength=4096).max() / len(values))
+
     return {
         "mask_area_fraction": round(float(mask.mean()), 8),
         "inside_mean_abs_diff": round(mean_where(mask), 8),
@@ -333,6 +341,10 @@ def locality_metrics(
         "outside_guard_mean_abs_diff": round(mean_where(outside), 8),
         "outside_guard_changed_fraction": round(changed_where(outside), 8),
         "global_mean_abs_diff": round(float(delta.mean()), 8),
+        "global_changed_fraction": round(float((delta >= .05).mean()), 8),
+        "changed_to_target_area_ratio": round(float((delta >= .05).sum() / max(1, mask.sum())), 8),
+        "source_dominant_color_fraction": round(dominant_color_fraction(source_array), 8),
+        "edited_dominant_color_fraction": round(dominant_color_fraction(edited_array), 8),
     }
 
 

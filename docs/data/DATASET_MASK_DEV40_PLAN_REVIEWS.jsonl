@@ -1,0 +1,40 @@
+{"image":"000_gres_r3863_m0_add.png","plan_status":"pass","plan_reason":"选中前景透明伞的下半伞面；在这把伞面加标记可执行。"}
+{"image":"001_gres_r3863_m1_remove.png","plan_status":"risk","plan_reason":"黑伞伞面选区正确，但伞杆与手附近的细连接是否完全包含仍有风险，需看成图残留。"}
+{"image":"002_gres_r5988_m0_replace.png","plan_status":"pass","plan_reason":"蓝衣彩裤男子唯一；手持滑板虽在外，换另一名男子仍可保持持物关系。"}
+{"image":"003_gres_r5988_m1_attribute.png","plan_status":"pass","plan_reason":"多人中纹身男子及手臂纹身均可辨认，局部改色在人物mask内。"}
+{"image":"004_gres_r8775_m0_add.png","plan_status":"fail","plan_reason":"捕手是侧背视角，护胸中央正面并未清晰可见；新增位置靠推测而非实际可见表面。"}
+{"image":"005_gres_r8775_m1_remove.png","plan_status":"fail","plan_reason":"mask选中击球手却排除球棒，删人会留下悬空球棒，MLLM漏审依附物。"}
+{"image":"006_gres_r7291_m0_replace.png","plan_status":"pass","plan_reason":"前景低头长颈鹿与后方长颈鹿区分清楚，替换选中实例可行。"}
+{"image":"007_gres_r7291_m1_attribute.png","plan_status":"risk","plan_reason":"后方长颈鹿定位正确，但solid dark brown可能同时抹掉斑纹，不是纯改色。"}
+{"image":"008_gres_r8114_m0_add.png","plan_status":"pass","plan_reason":"左侧橙汁杯与右侧马克杯区分明确，杯中吸管是合理新增；突出杯口部分依赖后处理允许的新增轮廓。"}
+{"image":"009_gres_r8114_m1_remove.png","plan_status":"pass","plan_reason":"右侧蓝色马克杯及把手的可见部分在选区中；画面截断不应被视为mask缺失。"}
+{"image":"010_gres_r9025_m0_replace.png","plan_status":"pass","plan_reason":"左侧西装人物选区正确；前景桌子是独立遮挡物，不应拒绝人物替换。"}
+{"image":"011_gres_r9025_m1_attribute.png","plan_status":"pass","plan_reason":"右侧人物领带明确，在整人mask内可按指令执行子部位改色。"}
+{"image":"012_gres_r1080_m0_add.png","plan_status":"pass","plan_reason":"两个苹果中明确指定后方苹果，贴纸位置可见。"}
+{"image":"013_gres_r1080_m1_remove.png","plan_status":"pass","plan_reason":"前景苹果范围准确，与后方苹果分开；删除需补全盘面。"}
+{"image":"014_gres_r775_m0_replace.png","plan_status":"fail","plan_reason":"选区是左侧罐车列，不包含旁边黄色机车；指令把机车并入替换对象，范围错误。"}
+{"image":"015_gres_r775_m1_attribute.png","plan_status":"risk","plan_reason":"黄色机车定位正确，但front face含车窗等非漆面，宜指定黄色漆面。"}
+{"image":"016_gres_r6611_m0_add.png","plan_status":"pass","plan_reason":"穿黑裙的玩具熊可唯一定位，服饰上新增胸针属于选区内局部编辑。"}
+{"image":"017_gres_r6611_m1_remove.png","plan_status":"pass","plan_reason":"右侧黄马甲玩具熊与左侧熊区分清楚，选区覆盖目标。"}
+{"image":"018_gres_r5003_m0_replace.png","plan_status":"fail","plan_reason":"只选中了后方成年象；前景幼象在mask外，指令却要求替换二者。"}
+{"image":"019_gres_r5003_m1_attribute.png","plan_status":"pass","plan_reason":"前景幼象明确，浅棕色皮肤属性编辑不需要重新分割。"}
+{"image":"020_ver_r8576_m0_add.png","plan_status":"fail","plan_reason":"全图有多根红白杆，只说vertical red and white striped pole不能唯一确定选中这根。"}
+{"image":"021_ver_r8576_m1_remove.png","plan_status":"fail","plan_reason":"多根同类红白杆缺少左右/邻近物指代，tower类别也过于宽泛。"}
+{"image":"022_ver_r3125_m0_replace.png","plan_status":"pass","plan_reason":"左边缘白车位置清楚，截断且被栏杆遮挡不构成拒绝理由。"}
+{"image":"023_ver_r3125_m1_attribute.png","plan_status":"fail","plan_reason":"背景有多辆浅色车，应指广告牌右侧、被细杆遮挡的那辆，现有指代不足。"}
+{"image":"024_ver_r3769_m0_add.png","plan_status":"fail","plan_reason":"多簇灌木中dense sprawling bush缺少全图位置，upper right仅指灌木内部。"}
+{"image":"025_ver_r3769_m1_remove.png","plan_status":"fail","plan_reason":"灰棕灌木在坡地不唯一，应补充画面中后方/树丛前的相对位置。"}
+{"image":"026_ver_r2063_m0_replace.png","plan_status":"fail","plan_reason":"近处和远处都有黄黑路沿，缺少foreground限定；替换红砖结构本身可行。"}
+{"image":"027_ver_r2063_m1_attribute.png","plan_status":"fail","plan_reason":"白色围栏柱多根，未指出中间白车前方这根，指代不足。"}
+{"image":"028_ver_r10954_m0_add.png","plan_status":"pass","plan_reason":"白色古董车侧板可见，加徽章属于已有大mask中的局部任务。"}
+{"image":"029_ver_r10954_m1_remove.png","plan_status":"pass","plan_reason":"背景橙黑展车被游客遮挡但可见目标选区明确，删除不必删除游客。"}
+{"image":"030_ver_r7725_m0_replace.png","plan_status":"pass","plan_reason":"左侧浅粉建筑主体选中；摩天楼是否能在原高度范围自然实现需看编辑结果。"}
+{"image":"031_ver_r7725_m1_attribute.png","plan_status":"pass","plan_reason":"左侧红色建筑墙面可识别，应保留窗户与白饰条。"}
+{"image":"032_ver_r4759_m0_add.png","plan_status":"fail","plan_reason":"多张纸板标语中未指定左侧最高那张；bottom left只描述标语内部位置。"}
+{"image":"033_ver_r4759_m1_remove.png","plan_status":"false_reject","plan_reason":"模型两次均给出可辨认人物指令，但代码误把真实face mask的mask一词视为标注术语，未进入出图。"}
+{"image":"034_ver_r4477_m0_replace.png","plan_status":"pass","plan_reason":"桥左侧桥基与右侧、上方独立分开；兼容结构替换可行，但需保留上方栏杆和行人。"}
+{"image":"035_ver_r4477_m1_attribute.png","plan_status":"fail","plan_reason":"只选中左半边提升框架，指令white metal framework of drawbridge会涵盖另一半。"}
+{"image":"036_ver_r8728_m0_add.png","plan_status":"pass","plan_reason":"邮票主体选中，在白色边框左上加小标记是局部编辑。"}
+{"image":"037_ver_r8728_m1_remove.png","plan_status":"fail","plan_reason":"实际mask是邮票外侧黑色背景而非邮票主体，内外关系被反读。"}
+{"image":"038_ver_r8760_m0_replace.png","plan_status":"fail","plan_reason":"只选中长椅中后段，最近一段在外；要求替换整条long wooden bench超出选区，low还可能破坏坐姿支撑。"}
+{"image":"039_ver_r8760_m1_attribute.png","plan_status":"pass","plan_reason":"明确指定最近一段长椅，色调变化可保留木纹和其它段落。"}
