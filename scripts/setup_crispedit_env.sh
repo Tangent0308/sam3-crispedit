@@ -1,54 +1,47 @@
 #!/usr/bin/env bash
-# Install the tested Qwen3.8/vLLM + SAM3 stack on shared storage.
+# Install the pinned Qwen3.8/vLLM + SAM3 environment inside a node-local clone.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
-
-repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-venv_dir=${VENV_DIR:-$repo_dir/.venv-crispedit}
-command -v uv >/dev/null || { echo "uv is required" >&2; exit 2; }
+repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+[[ $repo_dir != /mnt/* ]] || { echo 'Clone the repository on node-local disk (/opt or /tmp).' >&2; exit 2; }
+venv_dir=$repo_dir/.venv-crispedit
 export UV_PYTHON_INSTALL_DIR="$repo_dir/.uv-python"
-if [[ -z ${PYTHON_BIN:-} ]]; then
-  uv python install 3.12
-  PYTHON_BIN=$(uv python find --managed-python 3.12)
+export UV_CACHE_DIR=${CRISPEDIT_UV_CACHE_DIR:-/opt/tiger/tanyue/.cache/crispedit-uv}
+export UV_LINK_MODE=copy
+export UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5
+[[ $(realpath -m "$UV_CACHE_DIR") != /mnt/* ]] || { echo 'uv cache must be node-local' >&2; exit 2; }
+command -v uv >/dev/null || { echo 'Install uv first: python3 -m pip install --user uv==0.11.32' >&2; exit 2; }
+exec 9>"$repo_dir/.crispedit-env.lock"
+flock 9
+fingerprint=$(sha256sum "$repo_dir/scripts/crispedit_packages.txt" "$repo_dir/scripts/setup_crispedit_env.sh" \
+  "$repo_dir/scripts/preflight_crispedit_env.py" "$repo_dir/pyproject.toml" | sha256sum | cut -d' ' -f1)
+ready=$venv_dir/.crispedit-ready
+if [[ -f $ready && $(<"$ready") == "$fingerprint" ]]; then
+  "$venv_dir/bin/python" "$repo_dir/scripts/preflight_crispedit_env.py" --gpus "${CRISPEDIT_EXPECTED_GPUS:-8}"
+  echo "Environment already verified: $venv_dir"
+  exit 0
 fi
-shared_python=$PYTHON_BIN
-[[ "$shared_python" == "$repo_dir/.uv-python/"* ]] || { echo "Python must be inside shared repository" >&2; exit 2; }
-
-if [[ ! -e "$venv_dir" ]]; then
-  uv venv --python "$shared_python" "$venv_dir"
-elif [[ "${CRISPEDIT_ALLOW_EXISTING_VENV:-0}" != 1 ]]; then
-  echo "Refusing to reuse an existing venv: $venv_dir" >&2
+echo 'Installing node-local Python 3.12.13 and pinned dependencies'
+uv python install 3.12.13
+python_bin=$(uv python find --managed-python 3.12.13)
+[[ $(realpath "$python_bin") == "$repo_dir/.uv-python/"* ]] || { echo 'Base Python must live inside this clone' >&2; exit 2; }
+if [[ ! -e $venv_dir ]]; then
+  uv venv --python "$python_bin" "$venv_dir"
+elif [[ ! -f $venv_dir/.crispedit-installing && ! -f $ready ]]; then
+  echo "Unmanaged environment exists: $venv_dir; use a fresh local clone" >&2
   exit 2
 fi
-
-if ! "$venv_dir/bin/python" -c 'import torch; assert torch.version.cuda == "12.9"' >/dev/null 2>&1; then
-  uv pip install --python "$venv_dir/bin/python" \
-    --index-url https://download.pytorch.org/whl/cu129 \
-    'torch==2.13.0' 'torchvision==0.28.0' 'torchaudio==2.11.0' 'torchcodec==0.16.0'
-fi
-
-# Current vLLM wheel metadata requests NumPy 2 while the tested runtime uses
-# NumPy 1.26. Install the complete working environment as exact pins without
-# asking the resolver to change the already validated package combination.
+touch "$venv_dir/.crispedit-installing"
+# The cv2 distributions share files; remove all variants before installing one.
+uv pip uninstall --python "$venv_dir/bin/python" opencv-python opencv-python-headless \
+  opencv-contrib-python opencv-contrib-python-headless
 uv pip install --python "$venv_dir/bin/python" --no-deps \
-  -r "$repo_dir/scripts/crispedit_packages.txt"
-# Both OpenCV distributions are present in the tested environment. Their cv2
-# files overlap, so make the known-working 4.11 build the final installed one.
-uv pip install --python "$venv_dir/bin/python" --no-deps --reinstall \
-  'opencv-python==4.11.0.86'
+  --index-url https://download.pytorch.org/whl/cu129 \
+  'torch==2.13.0' 'torchvision==0.28.0' 'torchaudio==2.11.0' 'torchcodec==0.16.0'
+# Preserve the validated NumPy 1.26 stack; exact pins prevent transitive
+# resolution from reinstalling GUI OpenCV or upgrading NumPy.
+uv pip install --python "$venv_dir/bin/python" --no-deps -r "$repo_dir/scripts/crispedit_packages.txt"
 uv pip install --python "$venv_dir/bin/python" --no-deps -e "$repo_dir"
-
-"$venv_dir/bin/python" - <<'PY'
-import cv2
-import numpy
-import pyarrow
-import torch
-import transformers
-import vllm
-import sam3
-from sam3.model_builder import build_sam3_image_model
-from sam3.model.sam3_image_processor import Sam3Processor
-assert torch.version.cuda == "12.9"
-assert torch.cuda.device_count() == 8
-print("READY", torch.__version__, transformers.__version__, vllm.__version__, numpy.__version__, cv2.__version__)
-PY
+"$venv_dir/bin/python" "$repo_dir/scripts/preflight_crispedit_env.py" --gpus "${CRISPEDIT_EXPECTED_GPUS:-8}"
+printf '%s\n' "$fingerprint" > "$ready"
+echo "Environment ready: $venv_dir"

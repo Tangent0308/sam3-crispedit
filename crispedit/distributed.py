@@ -27,7 +27,9 @@ REPO = Path(__file__).resolve().parent.parent
 def code_digest() -> str:
     digest = hashlib.sha256()
     paths = sorted((REPO / 'crispedit').rglob('*.py')) + [
-        REPO / 'scripts/validate_crispedit_mask_pipeline.py', REPO / 'pyproject.toml']
+        REPO / 'scripts/validate_crispedit_mask_pipeline.py', REPO / 'pyproject.toml',
+        REPO / 'scripts/bootstrap_crispedit_4node.sh', REPO / 'scripts/setup_crispedit_env.sh',
+        REPO / 'scripts/preflight_crispedit_env.py', REPO / 'scripts/crispedit_packages.txt']
     for path in paths:
         digest.update(str(path.relative_to(REPO)).encode())
         digest.update(path.read_bytes())
@@ -167,7 +169,7 @@ def execute(args, command: list[str], stage: str) -> None:
             while process.poll() is None:
                 failed = list(args.control.glob('*.failed'))
                 if failed:
-                    raise RuntimeError(f'Peer failed: {failed[0]}')
+                    raise RuntimeError(f'Peer failed: {failed[0]}: {failed[0].read_text()[:1500]}')
                 time.sleep(2)
             if process.returncode:
                 raise subprocess.CalledProcessError(process.returncode, command)

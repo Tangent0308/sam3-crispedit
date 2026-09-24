@@ -2,7 +2,7 @@
 
 分支 `crispedit-labeling` 只维护 CrispEdit：Qwen3.8-27B/vLLM 两阶段筛选 → 编辑单元观察与定位 → SAM3 局部 mask。支持单机 8 卡和四机各 8 卡，保留原 shard / row_idx。仅处理 add、color、motion、remove、replace。
 
-本地仓库：`/opt/tiger/tanyue/sam3-crispedit-crispedit-labeling`。共享部署副本与运行日志路径见四机指南。
+本地仓库：`/opt/tiger/tanyue/sam3-crispedit-crispedit-labeling`。四个节点各自 git clone、安装本地环境；完整入口与共享结果日志路径见四机指南。
 
 - [当前方法、运行命令、数据与结果、可视化](docs/CRISPEDIT_MASK.md)
 - [mask 迭代记录与已知问题](docs/CRISPEDIT_MASK_ITERATION.md)

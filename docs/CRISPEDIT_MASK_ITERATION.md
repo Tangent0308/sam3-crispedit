@@ -1,5 +1,21 @@
 # CrispEdit mask 优化迭代记录
 
+## 2026-09-24：四机环境缺库修复与节点本地安装
+
+生产尝试 `labeling_4node_crispedit_full_20260924_a` 完成 1,908 shard 规划，每节点待质量/场景各 195 shard，
+在首次加载 vLLM 时四台均出现 `ImportError: libGL.so.1`。node2 最先写失败标记，随后其他节点退出；
+新增结果 0 行、0 parquet，未进入细粒度或 mask。失败日志保留在该运行的 `logs/`。
+根因是环境混装 `opencv-python` 与 headless，实际 cv2 为 QT5 构建；缓存路径预检查没有显式导入 cv2。
+此前本机自带 libGL，使单机四 rank 验证未暴露容器差异。
+
+修复：仅安装 headless OpenCV 4.11；每节点 git clone、用安装脚本创建本地基础 Python 和依赖，不再分发共享代码/环境包。
+预检查先验证 OpenCV 运算和 spawn 导入，再对每张 GPU 做 CUDA 运算、GPU0 真实双图生成；四节点 commit、代码/安装配置与版本一致后才生成数据计划。
+更新[四机完整入口](CRISPEDIT_4NODE.md)，删去环境打包/解包脚本。共享部署代码与旧基础 Python/venv 按用户要求清理；
+原始数据、正式筛选、打标结果和故障日志继续保留。
+
+验证根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/`。
+`install.log` 为从头安装，`preflight.log` 为实际 Qwen 预检查，`tests.log` 为回归；完整链路结果完成后补充。
+
 ## 2026-09-24：CrispEdit 专用整理与完整四节点接入
 
 本轮不改 mask 语义策略，保留当前编辑单元观察 → 单图 grounding → 外扩 crop → SAM3。
