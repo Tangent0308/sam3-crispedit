@@ -2431,5 +2431,9 @@ adaptive-remove-v5、40步/seed0、completion-v5/adaptive/pixel-veto均保持原
 其中`run/`保留第一次共享权重超时，`run_localweights/`为本地权重重测，
 `logs/setup_final_locks.log`为最终锁定环境的完整新建安装日志。
 本轮全套单元测试341 passed / 6 skipped；另在新建SAM环境执行融合测试5项全部通过。
+提交后从Git全新clone验证，发现旧ignore规则漏收7份已有测试，已补入版本控制。
+修复后的clone同样341 passed / 6 skipped，全部pipeline/utils源码逐文件SHA一致，
+三套环境的SAM、vLLM、官方Omni及regional扩展import/CUDA检查通过；不依赖工作树未跟踪代码。
+共享bootstrap副本已安装至指南所列路径，内容与仓库脚本逐字节相同。
 不将单机模拟结果说成真实四机网络/共享存储已联调，也不将小批次冷启动时间外推为100k吞吐。
 未启动正式全量任务；真实四机首次提交应先限制8张源图smoke，再换run ID执行全量。
