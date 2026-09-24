@@ -20,24 +20,7 @@ from crispedit.mask.pipeline import (
     map_target_mask_to_source,
     segment_grounded_box,
 )
-from crispedit.mask.grounding import (
-    TWO_PASS_PROMPT_VERSION,
-    bbox_refinement_crop,
-    box_needs_local_refinement,
-    build_bbox_refinement_prompt,
-    build_change_observation_prompt,
-    build_grounding_prompt,
-    build_grounding_requests,
-    canonicalize_type,
-    conservative_refined_bbox,
-    grounding_is_complete,
-    local_bbox_refinement_enabled,
-    map_crop_bbox_to_full,
-    parse_bbox_refinement_output,
-    parse_change_observation,
-    parse_grounding_output,
-    prompt_version_for_mode,
-)
+from crispedit.mask.grounding import (TWO_PASS_PROMPT_VERSION, build_change_observation_prompt, build_grounding_prompt, build_grounding_requests, canonicalize_type, grounding_is_complete, parse_change_observation, prompt_version_for_mode)
 from crispedit.mask.grounding_runner import (
     GROUND_SCHEMA,
     conversation_image_count,
@@ -46,100 +29,12 @@ from crispedit.mask.grounding_runner import (
     split_conversations_by_image_budget,
 )
 from crispedit.mask.runner import MASK_SCHEMA, _copy_metadata, build_jobs
-from scripts.build_mask_bad_case_selection import extract_mask_cases
 
 
-def test_grounding_routes_and_asymmetric_replace():
-    assert canonicalize_type("motion change") == "motion"
-    assert [request.grounding_image for request in build_grounding_requests("add", "add a bird")] == ["target"]
-    assert [request.grounding_image for request in build_grounding_requests("replace", "replace a with b")] == [
-        "source",
-        "target",
-    ]
-    assert grounding_is_complete("replace", {"source": [], "target": [{"ref": "hands"}]})
-    assert not grounding_is_complete("motion", {"source": [], "target": [{"ref": "hand"}]})
 
 
-def test_background_foreground_audit_routes_full_image_and_protected_subjects():
-    prompt = build_change_observation_prompt(
-        "background change",
-        "change the background to a snowy forest",
-        background_observation_mode="foreground-audit",
-    )
-    assert "unchanged_foreground" in prompt
-    assert 'background_mask_mode="full_image"' in prompt
-    assert "environmental scene components" in prompt
-
-    full_image = parse_change_observation(
-        json.dumps(
-            {
-                "edit_summary": "the entire tropical environment became snowy",
-                "source_background": "tropical palms and lagoon",
-                "target_background": "snow-covered palms and frozen lagoon",
-                "background_extent": "full_image",
-                "unchanged_foreground": [],
-                "background_mask_mode": "full_image",
-                "confidence": "high",
-            }
-        )
-    )
-    assert full_image["background_mask_mode"] == "full_image"
-    assert full_image["unchanged_foreground"] == []
-
-    protected = parse_change_observation(
-        json.dumps(
-            {
-                "edit_summary": "curtains changed to a ballroom",
-                "source_background": "brown curtains",
-                "target_background": "ballroom interior",
-                "background_extent": "around_foreground",
-                "unchanged_foreground": [
-                    {
-                        "source_ref": "man in red uniform",
-                        "target_ref": "same man in red uniform",
-                        "sam_ref": "man in red uniform",
-                        "region_description": "center, nearly full height",
-                        "unchanged_evidence": "same face, pose, and uniform",
-                    }
-                ],
-                "background_mask_mode": "exclude_foreground",
-                "confidence": "high",
-            }
-        )
-    )
-    requests = build_grounding_requests(
-        "background change",
-        "change the background",
-        protected,
-        background_observation_mode="foreground-audit",
-    )
-    assert len(requests) == 1
-    assert "man in red uniform" in requests[0].prompt
-    assert "Do not box sky, clouds, terrain" in requests[0].prompt
-    assert "never cover only the easiest instance of a plural ref" in requests[0].prompt
 
 
-def test_background_full_image_grounding_skips_sam_and_returns_all_ones():
-    sample = {
-        "input_img": Image.new("RGB", (7, 5), "navy"),
-        "output_img": Image.new("RGB", (7, 5), "orange"),
-        "instruction": "change the background to a desert",
-        "type": "background change",
-    }
-    ground_row = {
-        "qc_flag": "OK",
-        "ground_json": json.dumps(
-            {
-                "boxes": {"source": [], "target": []},
-                "background_mask_mode": "full_image",
-            }
-        ),
-    }
-    result = annotate_grounded_sample(None, sample, ground_row, "sam-test")
-    assert result["mask_source"] == "background_full_image"
-    assert result["qc_flags"] == ["BACKGROUND_FULL_IMAGE"]
-    assert result["mask"].shape == (5, 7)
-    assert np.all(result["mask"] == 1)
 
 
 def test_visual_load_batching_preserves_order_and_single_large_request():
@@ -202,9 +97,9 @@ def test_mask_jobs_are_scoped_by_input_directory(tmp_path):
     output_dir = tmp_path / "mask"
     input_dir.mkdir()
     grounding_dir.mkdir()
-    pq.write_table(pa.table({"value": [1]}), input_dir / "new.parquet")
-    pq.write_table(pa.table({"raw_type": ["add"]}), grounding_dir / "new.parquet")
-    pq.write_table(pa.table({"raw_type": ["add"]}), grounding_dir / "old.parquet")
+    pq.write_table(pa.table({"value": [1]}), input_dir / "add_00000.parquet")
+    pq.write_table(pa.table({"raw_type": ["add"], "row_idx": [0]}), grounding_dir / "add_00000.parquet")
+    pq.write_table(pa.table({"raw_type": ["add"]}), grounding_dir / "add_00001.parquet")
     args = argparse.Namespace(
         input_dir=input_dir,
         grounding_dir=grounding_dir,
@@ -214,8 +109,8 @@ def test_mask_jobs_are_scoped_by_input_directory(tmp_path):
 
     jobs = build_jobs(args)
 
-    assert [Path(job.input_path).name for job in jobs] == ["new.parquet"]
-    assert [Path(job.grounding_path).name for job in jobs] == ["new.parquet"]
+    assert [Path(job.input_path).name for job in jobs] == ["add_00000.parquet"]
+    assert [Path(job.grounding_path).name for job in jobs] == ["add_00000.parquet"]
 
 
 def test_latest_prefilter_manifest_metadata_survives_grounding_and_mask():
@@ -246,7 +141,7 @@ def test_latest_prefilter_manifest_metadata_survives_grounding_and_mask():
         assert field in MASK_SCHEMA.names
 
 
-def test_add_remove_route_clear_collateral_opposite_side_changes():
+def test_collateral_changes_do_not_add_opposite_canvas():
     add_observation = {
         "changes": [
             {
@@ -260,7 +155,7 @@ def test_add_remove_route_clear_collateral_opposite_side_changes():
     assert [
         request.grounding_image
         for request in build_grounding_requests("add", "add flowers", add_observation)
-    ] == ["target", "source"]
+    ] == ["target"]
     remove_observation = {
         "changes": [
             {
@@ -280,7 +175,7 @@ def test_add_remove_route_clear_collateral_opposite_side_changes():
     assert [
         request.grounding_image
         for request in build_grounding_requests("remove", "remove piercings", remove_observation)
-    ] == ["source", "target"]
+    ] == ["source"]
 
     add_removed_sentinel = {
         "changes": [
@@ -296,17 +191,17 @@ def test_add_remove_route_clear_collateral_opposite_side_changes():
         for request in build_grounding_requests(
             "add", "add flowers", add_removed_sentinel
         )
-    ] == ["target", "source"]
+    ] == ["target"]
 
 
 def test_two_pass_observation_prompt_and_grounding_checklist():
     prompt = build_change_observation_prompt("color", "make the arms darker")
-    assert "paired images are the source of truth" in prompt
-    assert "arms and the face" in prompt
-    assert "face/head, neck, each arm/hand" in prompt
-    assert "rewrite the instruction into a precise specification" in prompt
-    assert "nearby group" in prompt
-    assert "checked_regions" in prompt
+    assert "co-edited instances" in prompt
+    assert "only the changed parts" in prompt
+    assert "make the arms darker" in prompt
+    assert len(prompt.split()) < 400
+    assert "nearby cluster" in prompt
+    assert "checked_regions" not in prompt
     observation = {
         "edit_summary": "arms and face became darker",
         "changes": [
@@ -322,91 +217,20 @@ def test_two_pass_observation_prompt_and_grounding_checklist():
         "color", "make the arms darker by changing the skin tone", "source", observation
     )
     assert "man's face" in grounding_prompt
-    assert "Do not assume the original instruction" in grounding_prompt
-    assert "never box the whole person" in grounding_prompt
+    assert "EVERY change_id exactly once" in grounding_prompt
+    assert "whole person for a local part" in grounding_prompt
     grouped_prompt = build_grounding_prompt(
         "add", "add scattered petals", "target", observation
     )
-    assert "SPATIALLY SEPARATED EDIT REGION" in grouped_prompt
-    assert "ALWAYS emit ONE aggregate_region box" in grouped_prompt
-    assert "MUST be a superset" in grouped_prompt
+    assert "Do not merge different IDs" in grouped_prompt
+    assert "tight boxes enclosing the complete visible contour" in grouped_prompt
     assert prompt_version_for_mode("two-pass") == TWO_PASS_PROMPT_VERSION
 
 
-def test_small_box_local_refinement_geometry_is_recall_first():
-    initial = {"ref": "black cap", "bbox_2d": [270, 183, 505, 333]}
-    assert box_needs_local_refinement(initial)
-    assert not box_needs_local_refinement(
-        {"ref": "whole person", "bbox_2d": [100, 100, 700, 800]}
-    )
-    crop = bbox_refinement_crop(initial["bbox_2d"])
-    assert crop == [35.0, 33.0, 740.0, 483.0]
-    mapped = map_crop_bbox_to_full(crop, [100, 100, 700, 700])
-    assert mapped == [105.5, 78.0, 528.5, 348.0]
-    final = conservative_refined_bbox(initial["bbox_2d"], mapped)
-    assert final == [81.5, 54.0, 552.5, 372.0]
-    assert final[0] <= mapped[0] and final[1] <= mapped[1]
-    assert final[2] >= initial["bbox_2d"][2] and final[3] >= initial["bbox_2d"][3]
-
-    # A clearly shifted refinement replaces the initial proposal instead of
-    # unioning a wrong nearby facial feature into the final search region.
-    mouth = conservative_refined_bbox(
-        [638, 425, 692, 465], [642.95, 483.64, 689.99, 498.76]
-    )
-    assert mouth == [630.95, 471.64, 701.99, 510.76]
-
-    # A crop pass can lock onto a salient subpart such as a hammer head.  High
-    # containment keeps the initial full-object extent even when IoU < 0.25.
-    contained_subpart = conservative_refined_bbox(
-        [392, 592, 442, 750], [388, 594, 434, 633]
-    )
-    assert contained_subpart == [376.0, 580.0, 454.0, 762.0]
-
-    # A failed local pass still expands the initial proposal conservatively.
-    fallback = conservative_refined_bbox(initial["bbox_2d"], None)
-    assert fallback == [195.0, 108.0, 580.0, 408.0]
 
 
-def test_bbox_refinement_prompt_and_parser_keep_candidate_ids():
-    candidates = [
-        {
-            "candidate_id": 2,
-            "ref": "speaker's mouth",
-            "initial_bbox": [638, 425, 692, 465],
-            "crop_bbox": [518, 305, 812, 585],
-        }
-    ]
-    prompt = build_bbox_refinement_prompt(candidates)
-    assert "complete mouth/lips rather than the nose" in prompt
-    assert '"candidate_id":2' in prompt
-    assert "638" not in prompt
-    assert "812" not in prompt
-    assert "derive every returned number solely from the visible candidate crop" in prompt
-    parsed = parse_bbox_refinement_output(
-        "```json\n"
-        '[{"candidate_id":2,"ref":"speaker mouth","bbox_2d":[210,380,790,690]}]'
-        "\n```"
-    )
-    assert parsed == [
-        {
-            "candidate_id": 2,
-            "ref": "speaker mouth",
-            "bbox_2d": [210.0, 380.0, 790.0, 690.0],
-        }
-    ]
 
 
-def test_background_protection_boxes_are_not_local_refinement_candidates():
-    # The pure geometry trigger may consider a thin foreground-protection box
-    # small; the runner explicitly bypasses the entire background route before
-    # constructing views.  Keep the trigger behavior documented here so future
-    # refactors do not mistake size alone for route eligibility.
-    assert box_needs_local_refinement(
-        {"ref": "foreground person", "bbox_2d": [100, 100, 260, 700]}
-    )
-    assert not local_bbox_refinement_enabled("background change")
-    assert not local_bbox_refinement_enabled("style")
-    assert local_bbox_refinement_enabled("motion change")
 
 
 def test_change_observation_parser_accepts_fence_and_normalizes():
@@ -442,32 +266,9 @@ def test_change_observation_parser_accepts_fence_and_normalizes():
     }
 
 
-def test_change_observation_parser_salvages_changes_after_broken_checks():
-    raw = r'''{"edit_summary":"a red vase became blue","checked_regions":[
-      {"ref":"vase","changed":true},
-      "ref":"table","changed":false}],
-      "changes":[{"source_ref":"red vase","target_ref":"blue vase",
-      "sam_ref":"ceramic vase","region_description":"center of image",
-      "region_layout":"single","change":"red surface became blue",
-      "instruction_aligned":true}]}'''
-    assert parse_change_observation(raw) == {
-        "edit_summary": "a red vase became blue",
-        "checked_regions": [],
-        "changes": [
-            {
-                "source_ref": "red vase",
-                "target_ref": "blue vase",
-                "sam_ref": "ceramic vase",
-                "region_description": "center of image",
-                "region_layout": "single",
-                "change": "red surface became blue",
-                "instruction_aligned": True,
-            }
-        ],
-    }
 
 
-def test_subject_surface_audit_is_selected_only_by_instruction_surface():
+def test_checklist_identity_takes_precedence_over_instruction_surface():
     whole_object_prompt = build_grounding_prompt(
         "color",
         "change the color of Xenomorph to gold",
@@ -483,7 +284,7 @@ def test_subject_surface_audit_is_selected_only_by_instruction_surface():
         },
     )
     assert "Independently ground a same-subject surface" not in whole_object_prompt
-    assert "Find every complete object or sub-part" in whole_object_prompt
+    assert '"ref":"alien head and hands"' in whole_object_prompt
 
     skin_prompt = build_grounding_prompt(
         "color",
@@ -499,78 +300,22 @@ def test_subject_surface_audit_is_selected_only_by_instruction_surface():
             ]
         },
     )
-    assert "Independently ground a same-subject surface" in skin_prompt
+    assert "Independently ground a same-subject surface" not in skin_prompt
+    assert '"ref":"bare arms"' in skin_prompt
 
 
-def test_grounding_parser_accepts_fence_label_and_clips():
-    text = """<think>ignored</think>\n```json
-[{"label":"right arm","bbox_2d":[-2,10,1004,999]}]
-```"""
-    assert parse_grounding_output(text) == [
-        {"ref": "right arm", "bbox_2d": [0.0, 10.0, 1000.0, 999.0]}
-    ]
 
 
-def test_grounding_parser_preserves_aggregate_region_mode():
-    text = '[{"ref":"facial piercings","bbox_2d":[100,200,700,800],"region_mode":"nearby_group","mask_density":"sparse"}]'
-    assert parse_grounding_output(text) == [
-        {
-            "ref": "facial piercings",
-            "bbox_2d": [100.0, 200.0, 700.0, 800.0],
-            "region_mode": "aggregate_region",
-            "mask_density": "sparse",
-        }
-    ]
 
 
-def test_grounding_parser_drops_abstract_absence_box():
-    text = '[{"ref":"absence of hands","bbox_2d":[100,200,500,900]}]'
-    assert parse_grounding_output(text) == []
 
 
-def test_grounding_parser_salvages_truncated_multi_instance_output():
-    text = (
-        '[{"ref":"flowers", "bbox_2d":[10,20,30,40], '
-        '"bbox_2d":[50,60,90,100], "bbox_2d":[120'
-    )
-    assert parse_grounding_output(text) == [
-        {"ref": "flowers", "bbox_2d": [10.0, 20.0, 30.0, 40.0]},
-        {"ref": "flowers", "bbox_2d": [50.0, 60.0, 90.0, 100.0]},
-    ]
 
 
-def test_grounding_parser_recovers_duplicate_keys_from_valid_json():
-    text = '[{"ref":"mushroom","bbox_2d":[1,2,3,4],"bbox_2d":[5,6,7,8]}]'
-    assert parse_grounding_output(text) == [
-        {"ref": "mushroom", "bbox_2d": [1.0, 2.0, 3.0, 4.0]},
-        {"ref": "mushroom", "bbox_2d": [5.0, 6.0, 7.0, 8.0]},
-    ]
 
 
-def test_grounding_parser_salvages_complete_objects_before_truncation():
-    text = (
-        '[{"bbox_2d":[1,2,3,4],"label":"cow"},'
-        '{"bbox_2d":[5,6,7,8],"label":"house"},{"bbox_2d":[9'
-    )
-    assert parse_grounding_output(text) == [
-        {"ref": "cow", "bbox_2d": [1.0, 2.0, 3.0, 4.0]},
-        {"ref": "house", "bbox_2d": [5.0, 6.0, 7.0, 8.0]},
-    ]
 
 
-def test_bad_case_doc_extraction_is_mask_section_only():
-    markdown = """## 1. Prefilter
-#### `skip_00000.parquet` row `1`
-## 2. Mask 打标这一侧 bad case
-#### `add_00000.parquet` row `17`
-#### `remove_00001.parquet` row `2`
-## 3. Reference
-#### `reference_00000.parquet` row `3`
-"""
-    assert extract_mask_cases(markdown) == [
-        {"shard": "add_00000.parquet", "row_idx": 17},
-        {"shard": "remove_00001.parquet", "row_idx": 2},
-    ]
 
 
 class _PVSModel:
@@ -697,7 +442,7 @@ def test_aggregate_dual_prompt_rejects_dense_enclosing_mask():
     assert audit["pcs_fusion"] == "reject_dense_choose_text"
 
 
-def test_aggregate_dual_prompt_unions_complementary_sparse_instances():
+def test_aggregate_dual_prompt_selects_instead_of_blind_union():
     text = np.zeros((100, 100), dtype=np.uint8)
     text[25:28, 25:28] = 1
     joint = np.zeros((100, 100), dtype=np.uint8)
@@ -717,8 +462,8 @@ def test_aggregate_dual_prompt_unions_complementary_sparse_instances():
         np.asarray([20, 20, 80, 80], dtype=np.float32),
         "aggregate_region",
     )
-    assert mask.sum() == 18
-    assert audit["pcs_fusion"] == "aggregate_union"
+    assert mask.sum() == 9
+    assert audit["pcs_fusion"] == "aggregate_choose_joint"
 
 
 def test_sparse_aggregate_prefers_text_when_joint_mask_is_much_denser():

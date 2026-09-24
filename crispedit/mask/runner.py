@@ -18,6 +18,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from PIL import Image, ImageDraw
 from tqdm import tqdm
+from crispedit.common import supported_shard
+
+from crispedit.mask.selection import SCENE_FIELDS, scene_fields
+from crispedit.mask.artifacts import check_output_location, reusable_table, signature, signed_schema
+from crispedit.mask.grounding_runner import load_selection
 
 from crispedit.mask.pipeline import (
     MASK_POLICY_VERSION,
@@ -39,6 +44,8 @@ INSTANCE_TYPE = pa.struct(
         ("mask_source", pa.string()),
         ("semantic_mask_source", pa.string()),
         ("predicted_iou", pa.float64()),
+        ("concept_score", pa.float64()),
+        ("selection_review", pa.bool_()),
         ("box_iou", pa.float64()),
         ("inside_ratio", pa.float64()),
         ("candidate_count", pa.int64()),
@@ -60,6 +67,9 @@ INSTANCE_TYPE = pa.struct(
         ("coverage_suppressed_for_sparse_semantics", pa.bool_()),
         ("directional_coverage", pa.list_(pa.float64())),
         ("errors", pa.list_(pa.string())),
+        ("crop_xyxy", pa.list_(pa.int32())),
+        ("candidate_audit_json", pa.string()),
+        ("cleanup_json", pa.string()),
         ("area", pa.int64()),
         ("rle_size", pa.list_(pa.int32())),
         ("rle_counts", pa.string()),
@@ -98,6 +108,7 @@ MASK_SCHEMA = pa.schema(
         ("prefilter_reason", pa.string()),
         ("filter_reason_codes", pa.string()),
         ("filter_mismatch_score", pa.float64()),
+        *SCENE_FIELDS,
     ]
 )
 
@@ -118,6 +129,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-path", default=os.environ.get("CRISPEDIT_SAM3_CHECKPOINT_PATH"))
     parser.add_argument("--devices", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--include-types", default=None)
+    parser.add_argument("--selection-file", type=Path, default=None,
+                        help="Same selection as grounding, with original shard/row_idx; all selected rows must exist.")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--compression", default="zstd")
@@ -136,18 +149,35 @@ def parse_devices(spec: str) -> List[int]:
 
 
 def build_jobs(args: argparse.Namespace) -> List[MaskJob]:
+    selection = load_selection(getattr(args, "selection_file", None))
     include = {part.strip() for part in args.include_types.split(",")} if args.include_types else None
     args.output_dir.mkdir(parents=True, exist_ok=True)
     jobs = []
     # The input directory defines this run's scope.  The production grounding
     # directory can contain results from several disjoint source-data batches.
     for input_path in sorted(args.input_dir.glob("*.parquet")):
+        if not supported_shard(input_path):
+            continue
+        if selection is not None and input_path.name not in selection:
+            continue
+        if include is not None:
+            from crispedit.common import raw_type_from_filename
+            if raw_type_from_filename(input_path) not in include:
+                continue
         grounding_path = args.grounding_dir / input_path.name
         if not grounding_path.exists():
             raise FileNotFoundError(
                 f"grounding output for raw shard is missing: {grounding_path}"
             )
         ground_file = pq.ParquetFile(grounding_path)
+        indices = pq.read_table(grounding_path, columns=["row_idx"])["row_idx"].to_pylist()
+        raw_count = pq.ParquetFile(input_path).metadata.num_rows
+        if indices != sorted(set(indices)) or any(i < 0 or i >= raw_count for i in indices):
+            raise ValueError(f"invalid grounding row_idx: {grounding_path}")
+        if selection is not None and indices != selection[input_path.name]:
+            raise ValueError(f"grounding does not match selection: {grounding_path}")
+        if selection is None and indices != list(range(raw_count)):
+            raise ValueError(f"sparse grounding requires --selection-file: {grounding_path}")
         if ground_file.metadata.num_rows == 0:
             continue
         if include is not None:
@@ -162,6 +192,8 @@ def build_jobs(args: argparse.Namespace) -> List[MaskJob]:
                 num_rows=ground_file.metadata.num_rows,
             )
         )
+    if selection is not None and {Path(job.input_path).name for job in jobs} != set(selection):
+        raise ValueError("not all selected shards have grounding outputs")
     return jobs
 
 
@@ -176,6 +208,7 @@ def assign_jobs(jobs: Sequence[MaskJob], devices: Sequence[int]) -> List[Tuple[i
 
 def _copy_metadata(ground_row: Dict) -> Dict:
     return {
+        **scene_fields(ground_row),
         "grounding_status": str(ground_row.get("grounding_status", "")),
         "mllm_model": str(ground_row.get("mllm_model", "")),
         "prompt_version": str(ground_row.get("prompt_version", "")),
@@ -328,7 +361,8 @@ def process_job(job: MaskJob, processor, args: argparse.Namespace, progress_queu
     output_path = Path(job.output_path)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     ground_rows = pq.read_table(job.grounding_path).to_pylist()
-    raw_rows = _raw_rows_for_grounding(input_path, ground_rows)
+    infer_rows = [row for row in ground_rows if row.get("qc_flag") not in {"PREFILTER_SKIP", "GROUND_FAIL"}]
+    raw_rows = _raw_rows_for_grounding(input_path, infer_rows) if infer_rows else {}
     output_rows = []
     summary = {"rows": 0, "errors": 0, "flags": {}, "sources": {}, "types": {}}
     preview_count = 0
@@ -379,11 +413,31 @@ def process_job(job: MaskJob, processor, args: argparse.Namespace, progress_queu
                 "total_rows": job.num_rows,
             }
         )
-    table = pa.Table.from_pylist(output_rows, schema=MASK_SCHEMA)
+    if summary["rows"] != job.num_rows:
+        raise ValueError(f"incomplete mask shard: {job.input_path}")
+    table = pa.Table.from_pylist(output_rows, schema=signed_schema(MASK_SCHEMA, mask_signature(job, args)))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table, tmp_path, compression=args.compression)
     tmp_path.replace(output_path)
     return summary
+
+
+def mask_signature(job, args):
+    return signature(job.input_path, [job.grounding_path, __file__, Path(__file__).with_name("pipeline.py"),
+                                     Path(__file__).with_name("regions.py"), Path(__file__).with_name("candidates.py"),
+                                     Path(__file__).with_name("attachments.py"),
+                                     Path(__file__).with_name("matching.py")],
+                     {"checkpoint": args.checkpoint_path, "policy": MASK_POLICY_VERSION})
+
+
+def summarize_masks(table):
+    result = {"rows": table.num_rows, "errors": 0, "flags": {}, "sources": {}, "types": {}}
+    for row in table.select(["qc_flag", "mask_source", "raw_type"]).to_pylist():
+        result["errors"] += row["qc_flag"] == "ERROR"
+        for field, column in [("flags", "qc_flag"), ("sources", "mask_source"), ("types", "raw_type")]:
+            key = row[column]
+            result[field][key] = result[field].get(key, 0) + 1
+    return result
 
 
 def worker_main(worker_index: int, physical_device: int, jobs: List[MaskJob], args_dict: Dict, progress_queue) -> None:
@@ -398,33 +452,31 @@ def worker_main(worker_index: int, physical_device: int, jobs: List[MaskJob], ar
             raise RuntimeError(f"SAM worker expected one visible GPU, found {torch.cuda.device_count()}")
         torch.cuda.set_device(0)
         progress_queue.put({"kind": "log", "message": f"mask-worker-{worker_index} loading SAM3 PVS on physical GPU {physical_device}"})
-        model = build_sam3_image_model(
-            device="cuda",
-            checkpoint_path=args.checkpoint_path,
-            load_from_HF=args.checkpoint_path is None,
-            enable_inst_interactivity=True,
-        )
         # Small edit elements (piercings, petals, stars) are frequently below
         # 0.5 even when their masks are accurate.  Stage 2 spatially filters all
         # PCS detections with the MLLM box, making 0.3 a safer recall-first gate.
-        processor = Sam3Processor(model, device="cuda", confidence_threshold=0.3)
+        processor = None
         sam_version = (
             f"{MASK_POLICY_VERSION}:"
             f"{Path(args.checkpoint_path).name if args.checkpoint_path else 'facebook/sam3'}"
         )
         for job in jobs:
             output_path = Path(job.output_path)
-            if output_path.exists() and not args.overwrite:
-                rows = pq.ParquetFile(output_path).metadata.num_rows
-                summary = {"rows": rows, "errors": 0, "flags": {}, "sources": {}, "types": {}, "skipped_existing": True}
-                progress_queue.put({"kind": "rows", "count": rows})
+            ground = pq.read_table(job.grounding_path, columns=["row_idx", "qc_flag"])
+            existing = None if args.overwrite else reusable_table(output_path, mask_signature(job, args), MASK_SCHEMA, ground["row_idx"].to_pylist())
+            if existing is not None:
+                summary = {**summarize_masks(existing), "skipped_existing": True}
+                progress_queue.put({"kind": "rows", "count": summary["rows"]})
             else:
+                if processor is None and any(flag not in {"PREFILTER_SKIP", "GROUND_FAIL"} for flag in ground["qc_flag"].to_pylist()):
+                    model = build_sam3_image_model(device="cuda", checkpoint_path=args.checkpoint_path,
+                                                  load_from_HF=args.checkpoint_path is None, enable_inst_interactivity=True)
+                    processor = Sam3Processor(model, device="cuda", confidence_threshold=0.3)
                 summary = process_job(job, processor, args, progress_queue, worker_index, sam_version)
             progress_queue.put({"kind": "shard_done", "worker": worker_index, "shard": job.input_path, "summary": summary})
     except Exception as exc:
         progress_queue.put({"kind": "worker_error", "worker": worker_index, "device": physical_device, "error": repr(exc)})
-        if args.fail_fast:
-            raise
+        raise
     finally:
         progress_queue.put({"kind": "worker_done", "worker": worker_index})
 
@@ -466,6 +518,7 @@ def main() -> None:
     args.input_dir = args.input_dir.resolve()
     args.grounding_dir = args.grounding_dir.resolve()
     args.output_dir = args.output_dir.resolve()
+    check_output_location(args.output_dir, args.input_dir, args.grounding_dir)
     if args.checkpoint_path:
         args.checkpoint_path = str(Path(args.checkpoint_path).resolve())
     if args.preview_dir:
@@ -537,6 +590,11 @@ def main() -> None:
             process.join()
 
     summary = aggregate(summaries)
+    summary["expected_rows"] = sum(job.num_rows for job in jobs)
+    summary["expected_shards"] = len(jobs)
+    summary["shards"] = len(summaries)
+    summary["skipped_existing_shards"] = sum(bool(item["summary"].get("skipped_existing")) for item in summaries)
+    summary["worker_exit_codes"] = [process.exitcode for process in processes]
     summary["worker_errors"] = errors
     (args.output_dir / "run_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     if args.preview_dir:
@@ -544,7 +602,7 @@ def main() -> None:
         if collage:
             print(f"preview collage: {collage}")
     print(json.dumps(summary, indent=2, ensure_ascii=False))
-    if errors or summary["errors"]:
+    if errors or summary["errors"] or summary["rows"] != summary["expected_rows"] or len(summaries) != len(jobs) or any(process.exitcode != 0 for process in processes):
         raise SystemExit(1)
 
 

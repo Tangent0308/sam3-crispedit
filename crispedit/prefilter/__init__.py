@@ -1,1 +1,1 @@
-"""Fact-first prefilter stage."""
+"""Qwen3.8 image-pair quality filtering."""

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Sequence
 
 from PIL import Image
 
-from crispedit.prefilter.policy import canonical_edit_type
+from crispedit.common import canonical_edit_type
 
 
 PREFILTER_METHOD = "pair_quality"

@@ -1,6 +1,6 @@
 include LICENSE
 include README.md
-recursive-include examples *.py
-recursive-include examples *.ipynb
-recursive-include examples *.md
+recursive-include sam3/assets *.txt.gz
+recursive-include scripts *.py *.sh *.txt
+recursive-include docs *.md
 recursive-include tests *.py
