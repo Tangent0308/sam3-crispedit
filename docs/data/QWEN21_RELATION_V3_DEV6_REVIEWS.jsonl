@@ -1,0 +1,6 @@
+{"image":"004_gres_r2595_m0_remove.png","result":"defer","reason":"V3仍使用一个点描述复数滑雪装备，滑雪板未可靠定位；已保存全部辅助候选，未强行生成。语义上应一起处理目标专属装备，但几何定位仍未过关。","reviewer":"Codex visual inspection"}
+{"image":"007_gres_r1316_m1_remove.png","result":"pass","reason":"裁判及所持防护装备一起删除，旧版遗留黑色悬空碎片已消失；其他球员保留，地面基本自然。","reviewer":"Codex visual inspection"}
+{"image":"022_gres_r5692_m0_remove.png","result":"fail","reason":"计划已改为只删父亲、保留女孩；女孩不再大片缺损，但raw和final仍有三条腿/鞋的重复结构，尚未过关。","reviewer":"Codex visual inspection"}
+{"image":"023_gres_r5692_m1_remove.png","result":"pass","reason":"只删孩子，父亲保留，手臂与衣服补全大体合理，没有再把被抱者和抱人者视作同一目标。","reviewer":"Codex visual inspection"}
+{"image":"032_gres_r10818_m0_remove.png","result":"pass","reason":"修复辅助候选过度拒绝后，该玩具及其帽子、围巾一起删除，其他玩具保留；木质背板补全基本自然。对照旧生产typed-v1几乎未删掉该目标，本次改善。","reviewer":"Codex visual inspection"}
+{"image":"033_gres_r10818_m1_remove.png","result":"defer","reason":"规划的围巾定位点落在别的玩具附近，候选与目标距离不符；保留defer，未强行扩大范围。","reviewer":"Codex visual inspection"}

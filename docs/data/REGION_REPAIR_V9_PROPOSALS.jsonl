@@ -1,0 +1,4 @@
+{"id":27,"new_instruction":"Remove the front-right giraffe.","provenance":"assistant_authored_regression_action_first_context_restored"}
+{"id":43,"new_instruction":"Make the diagonal sausage in the lower right matte.","editor_crop_padding":0.2,"editor_crop_min":32,"provenance":"assistant_authored_regression_localization_ablation"}
+{"id":47,"generation_context":"Continue the brown wooden tabletop behind the removed girl's arms. The printed paper stays flat on the table; do not extend it across the removed silhouette.","provenance":"assistant_authored_regression_background_constraints"}
+{"id":67,"new_instruction":"Remove only the near white chair facing away beside the blue table.","provenance":"assistant_authored_regression_action_first_context_restored"}

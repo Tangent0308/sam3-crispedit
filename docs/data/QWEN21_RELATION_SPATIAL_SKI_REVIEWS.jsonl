@@ -1,0 +1,1 @@
+{"image":"004_gres_r2595_m0_remove.png","baseline":"fail","candidate":"pass","reviewer":"Codex visual review; not pipeline audit or independent human ground truth","reason":"先用已有候选复核装备归属：可见滑雪板属于前景红衣人，白衣目标的板被遮挡，不应强行定位。保留已定位的两支目标雪杖。相同计划/mask下，typed-v1只删雪杖，白衣主体仍在；加入实际crop中的upper-center主目标提示后，白衣滑雪者及其雪杖消失，前景红衣滑雪者和装备保持，雪地补全基本自然。最终训练instruction未枚举装备。"}

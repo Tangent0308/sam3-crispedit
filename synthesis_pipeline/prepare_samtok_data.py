@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-import pyarrow.parquet as pq
 from PIL import Image
 from pycocotools import mask as mask_utils
 from tqdm import tqdm
@@ -100,6 +99,7 @@ def build_positive_index(
             "positive_rows": len(rows),
         }
 
+    import pyarrow.parquet as pq
     table = pq.read_table(
         parquet_path, columns=["source", "problem", "answer", "masks"]
     )
@@ -231,6 +231,7 @@ def materialize_plan(
         )
 
     read_started = time.perf_counter()
+    import pyarrow.parquet as pq
     image_column = pq.read_table(parquet_path, columns=["images"])["images"]
     image_read_seconds = time.perf_counter() - read_started
 
@@ -320,6 +321,9 @@ def materialize_plan(
                 "parquet_row_index": row_index,
                 "mask_index": mask_index,
             }
+            for field in ('new_instruction', 'segmentation_target', 'mask_refinement', 'protected_objects','structural_parts','reference_binding'):
+                if field in edit:
+                    annotation[field] = edit[field]
             if edit.get("masked_content"):
                 annotation["masked_content"] = str(edit["masked_content"])
             if edit.get("edit_unit_status"):

@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crop-dir", type=Path, required=True)
     parser.add_argument("--results-full-dir", type=Path, required=True)
     parser.add_argument("--model-id", required=True)
+    parser.add_argument("--model-family",choices=["auto","qwen2511","qwen21"],default="auto")
     parser.add_argument(
         "--gpus",
         default="0,1,2,3,4,5,6,7",
@@ -47,11 +48,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--patch-ratio", type=float, default=0.2)
     parser.add_argument("--edit-method", default="mirage",
-                        choices=["mirage", "mirage_relaxed", "official_full", "context_edit", "context_edit_v2", "context_adaptive"])
+                        choices=["mirage", "mirage_relaxed", "official_full", "context_edit", "context_edit_v2", "context_adaptive", "context_guarded_v2", "context_grounded_v3", "context_grounded_v4", "context_grounded_v3_qwen21", "context_grounded_v4_qwen21"])
     parser.add_argument("--num-steps", type=int, default=40)
-    parser.add_argument("--true-cfg-scale", type=float, default=4.0)
+    parser.add_argument("--true-cfg-scale", type=float, default=None)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
-    parser.add_argument("--negative-prompt", default=" ")
+    parser.add_argument("--negative-prompt", default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--queue-dir",
@@ -81,7 +82,7 @@ def load_image_names(path: Path) -> list[str]:
 
 
 def worker_command(args: argparse.Namespace, queue_dir: Path, worker_id: str) -> list[str]:
-    return [
+    command = [
         args.python,
         str(INFERENCE_SCRIPT),
         "--image-root",
@@ -94,6 +95,8 @@ def worker_command(args: argparse.Namespace, queue_dir: Path, worker_id: str) ->
         str(args.results_full_dir),
         "--model-id",
         args.model_id,
+        "--model-family",
+        args.model_family,
         "--device",
         "cuda",
         "--dtype",
@@ -106,12 +109,8 @@ def worker_command(args: argparse.Namespace, queue_dir: Path, worker_id: str) ->
         args.edit_method,
         "--num-steps",
         str(args.num_steps),
-        "--true-cfg-scale",
-        str(args.true_cfg_scale),
         "--guidance-scale",
         str(args.guidance_scale),
-        "--negative-prompt",
-        args.negative_prompt,
         "--seed",
         str(args.seed),
         "--work-queue-dir",
@@ -121,6 +120,11 @@ def worker_command(args: argparse.Namespace, queue_dir: Path, worker_id: str) ->
         "--claim-timeout-seconds",
         str(args.claim_timeout_seconds),
     ]
+    if args.true_cfg_scale is not None:
+        command.extend(["--true-cfg-scale",str(args.true_cfg_scale)])
+    if args.negative_prompt is not None:
+        command.extend(["--negative-prompt",args.negative_prompt])
+    return command
 
 
 def run_pool(args: argparse.Namespace, queue_dir: Path) -> dict:

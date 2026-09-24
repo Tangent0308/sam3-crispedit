@@ -23,7 +23,6 @@ from typing import Any, Iterable
 
 import cv2
 import numpy as np
-import pyarrow.parquet as pq
 from PIL import Image
 from pycocotools import mask as mask_utils
 from tqdm import tqdm
@@ -41,7 +40,7 @@ import utils.vlm_utils as vlm
 
 
 TASK_TYPES = ("add", "remove", "replace", "attribute")
-PLANNING_VISUAL_INPUT_VERSION = "full_source_outlined_context_crop_v4"
+PLANNING_VISUAL_INPUT_VERSION = "full_source_bound_region_v13_scope"
 LARGE_HOLE_MIN_PIXELS = 128
 LARGE_HOLE_MIN_FRACTION = 0.03
 FORBIDDEN_OUTPUT_PATTERN = re.compile(
@@ -49,7 +48,7 @@ FORBIDDEN_OUTPUT_PATTERN = re.compile(
     r"source crop|(?:full|clean) source image|source image|image [123]|"
     r"(?:from|in) the image)\w*\b|"
     r"\b(?:localization|mask|target|left|middle|right|top|bottom|upper|lower|first|"
-    r"second|third|three-part)\s+panels?\b|\bpanels?\s+(?:view|image)\b",
+    r"second|third|three-part)\s+panels?\b|\bpanels?\s+(?:view|image)\b|%",
     flags=re.IGNORECASE,
 )
 TYPE_GUIDANCE = {
@@ -59,39 +58,89 @@ TYPE_GUIDANCE = {
         "where to add it relative to the uniquely identified anchor. The added "
         "item should be visible at full-image scale. A direction for the new item "
         "cannot stand in for the anchor's own locator relative to the scene. "
+        "Use an existing visible surface or attachment point on this anchor; "
+        "state the contact relation. Do not introduce a new hand, holder, support "
+        "or unrelated foreground object. Keep the addition smaller than its anchor. "
+        "Verify that the named attachment surface actually exists and is visible, "
+        "belongs to this instance, and lies inside the outline. Do not infer "
+        "an occluded body part or garment feature from its category. Locate a "
+        "body part by its visible action or relation, not anatomical left/right. "
         "Do not add another copy of "
         "the anchor. If no coherent addition can be anchored here, mark incompatible."
     ),
     "remove": (
-        "The outline must contain a complete, independently removable object. "
-        "If it covers only a fragment or its removal would leave a dependent "
-        "object outside the outline, including an inner outlined hole, "
-        "implausibly suspended, mark incompatible. "
-        "Otherwise ask simply to remove that uniquely identified object; do not "
-        "request removal of anything outside the outline or describe reconstruction."
+        "Identify one independently removable physical object. If the current "
+        "outline contains a coherent part but omits a clearly visible attached "
+        "structural component of that SAME object, list it in structural_parts "
+        "and use complete refinement; downstream segmentation must confirm the "
+        "whole unit before editing. Mark the current extent complete_part, not "
+        "complete_object. Do not use this exception for an arbitrary fragment, "
+        "an independent held object, or a different instance. If removing the "
+        "object would leave an independent dependent object implausibly suspended, "
+        "mark incompatible. "
+        "Before accepting, inspect every held, worn or carried item and every "
+        "inner mask hole. Items outside the selected pixels are not removed by "
+        "this operation. Also inspect contact with other people: do not approve "
+        "an edit that would leave their limb abruptly truncated or unsupported. "
+        "Trace thin protrusions to their ends. Being physically associated with "
+        "an object does not put them inside its outline. An independent accessory "
+        "that must disappear together but lies outside makes this task incompatible; "
+        "do not assert full coverage or disguise it as a structural component. "
+        "Ask simply to remove the uniquely identified object, including its "
+        "structural component when needed for clarity. Do not "
+        "describe reconstruction or authorize independent neighboring changes."
     ),
     "replace": (
         "The outline must contain one complete physical object with no missing "
         "dependent object outside it, including in an inner outlined hole. "
-        "Otherwise mark incompatible. Both instruction fields must explicitly say "
+        "Inspect thin structural extensions of that SAME object, not just its "
+        "main mass. If the outline omits such attached components, list them "
+        "separately in structural_parts, mark complete_part and use complete "
+        "refinement; downstream segmentation must confirm their attachment. "
+        "This exception does not include independent supported/held objects "
+        "or another instance. Otherwise mark incompatible. The instruction must explicitly say "
         "Replace [uniquely identified old object] with [concrete new object]; "
         "never stop after naming the old object. Choose a photorealistic, "
         "scene-plausible replacement of roughly compatible apparent size that can "
         "physically occupy the same support and setting. A change "
         "only to its color, material, pattern, text, or styling is insufficient. "
         "Do not request changes outside the outline."
+        " Do not invent an interaction with another object or a new supporting "
+        "entity; choose something feasible in the existing space. Inspect the "
+        "old object's actual contacts before choosing the replacement. If an "
+        "independent held or carried item is outside the outline, do not claim "
+        "there are no dependencies merely because it will be protected. This "
+        "pipeline cannot repair that external interaction; mark incompatible."
     ),
     "attribute": (
         "Change one conspicuous visual property of the outlined content while "
         "retaining its identity and shape. Name the exact desired property value, "
         "not merely 'different'. The change must remain visible at full-image "
         "scale and fit entirely within the outline; otherwise mark incompatible."
+        " Choose a clearly contrasting change, not 'slightly' brighter/darker. "
+        "An object carried by a person is not part of the person's mask. "
+        "Prefer a visible surface property, not a new pose or shape."
+        " Identify the material or visible surface to change. If the selected "
+        "extent mixes body parts or materials, choose one clearly identifiable "
+        "surface within it and request surface refinement. Do not recolor a "
+        "whole person, head-and-shoulder silhouette, or a framed reflective object "
+        "as one solid shape. Preserve meaningful surface structure; an optical "
+        "property applies to the optical surface, not its decorative surround."
+        " Name the smallest complete visible part actually selected, not its "
+        "larger owner or the whole repeated group. A narrow strip is not every "
+        "surface of the structure. If the extent contains different functional "
+        "components, choose one material and use surface refinement; do not "
+        "treat an object's front silhouette as one paintable sheet."
     ),
 }
 
 PROMPT = """Design one localized image-editing training example.
 
 IMAGE 1 is the clean, unmarked full source. IMAGE 2 is a magnified crop of its original photographic pixels with surrounding context retained. The thin black/white outline in IMAGE 2 marks the exact existing mask; only pixels INSIDE it are the selected content. Inner outlined holes are outside the mask. The label and outline are annotations, not colors or objects in the scene. Use the full source to understand other instances and spatial relations.
+<<<GEOMETRY>>>
+<<<REFERENCE>>>
+Trace the WHOLE selected extent, including portions touching the photo boundary. Do not select the narrow object alongside a large outlined surface or an object in a hole. Geometry describes membership, not object identity. If uncertain which side is selected, mark incompatible.
+Ground the edit before writing it: inspect the boundary and holes, identify only the included object or part, then check its real contacts and visible placement surfaces. The dataset reference may name a larger owner or group; it does not override the exact outline. Do not choose an appealing instruction first and rationalize the coverage afterward.
 Required edit type: <<<TASK_TYPE>>>
 
 Rules for this edit type:
@@ -102,12 +151,17 @@ Output requirements:
 - If the outlined pixels really contain multiple independent objects, mark incompatible rather than treating their group as one editable instance.
 - `edit_unit_status`: `complete_object` for a whole independent object, `complete_part` for a coherent local part, or `incomplete` for a fragment or mixed extent.
 - `outside_dependencies`: name any visible object supported or carried BY the selected content but outside the outline, or write `none`. A surface supporting the selected content is not its dependency. An object held by a DIFFERENT person is independent, not a dependency, and must not enter the target description.
-- `refer_object`: in at most 14 words, name exactly the selected content and include the shortest sufficient locator based on IMAGE 1. Prefer its full-image position; include a different, stable landmark only when needed. The phrase must uniquely identify this instance even to someone seeing only the clean full source; shared color, texture, category, or vague depth words such as "background" alone are not enough. If similar instances exist, contrast their left/right/center positions or relation to a distinctive landmark. Do not use the target itself as its own landmark, list unrelated possessions, or use a position relative only to the crop.
-- `mask_compatibility`: `compatible` only when this edit can be done coherently for this exact content and extent; otherwise `incompatible`. Give the rejection reason in `compatibility_reason`.
-- If compatible, `editing_instruction` must be a direct 4-24-word command that repeats the `refer_object` wording as closely as grammar allows, retaining its distinguishing position and landmark, and clearly states the result. `new_instruction` must express the same edit in 3-18 words; the regional editor receives `refer_object` separately. Avoid explanations, background recipes, and default-preservation clauses.
+- `refer_object`: use 3-14 words naming the selected object/surface and the shortest sufficient full-image locator. Mentally hide the outline and search the WHOLE image for other objects matching this phrase. If more than one matches, include an ordinal within a clearly named row/group or a stable visible neighbor relation. A broad left/right/middle label is insufficient when that area contains several similar instances. Do not use the proposed new appearance to locate an existing instance. For a surface task name the surface and its owner/location, not a whole person. Repeat this short reference in editing_instruction.
+- `mask_compatibility`: `compatible` only when this edit can be done coherently for this exact content and extent; otherwise `incompatible`. In `compatibility_reason`, briefly state the actual visible boundary/part or contact that makes the task feasible, or the specific missing coverage/dependency that makes it infeasible. Do not merely assert that the mask is suitable or complete.
+- If compatible, `editing_instruction` must be one direct 4-24-word command containing the short refer_object and the result. No second paraphrase is needed. Avoid explanations, background recipes, and default-preservation clauses.
 - Instruction text must stand alone on IMAGE 1: no mask, contour, label, crop, image number, panel, bbox, or coordinates. Use ASCII English.
+- Use left/right for full-image instance locations, not anatomical left/right body parts. Prefer the part's visible action or neighboring landmark; if that still leaves two plausible targets, choose another visible edit location or mark incompatible. Do not invent an unseen part to satisfy the requested type.
+- `segmentation_target`: 1-6 words naming the EXISTING object/surface in IMAGE 1. For a new addition, this is the existing anchor; for substitution, it is the OLD object. NEVER put a proposed new object here. No positions or scene descriptions. Downstream segmentation runs on the source photograph.
+- `mask_refinement`: <<<MASK_POLICY>>> Refinement cannot authorize changing an independent neighboring object.
+- `protected_objects`: at most four plain category names of 1-3 words, for visible neighboring instances. No positions, colors, actions or long descriptions. These are segmentation queries, not instructions.
+<<<STRUCTURAL_PARTS>>>
 
-Return exactly one JSON object with these keys and no markdown: `masked_content`, `edit_unit_status`, `outside_dependencies`, `refer_object`, `mask_compatibility`, `compatibility_reason`, `editing_instruction`, `new_instruction`. For an incompatible case, leave both instruction fields empty.
+Return exactly one JSON object with these keys and no markdown: `masked_content`, `edit_unit_status`, `outside_dependencies`, `refer_object`, `mask_compatibility`, `compatibility_reason`, `editing_instruction`, `segmentation_target`, `mask_refinement`, `protected_objects`<<<PARTS_KEY>>>. For an incompatible case, leave editing_instruction empty. Keep masked_content a short factual inventory, not a narrative.
 """
 
 
@@ -250,6 +304,74 @@ def build_prompt(row: dict[str, Any], task_type: str) -> str:
     return (
         PROMPT.replace("<<<TASK_TYPE>>>", task_type)
         .replace("<<<TYPE_GUIDANCE>>>", TYPE_GUIDANCE[task_type])
+        .replace("<<<GEOMETRY>>>", row.get("mask_geometry_hint", ""))
+        .replace("<<<REFERENCE>>>", source_reference_hint(row))
+        .replace('<<<MASK_POLICY>>>', {
+            'attribute':'Use `original` for the same extent or `surface` for a smaller coherent material surface inside it. `complete` is not allowed for this task.',
+            'add':'Use `original`; this is the placement anchor, not a new object mask.',
+            'remove':'Use `complete` to verify the full physical removal unit including its structural parts. Unresolved segmentation blocks generation.',
+            'replace':'Use `complete` to verify the full old object footprint. Unresolved segmentation blocks generation.',
+        }[task_type])
+        .replace('<<<STRUCTURAL_PARTS>>>', '- `structural_parts`: separately localized short noun phrases for visible structural components belonging to the same old object but outside the current outline; at most three, or an empty list. Independent objects are never structural parts. Inspect narrow extensions and interior holes before claiming the outline is complete.' if task_type in {'remove','replace'} else '')
+        .replace('<<<PARTS_KEY>>>', ', `structural_parts`' if task_type in {'remove','replace'} else '')
+    )
+
+
+def source_reference_hint(row: dict[str, Any]) -> str:
+    """Recover dataset referring text without SAMTok tokens or guessed mask labels."""
+    from synthesis_pipeline.reference_binding import bind_reference, binding_prompt
+    binding=row.get('reference_binding')
+    if binding is None and 'mask_index' in row and ('num_masks' in row or 'masks' in row):
+        binding=bind_reference(row.get('answer',''),int(row['mask_index']),int(row.get('num_masks',len(row.get('masks',[])))))
+    if binding:
+        prompt=binding_prompt(binding)
+        if prompt:
+            return prompt
+    problem = str(row.get('problem', '')).replace('<image>', '').strip()
+    answer = str(row.get('answer', '')).strip()
+    parsed = None
+    try:
+        parsed = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', answer))
+    except (ValueError, TypeError):
+        pass
+    if isinstance(parsed, list):
+        answer = '; '.join(str(x.get('label', '')) for x in parsed if isinstance(x, dict))
+    answer = re.sub(r'<\|[^>]+\|>', '', answer)
+    text = ' '.join((problem + ' ' + answer).split())
+    if not text:
+        return ''
+    return (
+        'Dataset referring context (may describe several regions, not all selected): '
+        + text[:1800]
+        + '\nUse this only as an identity cross-check against the actual outlined pixels. '
+        'It does not authorize editing the other listed regions. If annotation and visible '
+        'mask extent conflict, do not invent a match: mark incompatible.'
+    )
+
+
+def mask_geometry_hint(mask: np.ndarray) -> str:
+    """Give measured membership evidence, never a guessed semantic target."""
+    binary = np.asarray(mask, dtype=bool)
+    if binary.ndim != 2 or not binary.any():
+        raise ValueError("Expected a nonempty 2D mask")
+    h, w = binary.shape
+    ys, xs = np.nonzero(binary)
+    cells = []
+    for yi, yn in enumerate(("top", "middle", "bottom")):
+        for xi, xn in enumerate(("left", "center", "right")):
+            cell = binary[round(h * yi / 3):round(h * (yi + 1) / 3),
+                          round(w * xi / 3):round(w * (xi + 1) / 3)]
+            if cell.size and cell.mean() >= .05:
+                cells.append(f"{yn}-{xn} {cell.mean():.0%}")
+    edges = [name for name, arr in (("left", binary[:, 0]), ("right", binary[:, -1]),
+                                   ("top", binary[0]), ("bottom", binary[-1])) if arr.any()]
+    return (
+        f"Measured target geometry in IMAGE 1: selected pixels cover {binary.mean():.1%} "
+        f"of the FULL photo. Bounding extent: x={xs.min()/w:.0%}..{(xs.max()+1)/w:.0%}, "
+        f"y={ys.min()/h:.0%}..{(ys.max()+1)/h:.0%} (left/top = 0%). "
+        f"Photo edges touched: {', '.join(edges) or 'none'}. "
+        "Selected fraction within occupied cells of the full-photo 3x3 grid: "
+        + "; ".join(cells) + ". These coordinates are input evidence only, never instruction text."
     )
 
 
@@ -264,14 +386,15 @@ def instruction_messages(
     prompt = build_prompt(row, task_type)
     if previous_response is not None:
         prompt += (
-            "\n\nYour previous JSON failed validation. "
+            "\n\nPrevious INVALID response (not source evidence; correct it rather than treating it as fact):\n"
+            + previous_response[:5000]
+            + "\nYour previous JSON failed validation. "
             + (f"Specific issue: {validation_feedback} " if validation_feedback else "")
             + "Do not repeat the same JSON. Reinspect IMAGE 2: inventory "
             "only the photographic content inside its outline. Give refer_object a "
             "short, unique locator from IMAGE 1, then retain its distinguishing "
             "position and landmark in editing_instruction. Keep the full "
-            "instruction to 4-24 words and the "
-            "regional instruction to 3-18 words. Follow the stated edit-type rule; "
+            "instruction to 4-24 words; no separate paraphrase is needed. Follow the stated edit-type rule; "
             "do not choose a different object. If this exact edit is genuinely "
             "infeasible, mark incompatible, but do not reject it merely because "
             "your earlier wording was invalid. Do not mention input annotations."
@@ -424,13 +547,13 @@ LOCATOR_PATTERN = re.compile(
 STRONG_LOCATOR_PATTERN = re.compile(
     r"\b(?:left(?:most)?|right(?:most)?|center|central|middle|upper|lower|"
     r"top|bottom|front|rear|back|nearest|closest|farther|farthest|beside|near|next to|"
-    r"above|below|beneath|behind|between|adjacent|opposite|first|last|"
+    r"above|below|beneath|under|behind|between|adjacent|opposite|first|last|"
     r"handstand|upside[ -]down)\b",
     flags=re.IGNORECASE,
 )
 RELATION_ANCHOR_PATTERN = re.compile(
     r"\b(?:left|right)\s+of\b|"
-    r"\b(?:near|beside|behind|above|below|beneath|opposite)\b|"
+    r"\b(?:near|beside|behind|above|below|beneath|under|opposite)\b|"
     r"\b(?:next|adjacent)\s+to\b",
     flags=re.IGNORECASE,
 )
@@ -580,10 +703,49 @@ def contains_distinctive_reference(instruction: str, refer_object: str) -> bool:
     return bool(reference_terms) and overlap / len(reference_terms) >= 0.5
 
 
+def protected_dependency_conflicts(value: dict[str, Any], task_type: str) -> list[str]:
+    """Catch an explicit contradiction, not infer ownership from proximity.
+
+    The current contract forbids outside dependencies for both removal and
+    replacement. A protected held object does not become dependency-free merely
+    because a proposed replacement might be able to hold it. Attribute edits
+    retain the owner and therefore do not trigger this guard.
+    """
+    if task_type not in {'remove', 'replace'} or value.get('edit_unit_status') != 'complete_object':
+        return []
+    inventory = str(value.get('masked_content', '')).lower()
+    clauses = []
+    for match in re.finditer(r'\b(?:holding|carrying|wearing|supporting)\s+([^.;]+)', inventory):
+        # Do not absorb the description of a separate neighboring instance.
+        clause = re.split(r'\b(?:beside|near|next to|behind|in front of|while|who)\b', match.group(1))[0]
+        clauses.append(set(re.findall(r'[a-z]+', clause)))
+    conflicts = []
+    for query in value.get('protected_objects', []) or []:
+        if not isinstance(query, str):
+            continue
+        tokens = set(re.findall(r'[a-z]+', query.lower())) - SUBJECT_STOPWORDS
+        if tokens and any(tokens <= clause for clause in clauses):
+            conflicts.append(query)
+    return conflicts
+
+
+def ambiguous_anatomical_side(value: dict[str, Any]) -> bool:
+    """Require observable references instead of unchecked anatomical laterality.
+
+    This is a wording policy, not a claim to infer body pose from text. Scene
+    locators such as 'the man on the left' remain valid.
+    """
+    return bool(re.search(
+        r'\b(?:left|right)[ -]+(?:wrist|hand|arm|elbow|shoulder|knee|ankle|foot|leg|ear|eye)\b',
+        str(value.get('editing_instruction', '')), re.I))
+
+
 def validation_feedback(value: dict[str, Any] | None, task_type: str) -> str:
     """Give the same VLM a concrete correction instead of a generic retry."""
     if not value:
         return "Return one complete JSON object with the requested keys."
+    value=dict(value)
+    value.setdefault('new_instruction',value.get('editing_instruction',''))
     for key in (
         "masked_content", "edit_unit_status", "outside_dependencies",
         "refer_object", "mask_compatibility",
@@ -593,7 +755,7 @@ def validation_feedback(value: dict[str, Any] | None, task_type: str) -> str:
             return f"Fill the missing {key} field."
         if not field.isascii():
             return f"Rewrite {key} using ASCII English only."
-        if key in {"masked_content", "refer_object"} and FORBIDDEN_OUTPUT_PATTERN.search(field):
+        if key in {"masked_content", "refer_object"} and has_annotation_language(field):
             return f"Remove annotation or panel language from {key}; use only scene facts."
     status = str(value["edit_unit_status"]).lower().strip()
     dependencies = str(value["outside_dependencies"]).lower().strip()
@@ -602,6 +764,22 @@ def validation_feedback(value: dict[str, Any] | None, task_type: str) -> str:
         if not ascii_text(value.get("compatibility_reason", "")):
             return "Explain why this exact mask cannot support the edit in compatibility_reason."
         return "Ensure the incompatibility reason describes a real mask or scene limitation."
+    conflicts = protected_dependency_conflicts(value, task_type)
+    if conflicts:
+        return ("Your masked_content says the old target holds/carries/wears "
+                + ', '.join(conflicts) + ", but protected_objects freezes those items. "
+                "Recheck the images and mask holes: do not leave unsupported belongings, "
+                "do not silently remove the protection to expand the mask. If they lie "
+                "outside this edit unit, mark incompatible and explain the dependency.")
+    if ambiguous_anatomical_side(value):
+        return ("Do not guess anatomical left/right from screen position. Reinspect "
+                "the visible part and locate it using its action or a visible landmark, "
+                "while retaining the owner's unique full-image locator. If no unique "
+                "visible attachment point exists, mark incompatible.")
+    if 'segmentation_target' in value and value.get('mask_refinement') not in allowed_mask_policies(task_type):
+        return f"For {task_type}, mask_refinement must be one of {sorted(allowed_mask_policies(task_type))}; choose a concrete coherent surface when the original extent mixes materials."
+    if '%' in str(value.get('editing_instruction','')):
+        return 'Use a natural spatial description, not numeric coordinates or percentages, in the public instruction.'
     if MULTI_INSTANCE_PATTERN.search(str(value["masked_content"])):
         return "The outlined content contains multiple objects; mark it incompatible rather than editing the group as one instance."
     if task_type in {"remove", "replace"} and GROUP_TARGET_PATTERN.search(
@@ -627,14 +805,14 @@ def validation_feedback(value: dict[str, Any] | None, task_type: str) -> str:
             return f"Fill {key} with the required edit and result."
         if not field.isascii():
             return f"Rewrite {key} using ASCII English only."
-        if FORBIDDEN_OUTPUT_PATTERN.search(field):
+        if has_annotation_language(field):
             return f"Remove annotation or panel language from {key}; use clean-source directions only."
     full = ascii_text(value["editing_instruction"])
     regional = ascii_text(value["new_instruction"])
     if not 4 <= len(full.split()) <= 24:
         return "Keep editing_instruction to 4-24 words without losing the target locator."
-    if not 3 <= len(regional.split()) <= 18:
-        return "Keep new_instruction to 3-18 words while retaining the same edit."
+    if not 3 <= len(regional.split()) <= 24:
+        return "Keep the instruction to at most 24 words while retaining the same edit."
     if not contains_distinctive_reference(full, refer):
         if task_type == "add" and RELATION_ANCHOR_PATTERN.search(refer):
             return (
@@ -658,6 +836,8 @@ def validation_feedback(value: dict[str, Any] | None, task_type: str) -> str:
         return "The requested new item repeats the already-masked target category; choose a different small addition anchored to this instance."
     if task_type == "attribute" and adds_unmasked_wearable(full, str(value["masked_content"])):
         return "The requested wearable is absent from the masked content; change an existing visible property instead."
+    if task_type == 'attribute' and unsafe_surface_attribute(full):
+        return 'Name the actual material surface to edit; do not paint a mixed human silhouette or erase a decorative surround. Use surface refinement for a coherent subpart.'
     if task_type == "replace" and not re.search(r"\breplace\b.+\bwith\b", full, re.IGNORECASE):
         return "Name a concrete new object after 'with' in both replacement instructions."
     if task_type == "replace":
@@ -666,7 +846,8 @@ def validation_feedback(value: dict[str, Any] | None, task_type: str) -> str:
         replacement_tokens = set(re.findall(r"[a-z]+", replacement_text))
         if not (replacement_tokens - refer_tokens - REPLACEMENT_GENERIC_WORDS):
             return "The instruction names only the old target; put a concrete new object after the final 'with'."
-        if same_replacement_category(refer, replacement_text):
+        source_phrase = re.split(r'\bwith\b', full.lower())[-2] if ' with ' in full.lower() else refer
+        if same_replacement_category(refer, replacement_text) or same_replacement_category(source_phrase, replacement_text):
             return "The proposed replacement keeps the same object category and changes only styling; choose a genuinely different category or identity."
         if NON_PHOTOREALISTIC_REPLACEMENT.search(replacement_text):
             return "Choose a photorealistic replacement that belongs naturally in this scene."
@@ -747,7 +928,7 @@ def adds_unmasked_wearable(instruction: str, masked_content: str) -> bool:
 def same_replacement_category(refer_object: str, replacement_text: str) -> bool:
     """Catch a material/style variant of the same head object category."""
     old_segment = re.split(
-        r"\b(?:with|on|near|beside|behind|in|at|under|above|by|of)\b",
+        r"\b(?:with|on|near|beside|behind|between|in|at|under|above|by|of|holding|carrying|wearing|standing|sitting|facing|located|positioned)\b",
         refer_object,
         maxsplit=1,
         flags=re.IGNORECASE,
@@ -757,12 +938,19 @@ def same_replacement_category(refer_object: str, replacement_text: str) -> bool:
         for token in re.findall(r"[a-z]+", old_segment.lower())
         if token not in REPLACEMENT_GENERIC_WORDS
     ]
+    new_segment = re.split(
+        r"\b(?:with|on|near|beside|behind|in|at|under|above|by|of|holding|carrying|wearing|standing|sitting|facing|located|positioned)\b",
+        replacement_text, maxsplit=1, flags=re.IGNORECASE,
+    )[0]
     new_terms = [
         _singular_token(token)
-        for token in re.findall(r"[a-z]+", replacement_text.lower())
+        for token in re.findall(r"[a-z]+", new_segment.lower())
         if token not in REPLACEMENT_GENERIC_WORDS
     ]
-    return bool(old_terms and new_terms) and old_terms[-1] == new_terms[0]
+    aliases={'twig':'branch','bough':'branch','stick':'branch'}
+    old_terms=[aliases.get(x,x) for x in old_terms]
+    new_terms=[aliases.get(x,x) for x in new_terms]
+    return bool(old_terms and new_terms) and old_terms[-1] in {new_terms[0], new_terms[-1]}
 
 
 def replacement_text_from_instruction(instruction: str) -> str:
@@ -778,6 +966,9 @@ def normalize_generated(
 ) -> dict[str, str] | None:
     if not value:
         return None
+    value=dict(value)
+    if 'new_instruction' not in value:
+        value['new_instruction']=value.get('editing_instruction','')
     normalized: dict[str, str] = {}
     raw_status = value.get("edit_unit_status", "")
     if isinstance(raw_status, bool):
@@ -807,7 +998,7 @@ def normalize_generated(
             continue
         if not text or not text.isascii():
             return None
-        if key in {"masked_content", "refer_object"} and FORBIDDEN_OUTPUT_PATTERN.search(text):
+        if key in {"masked_content", "refer_object"} and has_annotation_language(text):
             return None
         normalized[key] = text
 
@@ -848,13 +1039,24 @@ def normalize_generated(
         )
     ):
         return None
-    if task_type in {"remove", "replace"} and edit_unit_status != "complete_object":
+    pending_part_completion = (
+        task_type in {'remove','replace'} and edit_unit_status == 'complete_part'
+        and value.get('mask_refinement') == 'complete'
+        and isinstance(value.get('structural_parts'),list)
+        and 0 < len(value['structural_parts']) <= 3
+        and bool(value.get('segmentation_target'))
+    )
+    if task_type in {"remove", "replace"} and edit_unit_status != "complete_object" and not pending_part_completion:
         return None
-    if task_type in {"remove", "replace"} and PARTIAL_EDIT_UNIT_PATTERN.search(
+    if task_type in {"remove", "replace"} and not pending_part_completion and PARTIAL_EDIT_UNIT_PATTERN.search(
         normalized["masked_content"]
     ):
         return None
     if task_type in {"remove", "replace"} and has_outside_dependencies:
+        return None
+    if protected_dependency_conflicts(value, task_type):
+        return None
+    if ambiguous_anatomical_side(value):
         return None
     if not 2 <= len(normalized["refer_object"].split()) <= 14:
         return None
@@ -875,12 +1077,12 @@ def normalize_generated(
 
     for key in ("editing_instruction", "new_instruction"):
         text = remove_panel_location(ascii_text(value.get(key, "")))
-        if not text or not text.isascii() or FORBIDDEN_OUTPUT_PATTERN.search(text):
+        if not text or not text.isascii() or has_annotation_language(text):
             return None
         normalized[key] = text
     full_words = len(normalized["editing_instruction"].split())
     regional_words = len(normalized["new_instruction"].split())
-    if not 4 <= full_words <= 24 or not 3 <= regional_words <= 18:
+    if not 4 <= full_words <= 24 or not 3 <= regional_words <= 24:
         return None
     if any(
         GENERIC_INSTRUCTION_PATTERN.search(normalized[key])
@@ -929,7 +1131,9 @@ def normalize_generated(
             or not novel_replacement_tokens
         ):
             return None
-        if same_replacement_category(normalized["refer_object"], replacement_text):
+        source_phrase = re.split(r'\bwith\b', lowered_instruction)[-2]
+        if (same_replacement_category(normalized["refer_object"], replacement_text)
+                or same_replacement_category(source_phrase.removeprefix('replace '), replacement_text)):
             return None
         if NON_PHOTOREALISTIC_REPLACEMENT.search(replacement_text):
             return None
@@ -956,7 +1160,57 @@ def normalize_generated(
         for key in ("editing_instruction", "new_instruction")
     ):
         return None
+    if task_type == 'attribute' and unsafe_surface_attribute(normalized['editing_instruction']):
+        return None
+    if task_type == 'replace':
+        replacement = replacement_text_from_instruction(normalized['editing_instruction'])
+        if refer_tokens & HUMAN_IDENTITY_TERMS and re.match(r'(?:a |an |the )?(?:person|human|figure)\b', replacement):
+            return None
+    # Legacy responses can omit these fields. New planning uses the same call.
+    if 'segmentation_target' in value:
+        phrase = ascii_text(value['segmentation_target'])
+        policy = str(value.get('mask_refinement', 'original')).strip().lower()
+        neighbors = value.get('protected_objects', [])
+        if not 1 <= len(phrase.split()) <= 8 or policy not in allowed_mask_policies(task_type):
+            return None
+        if not isinstance(neighbors,list) or len(neighbors)>4 or any(not isinstance(x,str) or not 1<=len(x.split())<=6 for x in neighbors):
+            return None
+        if policy == 'surface' and task_type != 'attribute':
+            return None
+        normalized.update(segmentation_target=phrase,mask_refinement=policy,
+                          protected_objects=[ascii_text(x) for x in neighbors])
+        if 'structural_parts' in value:
+            parts=value['structural_parts']
+            if not isinstance(parts,list) or len(parts)>3 or any(not isinstance(x,str) or not 1<=len(x.split())<=6 for x in parts):
+                return None
+            normalized['structural_parts']=list(dict.fromkeys(ascii_text(x) for x in parts))
     return normalized
+
+
+def allowed_mask_policies(task_type):
+    return {'attribute':{'original','surface'},'add':{'original'},
+            'remove':{'complete'},'replace':{'complete'}}[task_type]
+
+
+def has_annotation_language(text):
+    # A physical face covering is not a segmentation annotation.
+    cleaned=re.sub(r'\b(?:face|surgical|medical|protective) masks?\b','face covering',text,flags=re.I)
+    return bool(FORBIDDEN_OUTPUT_PATTERN.search(cleaned))
+
+
+def unsafe_surface_attribute(instruction: str) -> bool:
+    """Reject broad human/optical fills while allowing named real surfaces."""
+    text = instruction.lower()
+    color = re.search(r'\b(red|blue|green|yellow|purple|white|black|gold|silver|pink)\b', text)
+    subject = re.split(r'\b(?:of|held|carried|worn|near|beside|behind|at)\b',text,maxsplit=1)[0]
+    if re.search(r'\bhead\b.*\bshoulder',subject):
+        return True
+    broad_human = re.search(r'\b(person|man|woman|girl|boy|head|shoulder)\b',subject)
+    named_surface = re.search(r'\b(hair|shirt|coat|jacket|vest|dress|skin|hat|trousers|pants|sleeve|fabric)\b',text)
+    if color and broad_human and not named_surface:
+        return True
+    return bool(re.search(r'\bmirror\b',text) and re.search(r'opaque|non.reflective|polished|glossy|frosted',text)
+                and not re.search(r'\b(glass|pane|surface|frame|border)\b',text))
 
 
 def deterministic_fallback(raw: str, task_type: str) -> dict[str, str] | None:
@@ -1162,6 +1416,7 @@ def main() -> None:
     write_jsonl(args.output_dir / "candidate_source_rows.jsonl", candidates)
 
     read_started = time.perf_counter()
+    import pyarrow.parquet as pq
     image_column = pq.read_table(args.parquet, columns=["images"])["images"]
     image_read_seconds = time.perf_counter() - read_started
 
@@ -1185,7 +1440,7 @@ def main() -> None:
             target_crop.save(crop_dir / crop_name)
             tasks.append(
                 {
-                    "row": row,
+                    "row": {**row, "mask_index":mask_index, "mask_geometry_hint": mask_geometry_hint(mask)},
                     "mask_index": mask_index,
                     "task_type": task_type,
                     "source": source.copy(),
@@ -1401,12 +1656,14 @@ def main() -> None:
         row_index = int(row["parquet_row_index"])
         edits = []
         for task in sorted(tasks_by_row[row_index], key=lambda value: value["mask_index"]):
+            from synthesis_pipeline.reference_binding import bind_reference
             edits.append(
                 {
                     "mask_index": task["mask_index"],
                     "name": f"auto_{task['task_type']}",
                     "task_type": task["task_type"],
                     "planning_visual_input": PLANNING_VISUAL_INPUT_VERSION,
+                    "reference_binding":bind_reference(row['answer'],task['mask_index'],row['num_masks']),
                     **task["generated"],
                 }
             )

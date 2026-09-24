@@ -1,0 +1,20 @@
+{"image":"000_gres_r564_m0_add.png","source_scope":"pass","reason":"原mask含中间沙发上老人的头和上身，头顶可见，红毛线帽是可在该宿主局部新增的任务；没有把整个人mask理解成必须改遍全身。成图另行复核。"}
+{"image":"001_gres_r564_m1_remove.png","source_scope":"pass","reason":"桌上打开的笔记本屏幕和键盘底座均被覆盖，附近手和桌面属于独立背景；完整对象分割仅小幅补足边缘，删除对象和范围相符。成图另行复核。"}
+{"image":"002_gres_r2490_m0_replace.png","source_scope":"not_generated","rejection_assessment":"likely_false_rejection","reason":"后方模型飞机的机头被前方飞机遮挡；初始规划把不可见部分当成缺失mask，从而拒绝整体替换。这是遮挡与不完整的混淆，尚未修好，不能算安全检查的正确拒绝。"}
+{"image":"003_gres_r2490_m1_attribute.png","source_scope":"blocked","rejection_assessment":"surface_recall_loss","reason":"前景飞机白色机身改黄是范围内的合理局部任务，但白色表面、蓝色条纹与红色圆点需要分离。SAM未给出足够可靠的白色表面mask，最终阻断；不能使用整个飞机mask冒充白色表面已定位。"}
+{"image":"004_gres_r5303_m0_add.png","source_scope":"not_generated","rejection_assessment":"planning_output_failure","reason":"左下橙片中央存在可见果肉表面，可设计局部新增；初始规划三次没有得到可用解析结果，并非已经证明此源无法编辑。属于规划失败/召回损失。"}
+{"image":"005_gres_r5303_m1_remove.png","source_scope":"blocked","rejection_assessment":"reasonable_block_wrong_explanation","reason":"橙片上有依赖其支撑的蝴蝶，删除橙片而保留蝴蝶存在物理关系风险，拦截合理；但规划声称mask把蝴蝶身体和翅膀包括了，轮廓实际大体绕开了翅膀。拒绝结果合理，不代表模型的边界解释正确。"}
+{"image":"006_gres_r1440_m0_replace.png","source_scope":"not_generated","rejection_assessment":"false_rejection","reason":"灰衣男子的下身被桌面/画框遮挡，可见上身是合理的人物替换单元；模型以人不是physical object以及缺下肢为由拒绝，理由错误。此类过度拒绝仍需修复，不能计为成功。"}
+{"image":"007_gres_r1440_m1_attribute.png","source_scope":"pass","reason":"明确定位在灰衣男子与戴帽男子之间的人，执行mask从整人缩小到红T恤，保留头、手臂和邻人手里的食物；范围与改衣色动作一致。成图另行复核。"}
+{"image":"008_gres_r7600_m0_add.png","source_scope":"pass","reason":"两匹马中以左侧深棕马定位，缰具在头部清楚可见，可以挂小铃；SAM回退只证明马的宿主对应，没有单独证明铃的精确挂点，因此成图仍需看是否挂对位置。"}
+{"image":"009_gres_r7600_m1_remove.png","source_scope":"blocked","rejection_assessment":"dependency_guard","reason":"MLLM核对仍accept，即使其理由承认牵引绳未全部包含。独立lead rope分割发现约11.7%的可见绳像素在原选区外，因此阻断删除，避免残留绳段。本次证明代码门控补上了模型自相矛盾，不证明模型已能可靠检查依附物。"}
+{"image":"010_ver_r7524_m0_replace.png","source_scope":"blocked","rejection_assessment":"reasonable_block","reason":"原mask仅含人力车的自行车车架和轮子，未含相连客舱；按整个人力车进行替换会留下旧车厢，拒绝合理。更局部的部件替换可作为未来任务，当前没有强行扩范围。"}
+{"image":"011_ver_r7524_m1_attribute.png","source_scope":"blocked","rejection_assessment":"bad_scope_revision","reason":"原任务只改绿色车棚和侧板，范围核对却企图扩大成整辆车改黄，与禁止扩大材质编辑的规则相反；最终因字段/指代校验未通过而未生成，但语义扩大本身仍未被可靠识别。不能说本例指令已修好。"}
+{"image":"012_ver_r12071_m0_add.png","source_scope":"not_generated","rejection_assessment":"reference_field_false_rejection","reason":"原指令保留了桌右边缘的包装宿主位置，但核对输出的refer_object丢掉定位词，导致两次结构校验失败。物件看起来是扁平包装而非厚盒，也不宜凭场景断言其顶面支撑。未生成；字段不一致和材质命名需要下一步处理。"}
+{"image":"013_ver_r12071_m1_remove.png","source_scope":"blocked","rejection_assessment":"semantic_query_unresolved","reason":"源图是一个有明显孔位/标记的方形白色物件，不能仅因医疗场景叫它试剂盒；核对还把初始的一叠改成单个而未解决类别疑点。SAM对试剂盒查询在全图及局部均无候选，最终阻断，未把不可靠类别标签送入出图。"}
+{"image":"015_ver_r11132_m1_attribute.png","source_scope":"pass","reason":"仅选左下背景可见的一小段河水，SAM执行表面与原mask基本重合，没有把人前方石墙或大片树林当作水面。局部河水改色任务范围清楚；成图另行复核。"}
+{"image":"014_ver_r11132_m0_replace.png","source_scope":"blocked","rejection_assessment":"policy_restriction","reason":"选区是人物身后的树林带而不是人物，模型没有把前景人当目标；当前replace限定独立对象而拒绝整片树林，这是任务政策限制，不是源数据无价值或mask有错。"}
+{"image":"016_ver_r9043_m0_add.png","source_scope":"pass","reason":"左前景河岸草地的可见平面在mask内，放一个野餐篮有自然支撑且宿主位置明确，不应放到河对岸。成图另行复核。"}
+{"image":"017_ver_r9043_m1_remove.png","source_scope":"pass","reason":"桥后左侧一组高树为完整可见目标，SAM补足树间叶片，未把前景黄树和桥主体纳入；原指令是复数树，不应只删其中一棵。是否补全背景自然属于后续成图检查。"}
+{"image":"018_ver_r8332_m0_replace.png","source_scope":"pass","reason":"白帽蜡染上衣男子在中央，手中没有持牌，后方标牌由其他人持有，应保持独立；人物mask覆盖其可见轮廓，替换蓝裙女子可执行。成图另行复核。"}
+{"image":"019_ver_r8332_m1_attribute.png","source_scope":"needs_label_correction","reason":"执行mask正确缩到左侧人物紫色花纹下装，没有改头巾、上衣或牌子；但从照片看更像围裹长裙，pants这一具体服饰类别不可靠。几何范围匹配不代表对象名称已正确，不能把此例计为完整指令通过。成图另行复核。"}

@@ -15,14 +15,8 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from inference_mydemo_qwen2511 import (
-    collect_crop_inputs,
-    load_crop_records,
-    load_qwen_pipeline,
-)
 from synthesis_pipeline.audit_edit_pairs import mask_array
-from utils.runner_qwen2511 import run_qwen_multi_branch
-from utils.context_edit import edit_context_crop
+from utils.context_edit import edit_context_crop, protected_neighbors, validate_refinement_execution
 
 DEV_IDS = [0, 10, 20, 72, 1, 15, 25, 67, 34, 40, 44, 64, 13, 19, 23, 83]
 
@@ -41,6 +35,12 @@ def main():
             "context_guided",
             "context_guided_attribute",
             "context_guided_attribute_v2",
+            "context_guarded",
+            "context_guarded_v2",
+            "context_grounded_v3",
+            "context_grounded_v4",
+            "context_grounded_v3_qwen21",
+            "context_grounded_v4_qwen21",
         ],
         required=True,
     )
@@ -48,6 +48,15 @@ def main():
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1)
     p.add_argument("--steps", type=int, default=40)
+    p.add_argument('--qwen21-prompt-policy', choices=['legacy', 'typed-v1','remove-shadow-v2','remove-evidence-v1','remove-parts-v1','remove-context-v1','relation-compact-v1','relation-spatial-v1','relation-located-v2','relation-action-v3'], default='legacy')
+    p.add_argument('--qwen21-backend', choices=['diffusers', 'vllm-omni'], default='diffusers',
+                   help='Qwen-Image-2.1 execution backend; vllm-omni uses its official Omni API')
+    p.add_argument('--qwen21-target-guide',action='store_true',help='Add aligned boundary guide as second condition; clean image remains first')
+    p.add_argument('--removal-conditioning',choices=['source','erase-neutral-v1','erase-prefill-v1','erase-neutral-v2'],default='source')
+    p.add_argument('--seed',type=int,default=0)
+    p.add_argument('--remove-composition-policy',choices=['legacy','adaptive-remove-v1','adaptive-remove-v2','adaptive-remove-v3','adaptive-remove-v4','adaptive-remove-v5'],default='legacy')
+    p.add_argument('--latent-protection-policy',choices=['legacy','guard-any-v1','guard-fraction-v1'],default='legacy')
+    p.add_argument('--relation-geometry-policy',choices=['legacy','visible-v1'],default='legacy')
     p.add_argument(
         "--manifest-only",
         action="store_true",
@@ -55,7 +64,7 @@ def main():
     )
     p.add_argument(
         "--model-id",
-        default="/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-Edit-2511",
+        default=None,
     )
     args = p.parse_args()
     wanted = {int(x) for x in args.ids.split(",")}
@@ -69,6 +78,8 @@ def main():
         raise ValueError("Missing requested cases")
     out = args.out_root / args.variant
     (out / "edited").mkdir(parents=True, exist_ok=True)
+    if args.manifest_only and not (out / 'sources').exists():
+        (out / 'sources').symlink_to((args.data_root / 'sources').resolve())
     if args.manifest_only:
         (out / "annotations.jsonl").write_text(
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
@@ -76,12 +87,30 @@ def main():
         print(out / "annotations.jsonl")
         return
     rows = rows[args.shard :: args.shards]
-    crops = load_crop_records(str(args.data_root / "crops/crop_instruction.jsonl"))
+    from inference_mydemo_qwen2511 import collect_crop_inputs, load_crop_records
+    from utils.qwen_pipeline_loader import load_qwen21_omni_pipeline, load_qwen_pipeline
+    from utils.runner_qwen2511 import run_qwen_multi_branch
+    crops = load_crop_records(str(args.data_root / "crops/crop_instruction.jsonl")) if args.variant == "mirage_relaxed" else {}
     pending = [r for r in rows if not (out / "edited" / r["image"]).exists()]
+    for row in pending:
+        validate_refinement_execution(row,args.variant)
     if not pending:
         return
     t = time.perf_counter()
-    pipe = load_qwen_pipeline(args.model_id, "cuda", torch.bfloat16, "none")
+    qwen21=args.variant in {
+        'context_grounded_v3_qwen21', 'context_grounded_v4_qwen21'}
+    model_id=args.model_id or (
+        '/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1'
+        if qwen21 else
+        '/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-Edit-2511')
+    if args.qwen21_backend == 'vllm-omni':
+        if not qwen21:
+            raise ValueError('--qwen21-backend=vllm-omni requires a Qwen-Image-2.1 variant')
+        pipe = load_qwen21_omni_pipeline(model_id)
+    else:
+        pipe = load_qwen_pipeline(
+            model_id,"cuda",torch.bfloat16,"none",
+            model_family='qwen21' if qwen21 else 'qwen2511')
     load_time = time.perf_counter() - t
     records = []
     for row in tqdm(pending, desc=args.variant):
@@ -90,7 +119,7 @@ def main():
             "RGB"
         )
         mask = mask_array(source.size, row["mask"])
-        generator = torch.Generator(device="cuda").manual_seed(0)
+        generator = torch.Generator(device="cuda").manual_seed(args.seed)
         if args.variant == "mirage_relaxed":
             prompts, boxes, masks = collect_crop_inputs(
                 crops[row["image"]], row["task_type"]
@@ -130,9 +159,11 @@ def main():
                 mask,
                 generator,
                 args.steps,
+                true_cfg_scale=1.0 if qwen21 else 4.0,
+                negative_prompt=None if qwen21 else " ",
                 remove_context_window=args.variant == "context_removewide",
                 diagnostics_dir=out / "diagnostics" / Path(row["image"]).stem,
-                target_guide=args.variant
+                target_guide=args.qwen21_target_guide or args.variant
                 in {
                     "context_guided",
                     "context_guided_attribute",
@@ -142,6 +173,20 @@ def main():
                 in {"context_guided_attribute", "context_guided_attribute_v2"},
                 preserve_attribute_texture=args.variant
                 == "context_guided_attribute_v2",
+                guarded_composition=args.variant in {"context_guarded", "context_guarded_v2"},
+                protected_mask=protected_neighbors(args.data_root, row, source.size)
+                if args.variant in {"context_guarded", "context_guarded_v2"} else None,
+                replacement_context_window=args.variant == "context_guarded_v2",
+                grounded_composition=args.variant in {
+                    'context_grounded_v3','context_grounded_v4',
+                    'context_grounded_v3_qwen21','context_grounded_v4_qwen21'},
+                regional_denoising=args.variant in {
+                    'context_grounded_v4','context_grounded_v4_qwen21'},
+                qwen21_prompt_policy=args.qwen21_prompt_policy,
+                remove_composition_policy=args.remove_composition_policy,
+                latent_protection_policy=args.latent_protection_policy,
+                relation_geometry_policy=args.relation_geometry_policy,
+                removal_conditioning=args.removal_conditioning,
             )
         image.save(out / "edited" / row["image"])
         record = {
@@ -149,7 +194,15 @@ def main():
             "variant": args.variant,
             "seconds": round(time.perf_counter() - start, 3),
             "steps": args.steps,
-            "seed": 0,
+            "seed": args.seed,
+            "latent_protection_policy":args.latent_protection_policy,
+            "relation_geometry_policy":args.relation_geometry_policy,
+            "remove_composition_policy": args.remove_composition_policy,
+            "model_id": model_id,
+            "pipeline_family": "qwen21" if qwen21 else "qwen2511",
+            "qwen21_backend": args.qwen21_backend if qwen21 else None,
+            "true_cfg_scale": 1.0 if qwen21 else 4.0,
+            "qwen21_prompt_policy": args.qwen21_prompt_policy if qwen21 else None,
         }
         records.append(record)
         with (out / f"timing_shard{args.shard}.jsonl").open("a") as f:
