@@ -40,7 +40,7 @@
 
 ## 2. 路径与生产结果
 
-基目录：`/mnt/bn/strategy-mllm-train/user/tanyue`。以下为 2026-09-24 整理时结果；本次未启动新的全量任务。
+基目录：`/mnt/bn/strategy-mllm-train/user/tanyue`。以下为 2026-09-24 已完成结果；当天四机全量尝试在环境初始化失败，新增筛选结果为 0，故下表不变。
 
 | 内容 | 基目录下路径 | 规模 |
 | --- | --- | ---: |
@@ -63,11 +63,11 @@
 
 ## 3. 单机 8 卡运行
 
-新机器运行 `bash scripts/setup_crispedit_env.sh` 创建 `.venv-crispedit`（统一 Qwen/vLLM + SAM3 环境）。本机现成 Python 如下，目录的历史名字不代表使用旧模型。以下在同一 shell 顺序执行；独立复跑应换新结果路径，不使用 `--overwrite`。
+在节点本地 clone 后运行 `bash scripts/setup_crispedit_env.sh`，创建本地 `.uv-python` 和 `.venv-crispedit`（统一 Qwen/vLLM + SAM3，只安装 headless OpenCV）。以下在同一 shell 顺序执行；独立复跑应换新结果路径，不使用 `--overwrite`。四机默认先通过各节点真实双图推理预检查再处理数据，完整入口见四机指南。
 
 ```bash
 cd /opt/tiger/tanyue/sam3-crispedit-crispedit-labeling
-PY=/opt/tiger/tanyue/sam3-crispedit/.venv-scaleedit-vllm/bin/python
+PY="$PWD/.venv-crispedit/bin/python"
 DATA=/mnt/bn/strategy-mllm-train/user/tanyue/datasets
 MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B
 
@@ -136,12 +136,12 @@ mask 目录包含 `grounding/`、`mask/`、`grounding.log`、`mask.log`、`valid
 仍有漏实例/部位、局部扩大到宿主、稀疏物为空等问题。本次整理不声称修好了这些质量问题，后续见[迭代记录](CRISPEDIT_MASK_ITERATION.md)。
 
 2026-09-24 整理后真实一机 8 卡、四 rank 全流程：五类各 4 条，质量 20 PASS，场景 19 PASS / 1 DROP，19 条均产出非空 mask（35 实例），0 解析/运行错误。
-[本次 19 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/pipeline_4rank_verified_20260924/cached_review/index.html)，使用共享代码与节点本地依赖缓存复验，同样 19 非空 / 35 实例、0 解析/运行错误。运行目录见[四机指南](CRISPEDIT_4NODE.md#4-本次验证与复现)。这验证的是清理后链路可执行，不代表质量问题已解决。
+[本次 19 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/pipeline_4rank_verified_20260924/cached_review/index.html)。该轮结果作为历史验证保留；当前运行已改为各节点 git clone 和本地安装，见[四机指南](CRISPEDIT_4NODE.md)。链路验证不代表质量问题已解决。
 
 重建本次画廊（测试副本有重编号，原 shard / row_idx 映射在 `provenance.json`）：
 
 ```bash
-PY=/opt/tiger/tanyue/.cache/crispedit_runtime_20260924/bin/python
+PY="$PWD/.venv-crispedit/bin/python"
 SMOKE=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/pipeline_4rank_verified_20260924
 "$PY" scripts/review_crispedit_masks.py \
   --input-dir "$SMOKE/source" --mask-dir "$SMOKE/cached_run/labels/mask" \

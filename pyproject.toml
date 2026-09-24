@@ -37,7 +37,7 @@ crispedit = [
     "accelerate",
     "pyarrow",
     "Pillow",
-    "opencv-python",
+    "opencv-python-headless==4.11.0.86",
     "einops",
     "pycocotools",
 ]
