@@ -1,67 +1,32 @@
-# CrispEdit and ScaleEdit mask labeling
+# CrispEdit labeling
 
-本分支汇总两条已经完成全量运行的图像编辑 mask 打标流程，不共享 prompt、
-路由策略或后处理逻辑：
+分支 `crispedit-labeling` 只维护 CrispEdit：Qwen3.8-27B/vLLM 两阶段筛选 → 编辑单元观察与定位 → SAM3 局部 mask。支持单机 8 卡和四机各 8 卡，保留原 shard / row_idx。仅处理 add、color、motion、remove、replace。
 
-- **CrispEdit-2M**：fact prefilter → Qwen3.5/vLLM grounding → SAM3 mask。
-- **ScaleEdit**：Qwen3.5/vLLM planner → bbox locator → SAM3 mask。
+本地仓库：`/opt/tiger/tanyue/sam3-crispedit-crispedit-labeling`。共享部署副本与运行日志路径见四机指南。
 
-详细方法、代码入口、安装、完整运行命令、生产路径和可视化样例分别见：
-
-- [CrispEdit-2M 打标文档](docs/CRISPEDIT_MASK.md)
-- [ScaleEdit 打标文档](docs/SCALEEDIT_MASK.md)
-
-## 环境安装
-
-```bash
-cd /opt/tiger/tanyue/sam3-crispedit
-
-# CrispEdit：一次创建 prefilter/SAM3 环境和 Qwen3.5/vLLM grounding 环境
-bash scripts/setup_crispedit_envs.sh
-
-# ScaleEdit：一次创建同时支持 vLLM grounding 和 SAM3 mask 的环境
-bash scripts/setup_scaleedit_vllm_env.sh
-```
-
-两套安装默认使用不同的 virtualenv，避免互相覆盖。模型权重和数据不会由安装脚本
-下载或修改。
-
-## 生产入口
+- [当前方法、运行命令、数据与结果、可视化](docs/CRISPEDIT_MASK.md)
+- [mask 迭代记录与已知问题](docs/CRISPEDIT_MASK_ITERATION.md)
+- [四机完整流水线入口与日志](docs/CRISPEDIT_4NODE.md)
 
 ```text
-CrispEdit
-  crispedit_mllm_prefilter.py
-  crispedit_mllm_grounding.py
-  crispedit_grounded_mask_runner.py
-
-ScaleEdit
-  scaleedit_mllm_grounding.py
-  scaleedit_grounded_mask_runner.py
+crispedit/
+  common.py, inference.py   数据工具、Qwen3.8/vLLM 推理
+  prefilter/               图像对质量筛选
+  difficulty/              难定位局部编辑筛选
+  mask/                    编辑单元、grounding、SAM3、结果契约
+  distributed.py           四节点调度、交接、合并与恢复
+scripts/                   安装、运行、下载、验证、可视化
+tests/                     当前实现的回归测试
+sam3/                      实际运行依赖的上游 SAM3 代码与资源
 ```
 
-这些入口的参数和 pipeline 代码保持各自生产版本。请勿把 CrispEdit 的 grounding/
-manifest 与 ScaleEdit 的输入混用。
+根目录四个 `crispedit_*.py` 是命令行入口，实现位于 `crispedit/`。其他数据集和已撤回实验代码不在本分支维护。历史实验数据未删除；旧图归档位置见迭代文档。
 
-## 验证
+安装与测试（CUDA 12.9，8 卡）：
 
 ```bash
-.venv-scaleedit-vllm/bin/python -m pytest -q
+bash scripts/setup_crispedit_env.sh
+.venv-crispedit/bin/python -m pytest -q
 ```
 
-最终 ScaleEdit 与 CrispEdit mask 的严格 QC、统一 schema 和自包含训练集导出见
-[UNIFIED_MASK_DATASET.md](docs/UNIFIED_MASK_DATASET.md)。
-
-## 同类多实例指代难度筛选
-
-在 CrispEdit 的 Qwen3.8 pair-quality prefilter `PASS` 集合上继续筛选与 SAMTok benchmark
-相近的同类多实例指代编辑场景：
-
-```bash
-/opt/tiger/tanyue/sam3-crispedit/.venv-scaleedit-vllm/bin/python \
-  crispedit_benchmark_scene_filter.py --help
-```
-
-当前流程使用 Qwen3.8/vLLM 做一次简洁的 source-only 场景判断，最终标签只有
-`PASS / DROP`。它不要求模型做实例分割或计数，不读取 mask、不调用 SAM，也不向模型提供
-target image。完整方法、8 卡命令、小批量结果与可视化见
-[同类多实例细粒度指代编辑筛选文档](docs/REFERENTIAL_EDIT_DIFFICULTY_FILTER.md)。
+所有 MLLM 使用 Qwen3.8-27B。mask 的 `OK` 是自动结构/QC 状态，不代表语义准确率；全量 mask 质量尚未验收。

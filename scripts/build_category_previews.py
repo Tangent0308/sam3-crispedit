@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--columns", type=int, default=1, help="Cards per category sheet row; 1 maximizes clarity")
     parser.add_argument("--image-format", choices=("png", "jpeg"), default="png")
     parser.add_argument("--jpeg-quality", type=int, default=88)
+    parser.add_argument("--cases-per-page", type=int, default=0, help="0 keeps a single sheet per category")
     return parser.parse_args()
 
 
@@ -291,32 +292,41 @@ def main() -> None:
     order.extend(sorted(set(grouped) - set(order)))
     category_paths = {}
     for category in order:
-        cards = grouped[category]
-        columns = min(args.columns, len(cards))
-        gap = 24
-        title_height = 74
-        card_width = args.panel_width * 4 + 12 * 3
-        card_height = CARD_HEADER + args.panel_height
-        rows = math.ceil(len(cards) / columns)
-        sheet = Image.new(
-            "RGB",
-            (columns * card_width + (columns + 1) * gap, title_height + rows * card_height + (rows + 1) * gap),
-            "#d9dde3",
-        )
-        draw = ImageDraw.Draw(sheet)
-        draw.text((gap, 17), f"CrispEdit mask review — {category} ({len(cards)} samples)", fill="#111111", font=_font(34, bold=True))
-        for index, card in enumerate(cards):
-            row, column = divmod(index, columns)
-            x = gap + column * (card_width + gap)
-            y = title_height + gap + row * (card_height + gap)
-            sheet.paste(card, (x, y))
-        extension = "jpg" if args.image_format == "jpeg" else "png"
-        path = args.output_dir / f"{_slug(category)}.{extension}"
-        if args.image_format == "jpeg":
-            sheet.save(path, format="JPEG", quality=args.jpeg_quality, optimize=True)
-        else:
-            sheet.save(path, format="PNG", optimize=True)
-        category_paths[category] = str(path)
+        all_cards = grouped[category]
+        page_size = args.cases_per_page or len(all_cards)
+        page_paths = []
+        for page, offset in enumerate(range(0, len(all_cards), page_size)):
+            cards = all_cards[offset:offset+page_size]
+            columns = min(args.columns, len(cards))
+            gap = 24
+            title_height = 74
+            card_width = args.panel_width * 4 + 12 * 3
+            card_height = CARD_HEADER + args.panel_height
+            rows = math.ceil(len(cards) / columns)
+            sheet = Image.new(
+                "RGB",
+                (columns * card_width + (columns + 1) * gap, title_height + rows * card_height + (rows + 1) * gap),
+                "#d9dde3",
+            )
+            draw = ImageDraw.Draw(sheet)
+            draw.text((gap, 17), f"CrispEdit mask review — {category} ({len(cards)} samples)", fill="#111111", font=_font(34, bold=True))
+            for index, card in enumerate(cards):
+                row, column = divmod(index, columns)
+                x = gap + column * (card_width + gap)
+                y = title_height + gap + row * (card_height + gap)
+                sheet.paste(card, (x, y))
+            extension = "jpg" if args.image_format == "jpeg" else "png"
+            suffix = f"_{page + 1:02d}" if args.cases_per_page else ""
+            path = args.output_dir / f"{_slug(category)}{suffix}.{extension}"
+            if args.image_format == "jpeg":
+                sheet.save(path, format="JPEG", quality=args.jpeg_quality, optimize=True)
+            else:
+                sheet.save(path, format="PNG", optimize=True)
+            page_paths.append(str(path))
+            for entry in entries[category][offset:offset+len(cards)]:
+                entry["output"] = path.name
+
+        category_paths[category] = page_paths if args.cases_per_page else page_paths[0]
 
     index = {
         "categories": category_paths,

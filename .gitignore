@@ -90,6 +90,9 @@ celerybeat-schedule
 # Environments
 .env
 .venv
+.venv-*/
+.uv-python/
+runtime/
 env/
 venv/
 ENV/

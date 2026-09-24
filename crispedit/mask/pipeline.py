@@ -14,6 +14,12 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from crispedit.mask.grounding import canonicalize_type
+from crispedit.mask.regions import clean_mask, context_crop, sparse_degenerate, fine_particle_degenerate
+from crispedit.mask.candidates import select_object_candidate, use_object_selection
+from crispedit.mask.attachments import attachment_phrase, complete_supported_holes, silhouette_and_holes
+from crispedit.mask.attachments import container_contents, container_envelope, close_content_seams
+from crispedit.mask.matching import match_single_candidate, single_object_prompt, ordinary_object_group, atomic_body_refs, added_attachment_ref
+from crispedit.mask.matching import container_object_prompt
 
 
 @dataclass(frozen=True)
@@ -25,10 +31,12 @@ class MaskConfig:
     # still need more than a percentage of their own one-pixel-scale extent.
     min_box_expand_image_frac: float = 0.015
     min_box_expand_max_dimension_frac: float = 0.05
-    pvs_box_iou: float = 0.60
+    pvs_box_iou: float = 0.30
+    pvs_min_score: float = 0.65
+    pcs_min_score: float = 0.45
     pvs_inside_ratio: float = 0.90
     pvs_containment_expand_frac: float = 0.05
-    pcs_inside_ratio: float = 0.80
+    pcs_inside_ratio: float = 0.95
     pcs_containment_expand_frac: float = 0.05
     min_directional_box_coverage: float = 0.80
     pvs_sparse_fill_ratio: float = 0.35
@@ -41,7 +49,7 @@ class MaskConfig:
     pcs_tiny_recovery_max_fill_ratio: float = 0.50
     pcs_tiny_recovery_max_selected: int = 2
     pcs_tiny_recovery_max_confidence: float = 0.50
-    target_map_dilate_frac: float = 0.015
+    target_map_dilate_frac: float = 0.002
     target_map_connected_region_dilate_frac: float = 0.003
     ar_mismatch_threshold: float = 0.02
     ar_mismatch_extra_dilate_frac: float = 0.02
@@ -55,7 +63,7 @@ class MaskConfig:
 
 
 CFG = MaskConfig()
-MASK_POLICY_VERSION = "sam3-dual-prompt-region-fusion-v5-surface-aware"
+MASK_POLICY_VERSION = "sam3-local-edit-region"
 
 
 # A box is not a sufficient semantic prompt for these targets: it commonly
@@ -265,16 +273,21 @@ def _pvs_mask(processor, state: Dict, box: np.ndarray, shape: Tuple[int, int]) -
                 "predicted_iou": predicted_iou,
                 "box_iou": candidate_box_iou,
                 "inside_ratio": inside_ratio,
-                "accepted": candidate_box_iou >= CFG.pvs_box_iou and inside_ratio >= CFG.pvs_inside_ratio,
+                "accepted": candidate_box_iou >= CFG.pvs_box_iou and inside_ratio >= CFG.pvs_inside_ratio and predicted_iou >= CFG.pvs_min_score,
             }
         )
     accepted = [item for item in candidates if item["accepted"]]
+    audit = [{key: value for key, value in item.items() if key != "mask"} for item in candidates]
     if not accepted:
-        return None, {"candidate_count": len(candidates), "reason": "PVS_INCONSISTENT"}
+        return None, {"candidate_count": len(candidates), "reason": "PVS_INCONSISTENT", "candidates": audit}
     best = max(accepted, key=lambda item: (item["predicted_iou"], item["box_iou"]))
-    mask = best.pop("mask")
+    mask = best["mask"]
+    best = {key: value for key, value in best.items() if key != "mask"}
     best["candidate_count"] = len(candidates)
     best["selected_count"] = 1
+    best["candidates"] = audit
+    best["_accepted_masks"] = [(item["mask"], {key: value for key, value in item.items() if key != "mask"})
+                               for item in accepted]
     return mask, best
 
 
@@ -285,6 +298,7 @@ def _pcs_mask(
     box: np.ndarray,
     shape: Tuple[int, int],
     use_geometric_prompt: bool = False,
+    single_instance: bool = False,
 ) -> Tuple[Optional[np.ndarray], Dict]:
     """Return phrase-grounded instances spatially contained by the MLLM box."""
 
@@ -310,13 +324,14 @@ def _pcs_mask(
         mask_box = mask_to_box(mask)
         overlap = max(box_iou(predicted_box, box), box_iou(mask_box, box))
         inside_ratio = 1.0 - _outside_ratio(mask, containment_box, shape)
-        if mask_box is not None and inside_ratio >= CFG.pcs_inside_ratio:
+        score = float(output["scores"][index].item())
+        if mask_box is not None and inside_ratio >= CFG.pcs_inside_ratio and score >= CFG.pcs_min_score:
             selected.append(
                 {
                     "mask": mask,
                     "box_iou": overlap,
                     "inside_ratio": inside_ratio,
-                    "predicted_iou": float(output["scores"][index].item()),
+                    "concept_score": score,
                 }
             )
     if not selected:
@@ -325,15 +340,20 @@ def _pcs_mask(
             "reason": "PCS_INCONSISTENT",
             "pcs_query_mode": "text+box" if use_geometric_prompt else "text",
         }
+    accepted_count = len(selected)
+    if single_instance:
+        selected = match_single_candidate(selected)
     union = np.zeros(shape, dtype=np.uint8)
     for item in selected:
         union |= item["mask"]
     return union, {
         "candidate_count": int(output["masks"].shape[0]),
         "selected_count": len(selected),
+        "accepted_count": accepted_count,
+        "instance_policy": "box_match" if single_instance else "multi_instance",
         "box_iou": max(item["box_iou"] for item in selected),
         "inside_ratio": min(item["inside_ratio"] for item in selected),
-        "predicted_iou": max(item["predicted_iou"] for item in selected),
+        "concept_score": max(item["concept_score"] for item in selected),
         "pcs_query_mode": "text+box" if use_geometric_prompt else "text",
     }
 
@@ -355,11 +375,9 @@ def _fuse_pcs_prompts(
 ) -> Tuple[Optional[np.ndarray], Dict]:
     """Fuse text-only and text+box PCS without letting a search box fill the mask.
 
-    For aggregate regions the text query is good at retaining separate tiny
-    semantic instances, while the joint query can recover instances missed by
-    the global text proposal.  Their union is recall-friendly unless one query
-    degenerates into a dense enclosing-object mask.  For a normal object, the
-    joint prompt is more spatially specific and is therefore preferred.
+    Reject dense enclosing-object degenerations and select one proposal rather
+    than accumulating every prompt's false positives. Independent PVS agreement
+    is checked by the caller before preferring a smaller object fragment.
     """
 
     audit = {
@@ -421,7 +439,7 @@ def _fuse_pcs_prompts(
                         "text",
                     )
                 tiny_selected = int(tiny_metadata.get("selected_count", 0))
-                tiny_confidence = float(tiny_metadata.get("predicted_iou", 0.0))
+                tiny_confidence = float(tiny_metadata.get("concept_score", tiny_metadata.get("predicted_iou", 0.0)))
                 if (
                     tiny_selected <= CFG.pcs_tiny_recovery_max_selected
                     and tiny_confidence < CFG.pcs_tiny_recovery_max_confidence
@@ -467,26 +485,11 @@ def _fuse_pcs_prompts(
                 mask, metadata, chosen = joint_mask, joint_metadata, "text+box"
             fusion = f"reject_dense_choose_{chosen}"
         else:
-            mask = (text_mask | joint_mask).astype(np.uint8)
-            metadata = {
-                "candidate_count": int(text_metadata.get("candidate_count", 0))
-                + int(joint_metadata.get("candidate_count", 0)),
-                "selected_count": int(text_metadata.get("selected_count", 0))
-                + int(joint_metadata.get("selected_count", 0)),
-                "box_iou": max(
-                    float(text_metadata.get("box_iou", 0.0)),
-                    float(joint_metadata.get("box_iou", 0.0)),
-                ),
-                "inside_ratio": min(
-                    float(text_metadata.get("inside_ratio", 1.0)),
-                    float(joint_metadata.get("inside_ratio", 1.0)),
-                ),
-                "predicted_iou": max(
-                    float(text_metadata.get("predicted_iou", 0.0)),
-                    float(joint_metadata.get("predicted_iou", 0.0)),
-                ),
-            }
-            fusion = "aggregate_union"
+            # Different prompts are alternatives, not permission to accumulate
+            # all their false positives into a larger edit footprint.
+            choose_joint = float(joint_metadata.get("concept_score", joint_metadata.get("predicted_iou", 0))) >= float(text_metadata.get("concept_score", text_metadata.get("predicted_iou", 0)))
+            mask, metadata = (joint_mask, joint_metadata) if choose_joint else (text_mask, text_metadata)
+            fusion = "aggregate_choose_joint" if choose_joint else "aggregate_choose_text"
         return mask, {
             **metadata,
             **audit,
@@ -528,6 +531,8 @@ def _semantic_detail_target(ref: str) -> bool:
 
 
 def _region_mode(item: Dict) -> str:
+    if ordinary_object_group(item):
+        return 'object'
     raw_mode = str(item.get("region_mode", "")).strip().lower()
     if raw_mode in {"aggregate", "aggregate_region", "nearby_group", "group"}:
         return "aggregate_region"
@@ -539,6 +544,8 @@ def _region_mode(item: Dict) -> str:
 
 
 def _mask_density(item: Dict, region_mode: str) -> str:
+    if ordinary_object_group(item):
+        return 'object'
     raw_density = str(item.get("mask_density", "")).strip().lower()
     if raw_density in {"sparse", "dense", "object"}:
         return raw_density
@@ -550,6 +557,9 @@ def _mask_density(item: Dict, region_mode: str) -> str:
 def _sam_text_prompt(ref: str) -> str:
     """Normalize verbose MLLM labels without reducing them to a head noun."""
 
+    human_group = re.match(r'^(?:the\s+)?(?:group|pair|row) of (men|women|people|children)\b',str(ref),re.I)
+    if human_group:
+        return human_group[1].lower()
     prompt = re.sub(
         r"^all relevant instances of\s+", "", str(ref).strip(), flags=re.IGNORECASE
     )
@@ -617,18 +627,13 @@ def _prefer_pcs_candidate(
         return False, "PCS_UNAVAILABLE"
     if pvs_mask is None:
         return True, "PVS_UNAVAILABLE"
-    box_area = max(_box_area(prompt_box), 1.0)
-    pvs_fill = float(pvs_mask.sum()) / box_area
-    pcs_fill = float(pcs_mask.sum()) / box_area
     if region_mode == "aggregate_region":
         return True, "AGGREGATE_REGION"
     if _semantic_detail_target(ref):
         return True, "SEMANTIC_DETAIL"
-    if pvs_fill < CFG.pvs_sparse_fill_ratio and pcs_fill > pvs_fill / CFG.semantic_area_ratio:
-        return True, "PVS_SPARSE"
-    if pvs_fill > CFG.pvs_dense_fill_ratio and pcs_fill < pvs_fill * CFG.semantic_area_ratio:
-        return True, "PVS_DENSE"
-    return False, "PVS_PRIMARY"
+    # A spatially accepted semantic prediction identifies the requested thing;
+    # a box-only prediction can fit the box while segmenting a face/background.
+    return True, "SEMANTIC_PRIMARY"
 
 
 def segment_grounded_box(
@@ -640,6 +645,8 @@ def segment_grounded_box(
     edit_type: Optional[str] = None,
     region_mode: str = "object",
     mask_density: str = "object",
+    region_layout: str = "single",
+    semantic_only: bool = False,
 ) -> Tuple[np.ndarray, Dict]:
     region_mode = "aggregate_region" if region_mode == "aggregate_region" else "object"
     mask_density = mask_density if mask_density in {"sparse", "dense", "object"} else "object"
@@ -648,19 +655,26 @@ def segment_grounded_box(
         raw_box,
         shape,
         CFG.box_expand_frac,
-        CFG.min_box_expand_image_frac,
+        0.0,
         CFG.min_box_expand_max_dimension_frac,
     )
     errors: List[str] = []
     sam_prompt = _sam_text_prompt(ref)
+    container_prompt = container_object_prompt(ref, edit_type, region_mode, mask_density, region_layout)
+    if container_prompt:
+        sam_prompt = container_prompt
     if edit_type == "color":
         sam_prompt = _color_surface_sam_prompt(ref, sam_prompt)
     pvs_mask = None
     pvs_metadata: Dict = {}
     try:
-        pvs_mask, pvs_metadata = _pvs_mask(processor, state, prompt_box, shape)
+        if not semantic_only:
+            pvs_mask, pvs_metadata = _pvs_mask(processor, state, prompt_box, shape)
     except Exception as exc:
         errors.append(f"pvs:{exc!r}")
+    pvs_candidates = pvs_metadata.pop("_accepted_masks", [])
+    if not pvs_candidates and pvs_mask is not None:
+        pvs_candidates = [(pvs_mask, pvs_metadata)]
 
     text_pcs_mask = None
     text_pcs_metadata: Dict = {}
@@ -672,22 +686,40 @@ def segment_grounded_box(
             prompt_box,
             shape,
             use_geometric_prompt=False,
+            single_instance=single_object_prompt(sam_prompt, region_mode, mask_density, region_layout),
         )
     except Exception as exc:
         errors.append(f"pcs_text:{exc!r}")
     joint_pcs_mask = None
     joint_pcs_metadata: Dict = {}
     try:
-        joint_pcs_mask, joint_pcs_metadata = _pcs_mask(
-            processor,
-            state,
-            sam_prompt,
-            prompt_box,
-            shape,
-            use_geometric_prompt=True,
-        )
+        if not semantic_only:
+            joint_pcs_mask, joint_pcs_metadata = _pcs_mask(
+                processor, state, sam_prompt, prompt_box, shape,
+                use_geometric_prompt=True,
+                single_instance=single_object_prompt(sam_prompt, region_mode, mask_density, region_layout),
+            )
     except Exception as exc:
         errors.append(f"pcs_text_box:{exc!r}")
+    candidate_audit = {}
+    for name, candidate, details in [("pvs", pvs_mask, pvs_metadata),
+                                     ("text", text_pcs_mask, text_pcs_metadata),
+                                     ("joint", joint_pcs_mask, joint_pcs_metadata)]:
+        candidate_audit[name] = {**details, "area": int(candidate.sum()) if candidate is not None else 0}
+    independently_supported = pvs_mask is not None and any(
+        proposal is not None and _mask_iou(pvs_mask, proposal) >= 0.70
+        for proposal in (text_pcs_mask, joint_pcs_mask)
+    )
+    if mask_density == "sparse" and not independently_supported:
+        if pvs_mask is not None and sparse_degenerate(pvs_mask, prompt_box):
+            pvs_mask = None
+            candidate_audit["pvs"]["rejected"] = "SPARSE_ENCLOSING_OBJECT"
+        if text_pcs_mask is not None and sparse_degenerate(text_pcs_mask, prompt_box):
+            text_pcs_mask = None
+            candidate_audit["text"]["rejected"] = "SPARSE_ENCLOSING_OBJECT"
+        if joint_pcs_mask is not None and sparse_degenerate(joint_pcs_mask, prompt_box):
+            joint_pcs_mask = None
+            candidate_audit["joint"]["rejected"] = "SPARSE_ENCLOSING_OBJECT"
     pcs_mask, pcs_metadata = _fuse_pcs_prompts(
         text_pcs_mask,
         text_pcs_metadata,
@@ -697,6 +729,19 @@ def segment_grounded_box(
         region_mode,
         mask_density,
     )
+    if region_mode == "object" and pvs_mask is not None and text_pcs_mask is not None and joint_pcs_mask is not None:
+        text_agreement = _mask_iou(text_pcs_mask, pvs_mask)
+        joint_agreement = _mask_iou(joint_pcs_mask, pvs_mask)
+        # A smaller mask is not inherently cleaner: it may be a perforated
+        # fragment of a leaf/shirt. Use independent visual support to choose.
+        if text_agreement > joint_agreement + 0.20 and text_agreement >= 0.65:
+            pcs_mask, pcs_metadata = text_pcs_mask, {**text_pcs_metadata, "pcs_fusion":"text_supported_by_pvs"}
+        elif joint_agreement > text_agreement + 0.20 and joint_agreement >= 0.65:
+            pcs_mask, pcs_metadata = joint_pcs_mask, {**joint_pcs_metadata, "pcs_fusion":"joint_supported_by_pvs"}
+
+    if region_mode == "object" and pcs_mask is not None and pcs_mask.sum()/max(_box_area(raw_box),1) < 0.003:
+        candidate_audit["fused_rejected"] = "NEAR_EMPTY_OBJECT"
+        pcs_mask = None
 
     use_pcs, selection_reason = _prefer_pcs_candidate(
         ref, prompt_box, pvs_mask, pcs_mask, region_mode
@@ -711,11 +756,93 @@ def segment_grounded_box(
         source = "pcs"
         mask, metadata = pcs_mask, pcs_metadata
         selection_reason = "PVS_UNAVAILABLE"
+    if use_object_selection(ref, region_mode, mask_density):
+        # Near-empty PCS masks must not re-enter through the richer selector.
+        semantic_candidates = []
+        for proposal, details in [(text_pcs_mask, text_pcs_metadata), (joint_pcs_mask, joint_pcs_metadata)]:
+            if proposal is not None and proposal.sum()/max(_box_area(raw_box), 1) < .003:
+                proposal = None
+            semantic_candidates.append((proposal, details))
+        selected = select_object_candidate(pvs_candidates, *semantic_candidates,
+            allow_extent_recovery=single_object_prompt(ref,region_mode,mask_density,region_layout))
+        if selected is not None:
+            mask, metadata, source, selection_audit = selected
+            selection_reason = metadata["selection_reason"]
+            candidate_audit["object_selection"] = selection_audit
     if mask is None:
-        source = "box"
-        mask = mask_from_box(prompt_box, shape)
-        metadata = {"reason": "BOX_FALLBACK"}
+        source = "none"
+        mask = np.zeros(shape, dtype=np.uint8)
+        metadata = {"reason": "NO_RELIABLE_MASK"}
         selection_reason = "NO_SAM_CANDIDATE"
+
+    # Restrict small spillovers after candidate acceptance, not as a way to
+    # disguise a rejected whole-person mask as the requested local object.
+    mask = (mask & mask_from_box(prompt_box, shape)).astype(np.uint8)
+    attachment = attachment_phrase(ref)
+    if attachment and use_object_selection(ref, region_mode, mask_density) and mask.any():
+        _, holes = silhouette_and_holes(mask)
+        if int(holes.sum()) > max(8, int(mask.sum())*.02):
+            try:
+                part_text, part_text_metadata = _pcs_mask(
+                    processor, state, attachment, prompt_box, shape, use_geometric_prompt=False)
+                part_joint, part_joint_metadata = _pcs_mask(
+                    processor, state, attachment, prompt_box, shape, use_geometric_prompt=True)
+                mask, attachment_audit = complete_supported_holes(mask, part_text, part_joint)
+                candidate_audit['attachment_completion'] = {
+                    **attachment_audit, 'prompt': attachment, 'base_mask_source': source,
+                    'text': part_text_metadata, 'joint': part_joint_metadata}
+                if attachment_audit['added_pixels']:
+                    source = 'pcs'
+                    metadata = {**metadata, 'predicted_iou': math.nan}
+                    selection_reason += '+ATTACHMENT_SUPPORTED_HOLES'
+            except Exception as exc:
+                errors.append(f'pcs_attachment:{exc!r}')
+    # Removed/replaced containers include their observed contents. Rim-only
+    # proposals can have a cutout open to the exterior (e.g. a fork over the rim),
+    # so ordinary enclosed-hole cleanup cannot recover them. Add only pixels
+    # supported by both content queries inside the container's existing hull.
+    envelope = container_envelope(mask) if container_prompt else None
+    if envelope is not None:
+        content_audits = []
+        before_contents = mask.copy()
+        for content in container_contents(ref):
+            try:
+                text, text_meta = _pcs_mask(processor, state, content, prompt_box, shape)
+                joint, joint_meta = _pcs_mask(processor, state, content, prompt_box, shape,
+                                               use_geometric_prompt=True)
+                mask, audit = complete_supported_holes(mask, text, joint, envelope=envelope)
+                if not audit['added_pixels'] and text is not None:
+                    # A positive container box can collapse a content query to
+                    # boundary specks. Check the text proposal with its OWN box
+                    # using the interactive predictor and the usual IoU gates.
+                    content_box = mask_to_box(text)
+                    visual, visual_meta = _pvs_mask(processor, state, content_box, shape)
+                    mask, fallback = complete_supported_holes(mask, text, visual, envelope=envelope)
+                    audit['text_visual'] = {**fallback, 'visual': {
+                        k: v for k, v in visual_meta.items() if not k.startswith('_')}}
+                    audit['added_pixels'] += fallback['added_pixels']
+                    if fallback['added_pixels']:
+                        audit['reason'] = 'CONTENT_SUPPORTED_BY_TEXT_PVS'
+                content_audits.append({'prompt': content, **audit, 'text': text_meta, 'joint': joint_meta})
+                if audit['added_pixels']:
+                    selection_reason += '+CONTAINER_CONTENTS'
+                    source = 'pcs'
+                    metadata = {**metadata, 'predicted_iou': math.nan}
+            except Exception as exc:
+                errors.append(f'container_contents:{exc!r}')
+        candidate_audit['container_contents'] = content_audits
+        supported_content = (mask > 0) & (before_contents == 0)
+        mask, seam_pixels = close_content_seams(mask, supported_content, envelope)
+        candidate_audit['container_seam_pixels'] = seam_pixels
+        if mask.sum() / max(envelope.sum(), 1) < .70:
+            metadata['selection_review'] = True
+            candidate_audit['container_incomplete'] = True
+    mask, cleanup = clean_mask(mask, sparse=mask_density == "sparse")
+    if fine_particle_degenerate(mask, raw_box, ref):
+        candidate_audit["selected_rejected"] = "FINE_PARTICLE_ENCLOSING_OBJECT"
+        mask = np.zeros(shape, dtype=np.uint8)
+        source = "none"
+        selection_reason = "FINE_PARTICLE_ENCLOSING_OBJECT"
 
     # The adaptive box expansion is only a SAM prompt aid.  Coverage is audited
     # against the original MLLM box; requiring the expanded margin itself caused
@@ -749,6 +876,8 @@ def segment_grounded_box(
             "selection_reason": selection_reason,
             "sam_prompt": sam_prompt,
             "errors": errors,
+            "candidate_audit_json": json.dumps(candidate_audit, ensure_ascii=False),
+            "cleanup_json": json.dumps(cleanup),
         }
     )
     return mask.astype(np.uint8), metadata
@@ -772,7 +901,12 @@ def map_target_mask_to_source(
     fraction = (
         CFG.target_map_dilate_frac if dilate_frac is None else float(dilate_frac)
     ) + (CFG.ar_mismatch_extra_dilate_frac if ar_mismatch else 0.0)
-    return dilate_mask(mapped, max(1, round(min(source_shape) * fraction)))
+    bounds = mask_to_box(mapped)
+    if bounds is None:
+        return mapped
+    local_short = min(bounds[2]-bounds[0], bounds[3]-bounds[1])
+    radius = max(0, min(4, round(min(source_shape)*fraction), round(local_short*0.02)))
+    return dilate_mask(mapped, radius)
 
 
 def encode_rle(mask: np.ndarray) -> Dict:
@@ -895,21 +1029,89 @@ def _segment_items(
     shape: Tuple[int, int],
     grounding_image: str,
     edit_type: str,
+    image: Optional[Image.Image] = None,
 ) -> Tuple[List[np.ndarray], List[Dict]]:
     masks, metadata_rows = [], []
+    items = [{**item,'ref':ref,'_compound_ref':item['ref']} if ref != item['ref'] else item
+             for item in items for ref in atomic_body_refs(str(item['ref']))]
     for index, item in enumerate(items):
         region_mode = _region_mode(item)
         mask_density = _mask_density(item, region_mode)
+        raw_box = normalized_box_to_pixels(item["bbox_2d"], shape)
+        if image is not None and mask_density == "sparse" and _box_area(raw_box)/(shape[0]*shape[1]) > 0.50 and not item.get("_global_sparse_tile"):
+            # Large dispersed additions need local image detail. Never turn
+            # their whole-image box into a hull or a filled fallback rectangle.
+            bx1, by1, bx2, by2 = item["bbox_2d"]
+            width, height = bx2-bx1, by2-by1
+            for tile_index, (dx, dy) in enumerate([(0,0),(0.45,0),(0,0.45),(0.45,0.45)]):
+                tile = {**item, "_global_sparse_tile":True,
+                        "bbox_2d":[bx1+dx*width, by1+dy*height, bx1+(dx+0.55)*width, by1+(dy+0.55)*height]}
+                tile_masks, tile_rows = _segment_items(processor, None, [tile], shape, grounding_image, edit_type, image)
+                for sub_index, row in enumerate(tile_rows):
+                    row["instance_id"] = f"{grounding_image}_{index}_tile_{tile_index}_{sub_index}"
+                    if _CONNECTABLE_SMALL_GROUP_RE.search(str(item["ref"])):
+                        component_count, _, stats, _ = cv2.connectedComponentsWithStats(tile_masks[sub_index], connectivity=8)
+                        tile_area = _box_area(normalized_box_to_pixels(tile["bbox_2d"], shape))
+                        if component_count > 1 and stats[1:, cv2.CC_STAT_AREA].max()/max(tile_area,1) > 0.04:
+                            # Tiny dispersed particles must not become a
+                            # person/building silhouette. Preserve the audit,
+                            # but require review instead of trusting the pixels.
+                            tile_masks[sub_index] = np.zeros(shape, dtype=np.uint8)
+                            row["mask_source"] = "none"
+                            row["selection_reason"] = "GLOBAL_PARTICLE_ENCLOSING_OBJECT"
+                masks.extend(tile_masks)
+                metadata_rows.extend(tile_rows)
+            continue
+        local_shape, local_box, local_state = shape, item["bbox_2d"], state
+        crop = None
+        raw_box = normalized_box_to_pixels(item["bbox_2d"], shape)
+        if image is not None and _box_area(raw_box)/(shape[0]*shape[1]) < 0.65:
+            crop = context_crop(raw_box, shape)
+            x1, y1, x2, y2 = crop
+            local_shape = (y2-y1, x2-x1)
+            local_box = [(raw_box[0]-x1)*1000/(x2-x1), (raw_box[1]-y1)*1000/(y2-y1),
+                         (raw_box[2]-x1)*1000/(x2-x1), (raw_box[3]-y1)*1000/(y2-y1)]
+            local_state = processor.set_image(image.crop(crop))
+        elif local_state is None:
+            local_state = processor.set_image(image)
+            state = local_state
         mask, metadata = segment_grounded_box(
             processor,
-            state,
+            local_state,
             str(item["ref"]),
-            item["bbox_2d"],
-            shape,
+            local_box,
+            local_shape,
             edit_type=edit_type,
             region_mode=region_mode,
             mask_density=mask_density,
+            region_layout=item.get('region_layout', 'single'),
+            # A compound face+arms box bounds a person, not each body part.
+            # Positive box/PVS can therefore override semantics and return the
+            # whole owner. Use it only to select/contain text-only part masks.
+            semantic_only=bool(item.get('_compound_ref') or item.get('_added_attachment')),
         )
+        if crop is not None:
+            restored = np.zeros(shape, dtype=np.uint8)
+            restored[y1:y2, x1:x2] = mask
+            mask = restored
+        metadata["crop_xyxy"] = list(crop) if crop else []
+        if 'change_id' in item:
+            audit = json.loads(metadata.get('candidate_audit_json', '{}'))
+            audit['edit_unit'] = {key: item[key] for key in
+                                  ('change_id', 'edit_id', 'change', 'grounding_ref', 'location') if key in item}
+            metadata['candidate_audit_json'] = json.dumps(audit)
+        if item.get('_compound_ref'):
+            audit = json.loads(metadata.get('candidate_audit_json','{}'))
+            audit['atomic_body_query'] = {'original_ref':item['_compound_ref'],'query':item['ref']}
+            metadata['candidate_audit_json'] = json.dumps(audit)
+        if item.get('_added_attachment'):
+            audit = json.loads(metadata.get('candidate_audit_json', '{}'))
+            audit['added_attachment_query'] = {
+                'original_ref': item['_added_attachment'], 'query': item['ref'],
+                'reason': 'UNCHANGED_OWNER_WITH_ADDED_ATTACHMENT',
+            }
+            metadata['candidate_audit_json'] = json.dumps(audit)
+        metadata["bbox_xyxy"] = [float(value) for value in raw_box]
         metadata_row = {
             "instance_id": f"{grounding_image}_{index}",
             "role": "preserve_foreground" if grounding_image == "source_foreground" else "edit_region",
@@ -922,7 +1124,7 @@ def _segment_items(
         }
         masks.append(mask)
         metadata_rows.append(metadata_row)
-        if edit_type != "background":
+        if edit_type != "background" and not item.get("_global_sparse_tile"):
             connected = _aggregate_semantic_connected_coverage(
                 mask, metadata_row, shape, grounding_image, index
             )
@@ -941,8 +1143,21 @@ def annotate_grounded_sample(processor, sample: Dict, ground_row: Dict, sam_vers
     etype = canonicalize_type(sample["type"])
     payload = json.loads(ground_row["ground_json"])
     boxes = payload.get("boxes", {})
+    # Enforce the canvas contract even when replaying old two-sided grounding.
+    side = "target" if etype == "add" else "source"
+    boxes = {side: boxes.get(side, [])}
+    if etype == 'add':
+        changes = payload.get('observation', {}).get('parsed', {}).get('changes', [])
+        attachments = {change.get('change_id', i): added_attachment_ref(change)
+                       for i, change in enumerate(changes)}
+        boxes['target'] = [
+            {**item, 'ref': attachments[item.get('change_id')],
+             '_added_attachment': item['ref']}
+            if attachments.get(item.get('change_id')) else item
+            for item in boxes['target']
+        ]
     ar_delta = aspect_ratio_delta(source.size, target.size)
-    ar_mismatch = ar_delta > CFG.ar_mismatch_threshold
+    ar_mismatch = etype == "add" and ar_delta > CFG.ar_mismatch_threshold
 
     if ground_row.get("qc_flag") == "GROUND_FAIL":
         return {
@@ -955,47 +1170,18 @@ def annotate_grounded_sample(processor, sample: Dict, ground_row: Dict, sam_vers
             "sam_version": sam_version,
         }
 
-    if etype == "background" and payload.get("background_mask_mode") == "full_image":
-        mask = np.ones(source_shape, dtype=np.uint8)
-        return {
-            "mask": mask,
-            "instances": [],
-            "mask_source": "background_full_image",
-            "qc_flag": "OK",
-            "qc_flags": ["BACKGROUND_FULL_IMAGE"],
-            "ar_delta": ar_delta,
-            "sam_version": sam_version,
-        }
-
-    if etype == "style":
-        mask = np.ones(source_shape, dtype=np.uint8)
-        return {
-            "mask": mask,
-            "instances": [],
-            "mask_source": "box",
-            "qc_flag": "OK",
-            "qc_flags": ["STYLE_FULL_IMAGE"],
-            "ar_delta": ar_delta,
-            "sam_version": sam_version,
-        }
-
-    image_states: Dict[str, Dict] = {}
-    if boxes.get("source"):
-        image_states["source"] = processor.set_image(source)
-    if boxes.get("target"):
-        image_states["target"] = processor.set_image(target)
-
     all_masks: List[np.ndarray] = []
     all_instances: List[Dict] = []
     if boxes.get("source"):
-        role = "source_foreground" if etype == "background" else "source"
+        role = "source"
         source_masks, source_metadata = _segment_items(
             processor,
-            image_states["source"],
+            None,
             boxes["source"],
             source_shape,
             role,
             etype,
+            image=source,
         )
         all_masks.extend(source_masks)
         all_instances.extend(source_metadata)
@@ -1003,11 +1189,12 @@ def annotate_grounded_sample(processor, sample: Dict, ground_row: Dict, sam_vers
     if boxes.get("target"):
         target_masks, target_metadata = _segment_items(
             processor,
-            image_states["target"],
+            None,
             boxes["target"],
             target_shape,
             "target",
             etype,
+            image=target,
         )
         for mask, metadata in zip(target_masks, target_metadata):
             connected_region = (
@@ -1032,20 +1219,27 @@ def annotate_grounded_sample(processor, sample: Dict, ground_row: Dict, sam_vers
             all_masks.append(mapped)
             all_instances.append(metadata)
 
-    if etype == "background":
-        foreground = _union(all_masks, source_shape)
-        radius = max(1, round(min(source_shape) * CFG.background_foreground_dilate_frac))
-        mask = (1 - dilate_mask(foreground, radius)).astype(np.uint8)
-    else:
-        mask = _union(all_masks, source_shape)
+    mask = _union(all_masks, source_shape)
 
-    source_rank = {"pvs": 0, "pcs": 1, "group": 2, "box": 3}
+    source_rank = {"pvs": 0, "pcs": 1, "group": 2, "box": 3, "none": 4}
     mask_source = max(
         (instance["mask_source"] for instance in all_instances),
         key=lambda value: source_rank[value],
-        default="box",
+        default="none",
     )
     flags = []
+    if any(request.get('evidence_issues') for request in payload.get('requests', [])):
+        flags.extend(['MASK_REVIEW', 'EDIT_EVIDENCE_REVIEW'])
+    if any(request.get('refinement_identity_issues') for request in payload.get('requests', [])):
+        flags.extend(['MASK_REVIEW', 'REFINEMENT_IDENTITY_CONFLICT'])
+    if payload.get('canvas_issues'):
+        flags.extend(['MASK_REVIEW', 'SOURCE_CANVAS_INCOMPLETE'])
+    if payload.get('coverage_review_failed'):
+        flags.extend(['MASK_REVIEW', 'COVERAGE_REVIEW_FAILED'])
+    if payload.get('scope_review_failed'):
+        flags.extend(['MASK_REVIEW', 'EDIT_UNIT_REVIEW_FAILED'])
+    if mask_source == "none" or not mask.any() or any(instance.get("selection_review") for instance in all_instances):
+        flags.append("MASK_REVIEW")
     if mask_source == "box":
         flags.append("BOX_FALLBACK")
     if any(
@@ -1055,7 +1249,7 @@ def annotate_grounded_sample(processor, sample: Dict, ground_row: Dict, sam_vers
         flags.append("CONNECTED_REGION_COVERAGE")
     if ar_mismatch:
         flags.append("AR_MISMATCH")
-    qc_flag = "BOX_FALLBACK" if "BOX_FALLBACK" in flags else ("AR_MISMATCH" if ar_mismatch else "OK")
+    qc_flag = "MASK_REVIEW" if "MASK_REVIEW" in flags else ("BOX_FALLBACK" if "BOX_FALLBACK" in flags else ("AR_MISMATCH" if ar_mismatch else "OK"))
 
     for mask_item, instance in zip(all_masks, all_instances):
         rle = encode_rle(mask_item)

@@ -28,10 +28,9 @@ from crispedit.difficulty.benchmark_scene import (
     parse_scene_response,
 )
 from crispedit.prefilter.pair_runner import DEFAULT_MODEL, parse_cases
-from crispedit.prefilter.policy import canonical_edit_type
-from crispedit.prefilter.runner import decode_image, raw_type_from_filename
-from scaleedit.grounding_runner import (
-    Qwen35ScaleEditGrounder,
+from crispedit.common import canonical_edit_type, decode_image, raw_type_from_filename
+from crispedit.inference import (
+    Qwen38FilterEngine,
     assign_jobs,
     parse_device_groups,
 )
@@ -96,7 +95,7 @@ class SceneFilterJob:
     row_indices: Tuple[int, ...]
 
 
-class Qwen38SceneAuditor(Qwen35ScaleEditGrounder):
+class Qwen38SceneAuditor(Qwen38FilterEngine):
     """Reuse the deterministic Qwen3.8 vLLM transport."""
 
     def shutdown(self, timeout: float = 30.0) -> None:
@@ -141,6 +140,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="JSON array/object or text file containing SHARD.parquet:ROW_IDX cases",
     )
     parser.add_argument("--limit-shards", type=int)
+    parser.add_argument("--shard-list-file", type=Path,
+                        help="Text file with exact parquet basenames to process on this node")
     parser.add_argument("--limit-rows-per-shard", type=int)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-new-tokens", type=int, default=256)
@@ -203,6 +204,16 @@ def build_jobs(args: argparse.Namespace) -> List[SceneFilterJob]:
         if value.strip()
     }
     paths = sorted(args.input_dir.glob("*.parquet"))
+    shard_list_file = getattr(args, "shard_list_file", None)
+    if shard_list_file is not None:
+        names = [line.strip() for line in shard_list_file.read_text().splitlines() if line.strip()]
+        if len(names) != len(set(names)) or any(Path(name).name != name or not name.endswith('.parquet') for name in names):
+            raise ValueError("--shard-list-file must contain unique parquet basenames")
+        available = {path.name for path in paths}
+        missing = sorted(set(names) - available)
+        if missing:
+            raise FileNotFoundError(f"shard list contains missing input shards: {missing[:10]}")
+        paths = [path for path in paths if path.name in set(names)]
     if selected:
         available = {path.name for path in paths}
         missing = sorted(set(selected) - available)
@@ -669,17 +680,18 @@ def worker_main(
             {
                 "kind": "log",
                 "message": (
-                    f"benchmark-scene worker {worker_index} loading Qwen3.8 vLLM "
+                    f"benchmark-scene worker {worker_index} ready (lazy Qwen3.8 vLLM loading) "
                     f"on GPUs {devices} ({len(jobs)} shards)"
                 ),
             }
         )
-        auditor = Qwen38SceneAuditor(_auditor_args(args))
         for job in jobs:
             if not args.overwrite and _current_output(job):
                 summary = _existing_summary(job)
                 progress_queue.put({"kind": "rows", "count": job.num_rows})
             else:
+                if auditor is None:
+                    auditor = Qwen38SceneAuditor(_auditor_args(args))
                 summary = process_job(job, auditor, args, progress_queue)
             progress_queue.put(
                 {

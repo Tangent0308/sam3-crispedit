@@ -7,7 +7,7 @@ from typing import Any, Dict
 from PIL import Image
 
 from crispedit.prefilter.pair_quality import extract_json_object
-from crispedit.prefilter.policy import canonical_edit_type
+from crispedit.common import canonical_edit_type
 
 
 FILTER_METHOD = "difficult_local_edit"

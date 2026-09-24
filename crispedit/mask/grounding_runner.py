@@ -1,14 +1,15 @@
-"""Stage 1: Qwen3.5 grounding for the CrispEdit mask pipeline.
+"""Stage 1: Qwen grounding for the CrispEdit mask pipeline.
 
 The default 8-GPU layout is four independent BF16 replicas with tensor/model
 parallel size 2.  The production backend uses vLLM continuous batching while
-retaining a Transformers fallback.  Each worker writes all raw responses and
+using the Qwen3.8 vLLM backend.  Each worker writes all raw responses and
 validated boxes before SAM3 is loaded.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import io
 import json
 import math
@@ -26,73 +27,25 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from PIL import Image
 from tqdm import tqdm
+from crispedit.common import supported_shard
 
-from crispedit.mask.grounding import (
-    BACKGROUND_FOREGROUND_OBSERVATION_PROMPT_VERSION,
-    BBOX_REFINEMENT_PROMPT_VERSION,
-    OBSERVATION_PROMPT_VERSION,
-    PROMPT_VERSION,
-    bbox_refinement_crop,
-    box_needs_local_refinement,
-    build_change_observation_prompt,
-    build_bbox_refinement_prompt,
-    build_grounding_requests,
-    canonicalize_type,
-    conservative_refined_bbox,
-    grounding_images,
-    grounding_is_complete,
-    local_bbox_refinement_enabled,
-    map_crop_bbox_to_full,
-    parse_bbox_refinement_output,
-    parse_change_observation,
-    parse_grounding_output,
-    prompt_version_for_mode,
-)
+from crispedit.mask.selection import SCENE_FIELDS, apply_scene, load_filters
+from crispedit.mask.artifacts import check_output_location, reusable_table, signature, signed_schema
+from crispedit.mask.checklist import strict_json, parse_checklist_grounding, grounding_checklist
+
+from crispedit.mask.grounding import (OBSERVATION_PROMPT_VERSION, PROMPT_VERSION,
+    build_change_observation_prompt, build_grounding_requests, canonicalize_type,
+    grounding_is_complete, parse_change_observation, prompt_version_for_mode)
 
 
-DEFAULT_MODEL_PATH = "/mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B"
+DEFAULT_MODEL_PATH = "/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B"
 
 # Pass 1 still makes one source/result comparison, but color/material edits get
 # paired overlapping views of those same two images.  This gives small faces,
 # hands, fur, and other subject surfaces enough vision tokens without adding a
 # third model turn or introducing pixel differences.
-LOCAL_DETAIL_TILES = (
-    ("upper-left", (0.0, 0.0, 0.55, 0.55)),
-    ("upper-right", (0.45, 0.0, 1.0, 0.55)),
-    ("lower-left", (0.0, 0.45, 0.55, 1.0)),
-    ("lower-right", (0.45, 0.45, 1.0, 1.0)),
-)
 
 
-def build_local_detail_views(
-    raw_type: object,
-    source: Image.Image,
-    target: Image.Image,
-) -> List[Dict]:
-    if canonicalize_type(raw_type) != "color":
-        return []
-    views = []
-    for label, normalized_box in LOCAL_DETAIL_TILES:
-        paired = []
-        for image in (source, target):
-            width, height = image.size
-            x1, y1, x2, y2 = normalized_box
-            crop_box = (
-                round(x1 * width),
-                round(y1 * height),
-                round(x2 * width),
-                round(y2 * height),
-            )
-            paired.append(image.crop(crop_box).resize(image.size, Image.Resampling.LANCZOS))
-        views.append(
-            {
-                "label": label,
-                "normalized_box": list(normalized_box),
-                "source": paired[0],
-                "target": paired[1],
-            }
-        )
-    return views
 
 GROUND_SCHEMA = pa.schema(
     [
@@ -121,6 +74,7 @@ GROUND_SCHEMA = pa.schema(
         ("prefilter_reason", pa.string()),
         ("filter_reason_codes", pa.string()),
         ("filter_mismatch_score", pa.float64()),
+        *SCENE_FIELDS,
     ]
 )
 
@@ -133,14 +87,18 @@ class GroundingJob:
     manifest_path: Optional[str]
     row_indices: Optional[List[int]]
     num_rows: int
+    difficulty_path: Optional[str] = None
+    selected_rows: Optional[int] = None
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Qwen3.5 bbox grounding for CrispEdit")
+    parser = argparse.ArgumentParser(description="Qwen3.8-27B edit-unit grounding for CrispEdit")
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model-path", default=os.environ.get("CRISPEDIT_GROUNDING_MODEL_PATH", DEFAULT_MODEL_PATH))
     parser.add_argument("--keep-manifest-dir", type=Path, default=None)
+    parser.add_argument("--difficulty-manifest-dir", type=Path, default=None,
+                        help="Sparse scene manifest; requires --keep-manifest-dir. Only double PASS is labeled.")
     parser.add_argument(
         "--selection-file",
         type=Path,
@@ -151,24 +109,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor-parallel-size", type=int, default=2)
     parser.add_argument(
         "--inference-backend",
-        choices=("transformers", "vllm"),
-        default="transformers",
+        choices=("vllm",),
+        default="vllm",
         help="Qwen inference engine; production full runs should use vllm",
     )
     parser.add_argument(
         "--grounding-mode",
-        choices=("two-pass", "single"),
+        choices=("two-pass",),
         default="two-pass",
-        help="two-pass first observes realized changes, then grounds them; single reproduces prompt v2",
-    )
-    parser.add_argument(
-        "--background-observation-mode",
-        choices=("legacy", "foreground-audit"),
-        default="foreground-audit",
-        help=(
-            "Use the generic changed-region observation or a background-specific "
-            "unchanged-foreground/full-image audit (default)."
-        ),
+        help="observe realized edits, then ground their segmentation units",
     )
     parser.add_argument("--include-types", default=None)
     parser.add_argument("--max-shards-per-type", type=int, default=None)
@@ -185,21 +134,10 @@ def parse_args() -> argparse.Namespace:
             "never split. Set <=0 to disable the limit."
         ),
     )
-    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--max-new-tokens", type=int, default=1536)
+    parser.add_argument("--observation-max-new-tokens", type=int, default=3072)
     parser.add_argument("--max-pixels", type=int, default=1_310_720, help="Per-image Qwen preprocessing pixel cap")
     parser.add_argument("--parse-retries", type=int, default=1)
-    parser.add_argument(
-        "--bbox-refinement",
-        choices=("off", "small", "all"),
-        default="small",
-        help="Re-ground small/all proposal boxes in enlarged single-candidate crops",
-    )
-    parser.add_argument("--bbox-refine-threshold", type=float, default=220.0)
-    parser.add_argument("--bbox-refine-min-context", type=float, default=120.0)
-    parser.add_argument("--bbox-refine-context-scale", type=float, default=1.0)
-    parser.add_argument("--bbox-safety-padding-min", type=float, default=12.0)
-    parser.add_argument("--bbox-safety-padding-max", type=float, default=24.0)
-    parser.add_argument("--gpu-memory-gib", type=int, default=74)
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.90)
     parser.add_argument("--vllm-max-model-len", type=int, default=32768)
     parser.add_argument("--vllm-max-images-per-prompt", type=int, default=16)
@@ -259,6 +197,9 @@ def load_selection(path: Optional[Path]) -> Optional[Dict[str, List[int]]]:
 
 
 def build_jobs(args: argparse.Namespace) -> List[GroundingJob]:
+    difficulty_dir = getattr(args, "difficulty_manifest_dir", None)
+    if difficulty_dir and not args.keep_manifest_dir:
+        raise ValueError("--difficulty-manifest-dir requires --keep-manifest-dir")
     selection = load_selection(args.selection_file)
     include = {part.strip() for part in args.include_types.split(",")} if args.include_types else None
     grouped: Dict[str, List[Path]] = {}
@@ -266,6 +207,8 @@ def build_jobs(args: argparse.Namespace) -> List[GroundingJob]:
         if selection is not None and path.name not in selection:
             continue
         raw_type = raw_type_from_filename(path)
+        if not supported_shard(path):
+            continue
         if include is not None and raw_type not in include:
             continue
         grouped.setdefault(raw_type, []).append(path)
@@ -295,6 +238,13 @@ def build_jobs(args: argparse.Namespace) -> List[GroundingJob]:
                 if not candidate.exists():
                     raise FileNotFoundError(f"keep manifest missing: {candidate}")
                 manifest_path = str(candidate)
+            difficulty_path = str(Path(difficulty_dir) / input_path.name) if difficulty_dir else None
+            quality, scene = load_filters(manifest_path, difficulty_path, total)
+            wanted = indices if indices is not None else range(num_rows)
+            selected_rows = sum(
+                apply_scene(prefilter_fields(quality.get(index)), scene.get(index), bool(difficulty_path))["filter_decision"] == "keep"
+                for index in wanted
+            )
             jobs.append(
                 GroundingJob(
                     raw_type=raw_type,
@@ -303,6 +253,8 @@ def build_jobs(args: argparse.Namespace) -> List[GroundingJob]:
                     manifest_path=manifest_path,
                     row_indices=indices,
                     num_rows=num_rows,
+                    difficulty_path=difficulty_path,
+                    selected_rows=selected_rows,
                 )
             )
     if selection is not None:
@@ -315,10 +267,10 @@ def build_jobs(args: argparse.Namespace) -> List[GroundingJob]:
 
 def assign_jobs(jobs: Sequence[GroundingJob], groups: Sequence[Sequence[int]]) -> List[Tuple[List[int], List[GroundingJob]]]:
     buckets = [{"group": list(group), "rows": 0, "jobs": []} for group in groups]
-    for job in sorted(jobs, key=lambda item: item.num_rows, reverse=True):
+    for job in sorted(jobs, key=lambda item: item.selected_rows if item.selected_rows is not None else item.num_rows, reverse=True):
         bucket = min(buckets, key=lambda item: item["rows"])
         bucket["jobs"].append(job)
-        bucket["rows"] += job.num_rows
+        bucket["rows"] += max(1, job.selected_rows if job.selected_rows is not None else job.num_rows)
     return [(item["group"], item["jobs"]) for item in buckets if item["jobs"]]
 
 
@@ -441,12 +393,6 @@ def iter_record_batches(job: GroundingJob, batch_size: int) -> Iterable[List[Tup
             break
 
 
-def load_manifest(path: Optional[str]) -> Dict[int, Dict]:
-    if path is None:
-        return {}
-    return {int(row["row_idx"]): row for row in pq.read_table(path).to_pylist()}
-
-
 def prefilter_fields(row: Optional[Dict]) -> Dict:
     if row is None:
         return {
@@ -477,51 +423,30 @@ def prefilter_fields(row: Optional[Dict]) -> Dict:
     }
 
 
-class Qwen35Grounder:
+class Qwen38Grounder:
+    @staticmethod
+    def correction_conversation(conversation, response, error):
+        return list(conversation) + [
+            {"role":"assistant", "content":[{"type":"text", "text":response}]},
+            {"role":"user", "content":[{"type":"text", "text":
+                f"Correct the JSON response. Validation error: {error}. "
+                "Include every requested candidate ID exactly once. Use the original images and schema. "
+                "Return valid JSON only, without commentary."}]},
+        ]
+
+    def shutdown(self):
+        if self.backend == "vllm":
+            engine = getattr(self.model, "llm_engine", None)
+            core = getattr(engine, "engine_core", None)
+            if core is not None:
+                core.shutdown(timeout=30.0)
+
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.backend = args.inference_backend
         self.prompt_version = prompt_version_for_mode(args.grounding_mode)
-        if self.backend == "vllm":
-            self._init_vllm()
-        else:
-            self._init_transformers()
+        self._init_vllm()
 
-    def _init_transformers(self) -> None:
-        import torch
-        from transformers import AutoProcessor, Qwen3_5MoeForConditionalGeneration
-
-        self.torch = torch
-        visible_count = torch.cuda.device_count()
-        if visible_count != self.args.tensor_parallel_size:
-            raise RuntimeError(
-                f"worker sees {visible_count} GPUs, expected TP={self.args.tensor_parallel_size}; "
-                "CUDA_VISIBLE_DEVICES must be set before importing torch"
-            )
-        max_memory = {
-            index: f"{self.args.gpu_memory_gib}GiB" for index in range(visible_count)
-        }
-        self.model = Qwen3_5MoeForConditionalGeneration.from_pretrained(
-            self.args.model_path,
-            dtype=torch.bfloat16,
-            device_map="balanced",
-            max_memory=max_memory,
-            low_cpu_mem_usage=True,
-            local_files_only=True,
-        ).eval()
-        self.processor = AutoProcessor.from_pretrained(
-            self.args.model_path, trust_remote_code=True, local_files_only=True
-        )
-        if hasattr(self.processor, "tokenizer"):
-            self.processor.tokenizer.padding_side = "left"
-        image_processor = getattr(self.processor, "image_processor", None)
-        if image_processor is not None and hasattr(image_processor, "size"):
-            image_processor.size.longest_edge = int(self.args.max_pixels)
-        self.input_device = next(
-            parameter.device
-            for parameter in self.model.parameters()
-            if parameter.device.type != "meta"
-        )
 
     def _init_vllm(self) -> None:
         # vLLM/FlashInfer may JIT-compile optimized kernels in child processes.
@@ -539,7 +464,7 @@ class Qwen35Grounder:
         except ImportError as exc:
             raise RuntimeError(
                 "vLLM backend requested but vllm is not installed; run "
-                "scripts/setup_vllm_env.sh"
+                "scripts/setup_crispedit_env.sh"
             ) from exc
 
         if not 0.0 < self.args.vllm_gpu_memory_utilization < 1.0:
@@ -577,490 +502,136 @@ class Qwen35Grounder:
         )
 
     @staticmethod
-    def _conversation(
-        source: Image.Image,
-        target: Image.Image,
-        prompt: str,
-        detail_views: Optional[Sequence[Dict]] = None,
-    ) -> List[Dict]:
-        content = [
-            {"type": "text", "text": "Image 1 (source, full image):"},
-            {"type": "image", "image": source},
-            {"type": "text", "text": "Image 2 (result, full image):"},
-            {"type": "image", "image": target},
-        ]
-        for view in detail_views or []:
-            label = view["label"]
-            normalized_box = view["normalized_box"]
-            content.extend(
-                [
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Image 1 detail tile {label} (enlarged crop of full-image "
-                            f"normalized region {normalized_box}):"
-                        ),
-                    },
-                    {"type": "image", "image": view["source"]},
-                    {"type": "text", "text": f"Image 2 matching detail tile {label}:"},
-                    {"type": "image", "image": view["target"]},
-                ]
-            )
-        content.append({"type": "text", "text": prompt})
-        return [
-            {
-                "role": "user",
-                "content": content,
-            }
-        ]
+    def _conversation(source, target, prompt):
+        return [{'role': 'user', 'content': [
+            {'type':'text', 'text':'Image 1 (source, full image):'},
+            {'type':'image', 'image':source},
+            {'type':'text', 'text':'Image 2 (result, full image):'},
+            {'type':'image', 'image':target}, {'type':'text', 'text':prompt}]}]
 
-    @staticmethod
-    def _followup_conversation(
-        source: Image.Image,
-        target: Image.Image,
-        observation_prompt: str,
-        observation_response: str,
-        grounding_prompt: str,
-        detail_views: Optional[Sequence[Dict]] = None,
-    ) -> List[Dict]:
-        """Rebuild the first turn plus its answer, then ask the grounding follow-up."""
 
-        first_turn = Qwen35Grounder._conversation(
-            source, target, observation_prompt, detail_views
-        )[0]
-        return [
-            first_turn,
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": observation_response}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": grounding_prompt}],
-            },
-        ]
 
-    @staticmethod
-    def _bbox_refinement_conversation(views: Sequence[Dict], prompt: str) -> List[Dict]:
-        content = []
-        for view in views:
-            content.extend(
-                [
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Candidate {view['candidate_id']} enlarged crop for ref "
-                            f"{json.dumps(view['ref'], ensure_ascii=False)}:"
-                        ),
-                    },
-                    {"type": "image", "image": view["image"]},
-                ]
-            )
-        content.append({"type": "text", "text": prompt})
-        return [{"role": "user", "content": content}]
 
-    def _bbox_refinement_views(
-        self, image: Image.Image, boxes: Sequence[Dict]
-    ) -> List[Dict]:
-        views = []
-        for candidate_id, box in enumerate(boxes):
-            should_refine = self.args.bbox_refinement == "all" or (
-                self.args.bbox_refinement == "small"
-                and box_needs_local_refinement(box, self.args.bbox_refine_threshold)
-            )
-            if not should_refine:
-                continue
-            crop_bbox = bbox_refinement_crop(
-                box["bbox_2d"],
-                min_context=self.args.bbox_refine_min_context,
-                context_scale=self.args.bbox_refine_context_scale,
-            )
-            width, height = image.size
-            pixel_crop = (
-                round(crop_bbox[0] * width / 1000.0),
-                round(crop_bbox[1] * height / 1000.0),
-                round(crop_bbox[2] * width / 1000.0),
-                round(crop_bbox[3] * height / 1000.0),
-            )
-            views.append(
-                {
-                    "candidate_id": candidate_id,
-                    "ref": box["ref"],
-                    "initial_bbox": list(box["bbox_2d"]),
-                    "crop_bbox": crop_bbox,
-                    "image": image.crop(pixel_crop),
-                }
-            )
-        return views
-
-    def _generate_once(self, conversations: Sequence[List[Dict]]) -> List[str]:
-        if self.backend == "vllm":
-            for conversation in conversations:
-                image_count = conversation_image_count(conversation)
-                if image_count > self.args.vllm_max_images_per_prompt:
-                    raise ValueError(
-                        f"request has {image_count} images, exceeding "
-                        f"--vllm-max-images-per-prompt="
-                        f"{self.args.vllm_max_images_per_prompt}"
-                    )
-            outputs = self.model.chat(
-                messages=conversations_for_vllm(conversations),
-                sampling_params=self.sampling_params,
-                use_tqdm=False,
-                chat_template_kwargs={"enable_thinking": False},
-            )
-            return [output.outputs[0].text for output in outputs]
-
-        inputs = self.processor.apply_chat_template(
-            list(conversations),
-            tokenize=True,
-            add_generation_prompt=True,
-            enable_thinking=False,
-            return_dict=True,
-            return_tensors="pt",
-            processor_kwargs={"padding": True},
-        ).to(self.input_device)
-        prompt_width = int(inputs.input_ids.shape[1])
-        with self.torch.inference_mode():
-            generated = self.model.generate(
-                **inputs,
-                max_new_tokens=self.args.max_new_tokens,
-                do_sample=False,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-            )
-        return self.processor.batch_decode(
-            generated[:, prompt_width:],
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
+    def _generate_once(self, conversations: Sequence[List[Dict]], max_tokens=None) -> List[str]:
+        for conversation in conversations:
+            image_count = conversation_image_count(conversation)
+            if image_count > self.args.vllm_max_images_per_prompt:
+                raise ValueError(
+                    f"request has {image_count} images, exceeding "
+                    f"--vllm-max-images-per-prompt="
+                    f"{self.args.vllm_max_images_per_prompt}"
+                )
+        params = copy.copy(self.sampling_params)
+        params.max_tokens = max_tokens or self.args.max_new_tokens
+        outputs = self.model.chat(
+            messages=conversations_for_vllm(conversations),
+            sampling_params=params,
+            use_tqdm=False,
+            chat_template_kwargs={"enable_thinking": False},
         )
+        self._last_batch_stats = [{"finish_reason": output.outputs[0].finish_reason,
+                                   "output_tokens": len(output.outputs[0].token_ids)} for output in outputs]
+        return [output.outputs[0].text for output in outputs]
 
-    def _generate_with_oom_backoff(
-        self, conversations: Sequence[List[Dict]]
-    ) -> List[str]:
-        if self.backend == "vllm":
-            # vLLM schedules the submitted requests against its profiled KV and
-            # multimodal caches, so manual recursive microbatching is unnecessary.
-            return self._generate_once(conversations)
-        try:
-            return self._generate_once(conversations)
-        except self.torch.cuda.OutOfMemoryError:
-            if len(conversations) <= 1:
-                raise
-            for device_index in range(self.torch.cuda.device_count()):
-                with self.torch.cuda.device(device_index):
-                    self.torch.cuda.empty_cache()
-            midpoint = len(conversations) // 2
-            print(
-                f"CUDA OOM for request batch {len(conversations)}; "
-                f"retrying as {midpoint}+{len(conversations) - midpoint}",
-                flush=True,
-            )
-            return self._generate_with_oom_backoff(
-                conversations[:midpoint]
-            ) + self._generate_with_oom_backoff(conversations[midpoint:])
 
-    def _generate(self, conversations: Sequence[List[Dict]]) -> List[str]:
+
+    def _generate(self, conversations: Sequence[List[Dict]], max_tokens=None) -> List[str]:
         outputs: List[str] = []
+        self.last_generation_stats = []
         for chunk in split_conversations_by_image_budget(
             conversations, self.args.max_images_per_generate
         ):
-            outputs.extend(self._generate_with_oom_backoff(chunk))
+            outputs.extend(self._generate_once(chunk, max_tokens))
+            self.last_generation_stats.extend(self._last_batch_stats)
         return outputs
 
+
     def infer(self, samples: Sequence[Dict]) -> List[Dict]:
-        requests: List[Tuple[int, str, List[Dict]]] = []
-        payloads = [
-            {
-                "schema_version": 2 if self.args.grounding_mode == "two-pass" else 1,
-                "prompt_version": self.prompt_version,
-                "grounding_mode": self.args.grounding_mode,
-                "requests": [],
-                "boxes": {"source": [], "target": []},
-            }
-            for _ in samples
-        ]
-
-        observations: List[Optional[Dict]] = [None] * len(samples)
-        if self.args.grounding_mode == "two-pass":
-            observation_jobs = []
-            for sample_index, sample in enumerate(samples):
-                prompt = build_change_observation_prompt(
-                    sample["type"],
-                    sample["instruction"],
-                    background_observation_mode=self.args.background_observation_mode,
-                )
-                detail_views = build_local_detail_views(
-                    sample["type"], sample["input_img"], sample["output_img"]
-                )
-                conversation = self._conversation(
-                    sample["input_img"], sample["output_img"], prompt, detail_views
-                )
-                observation_jobs.append((sample_index, prompt, conversation, detail_views))
-            for start in range(0, len(observation_jobs), self.args.request_batch_size):
-                chunk = observation_jobs[start : start + self.args.request_batch_size]
-                texts = self._generate([item[2] for item in chunk])
-                for (sample_index, prompt, conversation, detail_views), initial_text in zip(chunk, texts):
-                    text = initial_text
-                    error = ""
-                    parsed: Dict = {}
-                    for attempt in range(self.args.parse_retries + 1):
-                        try:
-                            parsed = parse_change_observation(text)
-                            error = ""
-                            break
-                        except Exception as exc:
-                            error = repr(exc)
-                            if attempt < self.args.parse_retries:
-                                text = self._generate([conversation])[0]
-                    observation = {
-                        "prompt_version": (
-                            BACKGROUND_FOREGROUND_OBSERVATION_PROMPT_VERSION
-                            if canonicalize_type(samples[sample_index]["type"]) == "background"
-                            and self.args.background_observation_mode == "foreground-audit"
-                            else OBSERVATION_PROMPT_VERSION
-                        ),
-                        "prompt": prompt,
-                        "raw_text": text,
-                        "parsed": parsed,
-                        "parse_ok": not error,
-                        "error": error,
-                    }
-                    if detail_views:
-                        observation["detail_views"] = [
-                            {
-                                "label": view["label"],
-                                "normalized_box": view["normalized_box"],
-                            }
-                            for view in detail_views
-                        ]
-                    observations[sample_index] = observation
-                    payloads[sample_index]["observation"] = observation
-
-        for sample_index, sample in enumerate(samples):
-            observation = observations[sample_index]
-            observation_context = observation["parsed"] if observation and observation["parse_ok"] else None
-            # A malformed observation remains useful natural-language evidence
-            # for the follow-up, but does not become a trusted JSON checklist.
-            if observation and not observation["parse_ok"] and observation["raw_text"].strip():
-                observation_context = {"unparsed_observation": observation["raw_text"].strip()}
-            for request in build_grounding_requests(
-                sample["type"],
-                sample["instruction"],
-                observation_context,
-                background_observation_mode=self.args.background_observation_mode,
-            ):
-                if observation is not None:
-                    detail_views = build_local_detail_views(
-                        sample["type"], sample["input_img"], sample["output_img"]
-                    )
-                    is_supplemental_side = request.grounding_image not in grounding_images(
-                        sample["type"]
-                    )
-                    # For color/material verification and opposite-side
-                    # collateral edits, the raw first answer can anchor pass 2
-                    # to an erroneous `changed=false` or wrong-side entity.
-                    # The normalized first-pass specification is already
-                    # embedded in request.prompt, so use a clean second turn.
-                    if canonicalize_type(sample["type"]) == "color" or is_supplemental_side:
-                        conversation = self._conversation(
-                            sample["input_img"],
-                            sample["output_img"],
-                            request.prompt,
-                            detail_views,
-                        )
-                    else:
-                        conversation = self._followup_conversation(
-                            sample["input_img"],
-                            sample["output_img"],
-                            observation["prompt"],
-                            observation["raw_text"],
-                            request.prompt,
-                            detail_views,
-                        )
-                else:
-                    conversation = self._conversation(
-                        sample["input_img"], sample["output_img"], request.prompt
-                    )
-                requests.append((sample_index, request.grounding_image, conversation))
-
-        parsed_results: List[Dict] = []
+        payloads = [{"schema_version": 2, "prompt_version": self.prompt_version,
+                     "grounding_mode": "two-pass", "requests": [],
+                     "boxes": {"source": [], "target": []}} for _ in samples]
+        jobs = []
+        for index, sample in enumerate(samples):
+            prompt = build_change_observation_prompt(sample['type'], sample['instruction'])
+            conversation = self._conversation(sample['input_img'], sample['output_img'], prompt)
+            jobs.append((index, prompt, conversation))
+        for start in range(0, len(jobs), self.args.request_batch_size):
+            chunk = jobs[start:start + self.args.request_batch_size]
+            budget = self.args.observation_max_new_tokens
+            texts = self._generate([item[2] for item in chunk], max_tokens=budget)
+            stats = list(self.last_generation_stats)
+            for (index, prompt, conversation), text, initial_stats in zip(chunk, texts, stats):
+                parsed, error = {}, ''
+                attempts = [{"raw_text": text, "max_tokens": budget, **initial_stats}]
+                for attempt in range(self.args.parse_retries + 1):
+                    try:
+                        strict_json(text)
+                        parsed = parse_change_observation(text)
+                        for identity, change in enumerate(parsed['changes']):
+                            change['change_id'] = identity
+                        error = ''
+                        break
+                    except (ValueError, TypeError, KeyError) as exc:
+                        error = repr(exc)
+                        if attempt < self.args.parse_retries:
+                            if attempts[-1].get('finish_reason') == 'length':
+                                retry = [{**conversation[0], 'content': [
+                                    *conversation[0]['content'], {'type': 'text', 'text':
+                                    'Return a COMPLETE concise JSON object. Keep descriptions short; '
+                                    'group nearby tiny elements. Do not repeat an item.'}]}]
+                            else:
+                                retry = self.correction_conversation(conversation, text, error)
+                            text = self._generate([retry], max_tokens=budget * 2)[0]
+                            attempts.append({'raw_text': text, 'max_tokens': budget * 2,
+                                             **self.last_generation_stats[0]})
+                payloads[index]['observation'] = {
+                    'prompt_version': OBSERVATION_PROMPT_VERSION, 'prompt': prompt,
+                    'raw_text': text, 'parsed': parsed, 'parse_ok': not error,
+                    'error': error, 'attempts': attempts}
+        requests = []
+        for index, sample in enumerate(samples):
+            payload = payloads[index]
+            observation = payload['observation']
+            if not observation['parse_ok']:
+                payload['observation_failed'] = True
+                continue
+            context = observation['parsed']
+            if not context['changes']:
+                payload['no_realized_changes'] = True
+                continue
+            if canonicalize_type(sample['type']) != 'add':
+                payload['canvas_issues'] = [
+                    {'change_id': c['change_id'], 'reason': 'TARGET_ONLY_EDIT_IN_SOURCE_ONLY_TYPE'}
+                    for c in context['changes'] if not c['source_ref'] and c['target_ref']]
+            for request in build_grounding_requests(sample['type'], sample['instruction'], context):
+                if not grounding_checklist(context, request.grounding_image):
+                    continue
+                selected = sample['input_img'] if request.grounding_image == 'source' else sample['output_img']
+                conversation = [{'role': 'user', 'content': [
+                    {'type': 'text', 'text': f'Full {request.grounding_image} image:'},
+                    {'type': 'image', 'image': selected}, {'type': 'text', 'text': request.prompt}]}]
+                requests.append((index, request.grounding_image, conversation))
         for start in range(0, len(requests), self.args.request_batch_size):
-            chunk = requests[start : start + self.args.request_batch_size]
-            conversations = [item[2] for item in chunk]
-            texts = self._generate(conversations)
-            for (sample_index, _, conversation), text in zip(chunk, texts):
-                error = ""
-                boxes: List[Dict] = []
+            chunk = requests[start:start + self.args.request_batch_size]
+            texts = self._generate([item[2] for item in chunk])
+            for (index, side, conversation), text in zip(chunk, texts):
+                boxes, unresolved, attempts, error = [], [], [], ''
                 for attempt in range(self.args.parse_retries + 1):
+                    attempts.append({'raw_text': text})
                     try:
-                        boxes = parse_grounding_output(text)
-                        error = ""
+                        boxes, unresolved = parse_checklist_grounding(
+                            text, payloads[index]['observation']['parsed'], side)
+                        error = ''
                         break
-                    except Exception as exc:
+                    except (ValueError, TypeError, KeyError) as exc:
                         error = repr(exc)
                         if attempt < self.args.parse_retries:
-                            text = self._generate([conversation])[0]
-                empty_retry = None
-                if (
-                    self.args.background_observation_mode == "foreground-audit"
-                    and canonicalize_type(samples[sample_index]["type"]) == "background"
-                    and not error
-                    and not boxes
-                ):
-                    observation = observations[sample_index] or {}
-                    observation_mode = (
-                        observation.get("parsed", {}).get("background_mask_mode")
-                        if observation.get("parse_ok")
-                        else ""
-                    )
-                    if observation_mode != "full_image":
-                        retry_text = self._generate([conversation])[0]
-                        retry_error = ""
-                        retry_boxes: List[Dict] = []
-                        try:
-                            retry_boxes = parse_grounding_output(retry_text)
-                        except Exception as exc:
-                            retry_error = repr(exc)
-                        empty_retry = {
-                            "raw_text": retry_text,
-                            "boxes": retry_boxes,
-                            "parse_ok": not retry_error,
-                            "error": retry_error,
-                        }
-                        if retry_boxes:
-                            text = retry_text
-                            boxes = retry_boxes
-                            error = retry_error
-                result = {
-                    "raw_text": text,
-                    "boxes": boxes,
-                    "parse_ok": not error,
-                    "error": error,
-                }
-                if empty_retry is not None:
-                    result["empty_box_retry"] = empty_retry
-                parsed_results.append(result)
-
-        refinement_jobs = []
-        if self.args.bbox_refinement != "off":
-            for result_index, ((sample_index, grounding_image, _), result) in enumerate(
-                zip(requests, parsed_results)
-            ):
-                if not result["parse_ok"] or not result["boxes"]:
-                    continue
-                sample = samples[sample_index]
-                # Background boxes identify foreground content to protect, not
-                # the edit region itself.  Enlarging/refining those boxes can
-                # unnecessarily subtract editable background, so preserve the
-                # established background route exactly.
-                if not local_bbox_refinement_enabled(sample["type"]):
-                    continue
-                selected_image = (
-                    sample["input_img"] if grounding_image == "source" else sample["output_img"]
-                )
-                views = self._bbox_refinement_views(selected_image, result["boxes"])
-                if not views:
-                    continue
-                candidates = [
-                    {
-                        "candidate_id": view["candidate_id"],
-                        "ref": view["ref"],
-                        "initial_bbox": view["initial_bbox"],
-                        "crop_bbox": view["crop_bbox"],
-                    }
-                    for view in views
-                ]
-                prompt = build_bbox_refinement_prompt(candidates)
-                conversation = self._bbox_refinement_conversation(views, prompt)
-                refinement_jobs.append(
-                    {
-                        "result_index": result_index,
-                        "views": views,
-                        "prompt": prompt,
-                        "conversation": conversation,
-                    }
-                )
-
-        for start in range(0, len(refinement_jobs), self.args.request_batch_size):
-            chunk = refinement_jobs[start : start + self.args.request_batch_size]
-            texts = self._generate([job["conversation"] for job in chunk])
-            for job, initial_text in zip(chunk, texts):
-                text = initial_text
-                error = ""
-                refinements: List[Dict] = []
-                for attempt in range(self.args.parse_retries + 1):
-                    try:
-                        refinements = parse_bbox_refinement_output(text)
-                        error = ""
-                        break
-                    except Exception as exc:
-                        error = repr(exc)
-                        if attempt < self.args.parse_retries:
-                            text = self._generate([job["conversation"]])[0]
-
-                result = parsed_results[job["result_index"]]
-                initial_boxes = [dict(box) for box in result["boxes"]]
-                final_boxes = [dict(box) for box in initial_boxes]
-                refined_by_id = {
-                    item["candidate_id"]: item for item in refinements
-                } if not error else {}
-                audit_candidates = []
-                for view in job["views"]:
-                    candidate_id = view["candidate_id"]
-                    refined = refined_by_id.get(candidate_id)
-                    mapped_bbox = None
-                    if refined is not None:
-                        mapped_bbox = map_crop_bbox_to_full(
-                            view["crop_bbox"], refined["bbox_2d"]
-                        )
-                    final_bbox = conservative_refined_bbox(
-                        view["initial_bbox"],
-                        mapped_bbox,
-                        min_padding=self.args.bbox_safety_padding_min,
-                        max_padding=self.args.bbox_safety_padding_max,
-                    )
-                    final_boxes[candidate_id]["bbox_2d"] = final_bbox
-                    audit_candidates.append(
-                        {
-                            "candidate_id": candidate_id,
-                            "ref": view["ref"],
-                            "initial_bbox": view["initial_bbox"],
-                            "crop_bbox": view["crop_bbox"],
-                            "refined_crop_bbox": refined["bbox_2d"] if refined else None,
-                            "refined_full_bbox": mapped_bbox,
-                            "final_bbox": final_bbox,
-                        }
-                    )
-                result["initial_boxes"] = initial_boxes
-                result["boxes"] = final_boxes
-                result["bbox_refinement"] = {
-                    "prompt_version": BBOX_REFINEMENT_PROMPT_VERSION,
-                    "prompt": job["prompt"],
-                    "raw_text": text,
-                    "parse_ok": not error,
-                    "error": error,
-                    "candidates": audit_candidates,
-                }
-
-        for request, result in zip(requests, parsed_results):
-            sample_index, grounding_image, _ = request
-            entry = {"grounding_image": grounding_image, **result}
-            payloads[sample_index]["requests"].append(entry)
-            payloads[sample_index]["boxes"][grounding_image] = result["boxes"]
-        if self.args.background_observation_mode == "foreground-audit":
-            for sample_index, sample in enumerate(samples):
-                if canonicalize_type(sample["type"]) != "background":
-                    continue
-                observation = observations[sample_index] or {}
-                audit = observation.get("parsed", {}) if observation.get("parse_ok") else {}
-                if payloads[sample_index]["boxes"].get("source"):
-                    payloads[sample_index]["background_mask_mode"] = "exclude_foreground"
-                elif audit.get("background_mask_mode") == "full_image":
-                    payloads[sample_index]["background_mask_mode"] = "full_image"
-                else:
-                    payloads[sample_index]["background_mask_mode"] = "unresolved"
+                            text = self._generate([self.correction_conversation(conversation, text, error)],
+                                                  max_tokens=self.args.max_new_tokens * 2)[0]
+                payloads[index]['requests'].append({'grounding_image': side, 'raw_text': text,
+                    'boxes': boxes, 'parse_ok': not error, 'error': error,
+                    'unresolved': unresolved, 'attempts': attempts})
+                payloads[index]['boxes'][side] = boxes
         return payloads
 
 
@@ -1101,67 +672,20 @@ def _skip_row(
     }
 
 
-def _style_row(
-    row_idx: int,
-    record: Dict,
-    pre: Dict,
-    model_name: str,
-    prompt_version: str,
-    grounding_mode: str,
-) -> Dict:
-    """Emit the grounding contract for style edits without unused MLLM work."""
-
-    source_width, source_height = image_size(record["input_img"])
-    target_width, target_height = image_size(record["output_img"])
-    payload = {
-        "schema_version": 2 if grounding_mode == "two-pass" else 1,
-        "prompt_version": prompt_version,
-        "grounding_mode": grounding_mode,
-        "requests": [],
-        "boxes": {"source": [], "target": []},
-        "style_full_image_fast_path": True,
-    }
-    return {
-        "row_idx": row_idx,
-        "raw_type": str(record.get("type", "")),
-        "canonical_type": "style",
-        "instruction": str(record.get("instruction", "")),
-        "ground_json": json.dumps(payload, ensure_ascii=False),
-        "ground_parse_ok": True,
-        "grounding_status": "STYLE_FULL_IMAGE",
-        "qc_flag": "OK",
-        "source_width": source_width,
-        "source_height": source_height,
-        "target_width": target_width,
-        "target_height": target_height,
-        "mllm_model": model_name,
-        "prompt_version": prompt_version,
-        "grounding_seconds": 0.0,
-        **pre,
-    }
 
 
 def _result_row(row_idx: int, sample: Dict, payload: Dict, pre: Dict, model_name: str, seconds: float) -> Dict:
     etype = canonicalize_type(sample["type"])
-    parse_ok = not payload.get("runtime_error") and all(
+    parse_ok = not payload.get("runtime_error") and not payload.get("observation_failed") and all(
         bool(item["parse_ok"]) for item in payload["requests"]
     )
-    background_full_image = (
-        etype == "background"
-        and payload.get("background_mask_mode") == "full_image"
-        and not payload["boxes"].get("source")
-    )
-    complete = parse_ok and (
-        background_full_image or grounding_is_complete(etype, payload["boxes"])
-    )
-    if etype == "style":
-        status = "STYLE_FULL_IMAGE"
-    elif not parse_ok:
+    complete = parse_ok and not any(item.get("unresolved") for item in payload["requests"]) and grounding_is_complete(etype, payload["boxes"])
+    if not parse_ok:
         status = "PARSE_ERROR"
-    elif background_full_image:
-        status = "BACKGROUND_FULL_IMAGE"
-    elif complete and etype == "replace" and not all(payload["boxes"].get(side) for side in ("source", "target")):
-        status = "PARTIAL_OK"
+    elif complete and (payload.get('canvas_issues') or any(
+            item.get('evidence_issues') or item.get('refinement_identity_issues') for item in payload['requests'])
+            or payload.get('coverage_review_failed')):
+        status = 'GROUND_REVIEW'
     elif complete:
         status = "OK"
     else:
@@ -1174,7 +698,7 @@ def _result_row(row_idx: int, sample: Dict, payload: Dict, pre: Dict, model_name
         "ground_json": json.dumps(payload, ensure_ascii=False),
         "ground_parse_ok": parse_ok,
         "grounding_status": status,
-        "qc_flag": "OK" if complete else "GROUND_FAIL",
+        "qc_flag": ('GROUND_REVIEW' if status == 'GROUND_REVIEW' else 'OK') if complete else "GROUND_FAIL",
         "source_width": sample["input_img"].width,
         "source_height": sample["input_img"].height,
         "target_width": sample["output_img"].width,
@@ -1188,14 +712,16 @@ def _result_row(row_idx: int, sample: Dict, payload: Dict, pre: Dict, model_name
 
 def process_job(
     job: GroundingJob,
-    grounder: Qwen35Grounder,
+    grounder: Qwen38Grounder,
     args: argparse.Namespace,
     progress_queue,
     worker_index: int,
 ) -> Dict:
     output_path = Path(job.output_path)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    manifest = load_manifest(job.manifest_path)
+    manifest, scene = load_filters(job.manifest_path, job.difficulty_path,
+                                  pq.ParquetFile(job.input_path).metadata.num_rows)
+    output_schema = signed_schema(GROUND_SCHEMA, grounding_signature(job, args))
     model_name = Path(args.model_path).name
     writer = None
     summary = {
@@ -1216,29 +742,17 @@ def process_job(
                 manifest_row = manifest.get(row_idx) if job.manifest_path else None
                 if job.manifest_path and manifest_row is None:
                     raise KeyError(f"missing manifest row {Path(job.input_path).name}:{row_idx}")
-                pre = prefilter_fields(manifest_row)
+                pre = apply_scene(prefilter_fields(manifest_row), scene.get(row_idx), bool(job.difficulty_path))
                 if pre["filter_decision"] != "keep":
                     out_rows[slot] = _skip_row(
                         row_idx,
                         record,
                         pre,
                         model_name,
-                        grounder.prompt_version,
+                        prompt_version_for_mode(args.grounding_mode),
                         args.grounding_mode,
                     )
                     summary["prefilter_skipped"] += 1
-                elif canonicalize_type(record.get("type")) == "style":
-                    # Stage 2 always emits an all-ones mask for style. Running
-                    # Qwen here cannot affect that mask and consumed roughly
-                    # 30% of all production keep-row MLLM calls.
-                    out_rows[slot] = _style_row(
-                        row_idx,
-                        record,
-                        pre,
-                        model_name,
-                        grounder.prompt_version,
-                        args.grounding_mode,
-                    )
                 else:
                     sample = {
                         "input_img": decode_image(record["input_img"]),
@@ -1281,10 +795,10 @@ def process_job(
                 summary["observation_parse_fail"] += int(
                     bool(observation) and not bool(observation.get("parse_ok"))
                 )
-            table = pa.Table.from_pylist(rows, schema=GROUND_SCHEMA)
+            table = pa.Table.from_pylist(rows, schema=output_schema)
             if writer is None:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                writer = pq.ParquetWriter(tmp_path, GROUND_SCHEMA, compression=args.compression)
+                writer = pq.ParquetWriter(tmp_path, output_schema, compression=args.compression)
             writer.write_table(table)
             summary["rows"] += len(rows)
             progress_queue.put(
@@ -1297,6 +811,8 @@ def process_job(
                     "total_rows": job.num_rows,
                 }
             )
+        if summary["rows"] != job.num_rows:
+            raise ValueError(f"incomplete grounding shard: {job.input_path}")
         completed = True
     finally:
         if writer is not None:
@@ -1306,9 +822,37 @@ def process_job(
     return summary
 
 
+def grounding_signature(job, args):
+    excluded = {"output_dir", "input_dir", "keep_manifest_dir", "difficulty_manifest_dir",
+                "devices", "overwrite", "progress_mininterval", "selection_file", "fail_fast"}
+    settings = {key: value for key, value in vars(args).items() if key not in excluded}
+    settings["row_indices"] = job.row_indices
+    return signature(job.input_path, [job.manifest_path, job.difficulty_path, __file__,
+                     Path(__file__).with_name("grounding.py"), Path(__file__).with_name("checklist.py"),
+                     Path(__file__).with_name("selection.py")], settings)
+
+
+def summarize_grounding(table):
+    rows = table.to_pylist()
+    statuses = {}
+    errors = observation_errors = 0
+    for row in rows:
+        status = row["grounding_status"]
+        statuses[status] = statuses.get(status, 0) + 1
+        payload = json.loads(row["ground_json"])
+        errors += bool(payload.get("runtime_error"))
+        observation = payload.get("observation")
+        observation_errors += bool(observation) and not bool(observation.get("parse_ok"))
+    return {"rows": len(rows), "errors": errors, "statuses": statuses,
+            "prefilter_skipped": statuses.get("PREFILTER_SKIP", 0),
+            "ground_fail": sum(row["qc_flag"] == "GROUND_FAIL" for row in rows),
+            "observation_parse_fail": observation_errors}
+
+
 def worker_main(worker_index: int, physical_devices: List[int], jobs: List[GroundingJob], args_dict: Dict, progress_queue) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(device) for device in physical_devices)
     args = argparse.Namespace(**args_dict)
+    grounder = None
     try:
         progress_queue.put(
             {
@@ -1316,30 +860,29 @@ def worker_main(worker_index: int, physical_devices: List[int], jobs: List[Groun
                 "message": f"ground-worker-{worker_index} loading TP={len(physical_devices)} on physical GPUs {physical_devices}",
             }
         )
-        grounder = Qwen35Grounder(args)
         for job in jobs:
             output_path = Path(job.output_path)
-            if output_path.exists() and not args.overwrite:
-                rows = pq.ParquetFile(output_path).metadata.num_rows
-                summary = {
-                    "rows": rows,
-                    "errors": 0,
-                    "ground_fail": 0,
-                    "observation_parse_fail": 0,
-                    "prefilter_skipped": 0,
-                    "statuses": {},
-                    "skipped_existing": True,
-                }
-                progress_queue.put({"kind": "rows", "count": rows})
+            expected = job.row_indices if job.row_indices is not None else range(job.num_rows)
+            existing = None if args.overwrite else reusable_table(output_path, grounding_signature(job, args), GROUND_SCHEMA, expected)
+            if existing is not None and summarize_grounding(existing)["errors"]:
+                existing = None
+            if existing is not None:
+                summary = {**summarize_grounding(existing), "skipped_existing": True}
+                progress_queue.put({"kind": "rows", "count": summary["rows"]})
             else:
+                if job.selected_rows != 0 and grounder is None:
+                    grounder = Qwen38Grounder(args)
                 summary = process_job(job, grounder, args, progress_queue, worker_index)
             progress_queue.put({"kind": "shard_done", "worker": worker_index, "shard": job.input_path, "summary": summary})
     except Exception as exc:
         progress_queue.put({"kind": "worker_error", "worker": worker_index, "devices": physical_devices, "error": repr(exc)})
-        if args.fail_fast:
-            raise
+        raise
     finally:
-        progress_queue.put({"kind": "worker_done", "worker": worker_index})
+        try:
+            if grounder is not None:
+                grounder.shutdown()
+        finally:
+            progress_queue.put({"kind": "worker_done", "worker": worker_index})
 
 
 def aggregate(summaries: Sequence[Dict]) -> Dict:
@@ -1367,6 +910,9 @@ def main() -> None:
     args.model_path = str(Path(args.model_path).resolve())
     if args.keep_manifest_dir is not None:
         args.keep_manifest_dir = args.keep_manifest_dir.resolve()
+    if args.difficulty_manifest_dir is not None:
+        args.difficulty_manifest_dir = args.difficulty_manifest_dir.resolve()
+    check_output_location(args.output_dir, args.input_dir, args.keep_manifest_dir, args.difficulty_manifest_dir)
     if args.selection_file is not None:
         args.selection_file = args.selection_file.resolve()
     jobs = build_jobs(args)
@@ -1380,6 +926,7 @@ def main() -> None:
         "prompt_version": prompt_version_for_mode(args.grounding_mode),
         "device_groups": groups,
         "total_rows": sum(job.num_rows for job in jobs),
+        "selected_rows": sum(job.selected_rows for job in jobs),
         "args": args_dict,
         "jobs": [asdict(job) for job in jobs],
     }
@@ -1437,10 +984,16 @@ def main() -> None:
             process.join()
 
     summary = aggregate(summaries)
+    summary["expected_rows"] = total_rows
+    summary["expected_shards"] = len(jobs)
+    summary["shards"] = len(summaries)
+    summary["selected_rows"] = sum(job.selected_rows for job in jobs)
+    summary["skipped_existing_shards"] = sum(bool(item["summary"].get("skipped_existing")) for item in summaries)
+    summary["worker_exit_codes"] = [process.exitcode for process in processes]
     summary["worker_errors"] = worker_errors
     (args.output_dir / "run_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=False))
-    if worker_errors or summary["errors"]:
+    if worker_errors or summary["errors"] or summary["rows"] != total_rows or len(summaries) != len(jobs) or any(process.exitcode != 0 for process in processes):
         raise SystemExit(1)
 
 
