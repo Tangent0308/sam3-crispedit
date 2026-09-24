@@ -38,6 +38,13 @@ test_*.py
 !tests/test_ownership_execution.py
 !tests/test_removal_harmonization.py
 !tests/test_multinode_labeling.py
+!tests/test_audit_geometry.py
+!tests/test_qwen21_omni.py
+!tests/test_removal_completion_audit.py
+!tests/test_removal_concise_audit.py
+!tests/test_removal_grounding_repair.py
+!tests/test_reviewed_release.py
+!tests/test_support_relation_planning.py
 .runtime/
 .artifacts/
 experiments/
