@@ -126,8 +126,15 @@ bash scripts/bootstrap_crispedit_4node.sh
 该运行新增 0 行、0 parquet，未进入细粒度或 mask；失败日志保留。新实现移除 GUI 包与共享环境包方案，并在规划前运行真实引擎预检查。
 
 本轮验证记录：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/`。
-`install.log` 记录全新本地安装，`preflight.log` / `preflight.json` 记录 CUDA、spawn 和实际 Qwen 双图推理，`tests.log` 记录回归测试。
-完整 GPU 链路验证结果在本轮完成后补充；物理四机重新提交由用户执行，不将本机四 rank 验证称为四台物理机器验收。
+`install.log` 记录全新本地安装，`preflight.log` / `preflight.json` 记录已通过的 8 卡 CUDA、spawn 和实际 Qwen 双图推理，`tests.log` 记录 198 项通过的回归测试。
+`clone_install.log` 是从提交 `b045184` 克隆到干净本地目录后重新安装的记录；`install_reuse.log` 确认完整环境可重复检查复用。
+安装与测试过程中基础 Python 和依赖均位于对应 clone，OpenCV 动态依赖无 libGL/Qt。
+干净 clone 使用自身新装环境完成真实一机 8×H100、四 rank 全链路：20 条质量 PASS → 19 场景 PASS / 1 DROP → 19 非空 mask、35 实例，0 解析/运行错误，四 rank 均 exit 0。
+成功标记：`smoke/run/control/initial/complete.ok`；逐阶段 tqdm 在 `smoke/run/logs/`，汇总在 `smoke/run/reports/`，抽样原始行号映射在 `smoke/provenance.json`。
+[本轮 19 条可视化](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/review/index.html)。自动 OK 只作运行验证，不等于语义准确率。
+验证期间已移除旧共享基础 Python，后续阶段仍成功；测试用 clone 完成后清理，Git 提交及日志保留。
+物理四机重新提交由用户执行，不将本机四 rank 验证称为四台物理机器验收。
 
-之前的共享代码与环境仅为启动副本，修复后删除 `workspaces/crispedit_labeling_20260924` 和
-`workspaces/sam3-crispedit_prefilter_4node_20260923`；原始数据、正式筛选、历次打标与失败日志保留。
+已删除共享启动副本 `workspaces/crispedit_labeling_20260924`（含环境包）、
+`workspaces/sam3-crispedit_prefilter_4node_20260923`（含基础 Python/venv），以及本机旧的 `.cache/crispedit_runtime_20260924`。
+原始数据、模型、正式筛选、历次打标与失败日志保留；环境可用 Git 中的安装脚本重建。

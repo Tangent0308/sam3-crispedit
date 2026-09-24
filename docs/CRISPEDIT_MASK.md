@@ -138,6 +138,11 @@ mask 目录包含 `grounding/`、`mask/`、`grounding.log`、`mask.log`、`valid
 2026-09-24 整理后真实一机 8 卡、四 rank 全流程：五类各 4 条，质量 20 PASS，场景 19 PASS / 1 DROP，19 条均产出非空 mask（35 实例），0 解析/运行错误。
 [本次 19 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/pipeline_4rank_verified_20260924/cached_review/index.html)。该轮结果作为历史验证保留；当前运行已改为各节点 git clone 和本地安装，见[四机指南](CRISPEDIT_4NODE.md)。链路验证不代表质量问题已解决。
 
+修复四机 OpenCV 缺库后，从干净 Git clone 重新安装本地 Python/依赖，完成相同 20 条的 8 卡四 rank 复验：
+20 质量 PASS → 19 场景 PASS → 19 非空 mask / 35 实例，0 解析/运行错误，198 项测试通过。
+[本地安装复验画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/review/index.html)，
+完整日志与汇总在 `experiments/CrispEdit/local_env_fix_20260924/smoke/run/`。四机当前入口已移除共享代码/环境包依赖。
+
 重建本次画廊（测试副本有重编号，原 shard / row_idx 映射在 `provenance.json`）：
 
 ```bash
