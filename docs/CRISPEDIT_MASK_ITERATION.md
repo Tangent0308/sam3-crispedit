@@ -14,7 +14,14 @@
 原始数据、正式筛选、打标结果和故障日志继续保留。
 
 验证根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/`。
-`install.log` 为从头安装，`preflight.log` 为实际 Qwen 预检查，`tests.log` 为回归；完整链路结果完成后补充。
+`install.log` 为从头安装，`preflight.log` 为已通过的实际 Qwen 双图预检查，`tests.log` 记录 198 项测试通过。
+从提交 `b045184` 克隆的干净本地副本独立安装通过（`clone_install.log`），基础 Python 和全部依赖都在 clone 内；
+`install_reuse.log` 确认重复执行可以复用完整环境。
+在干净 clone 的新装环境中，一机 8×H100、四 rank 重跑：20 质量 PASS → 19 场景 PASS / 1 DROP →
+19 非空 mask、35 实例，0 解析/运行错误，四 rank 均 exit 0；`smoke/run/control/initial/complete.ok` 已生成。
+逐阶段日志和汇总位于 `smoke/run/{logs,reports}/`；[19 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/review/index.html)。
+已删除两个旧共享 workspace 和本机旧缓存环境，测试 clone 也在完成后清理；Git 代码、验证日志与结果保留。
+本轮修复部署依赖，没有更改筛选或 mask 语义策略；物理四机需用户重新提交新入口验收。
 
 ## 2026-09-24：CrispEdit 专用整理与完整四节点接入
 
