@@ -4,6 +4,7 @@ import sys
 from utils.runtime_paths import runtime_path
 from pathlib import Path
 from synthesis_pipeline.prepare_samtok_data import load_jsonl,write_jsonl
+from synthesis_pipeline.labeling_checkpoint import bind_settings, ensure_sources, wait_workers
 
 
 def main():
@@ -22,37 +23,43 @@ def main():
     p.add_argument('--auxiliary-policy',choices=['legacy','ownership-v1'],default='legacy')
     p.add_argument('--keep-fallback',choices=['none','box-protect-v1'],default='none')
     p.add_argument('--plan-only',action='store_true',help='Stop after planning and relation grounding for controlled editor ablations')
-    a=p.parse_args();a.out_root.mkdir(parents=True,exist_ok=False);(a.out_root/'logs').mkdir();gpus=a.gpus.split(',')
+    p.add_argument('--resume',action='store_true')
+    a=p.parse_args();a.out_root.mkdir(parents=True,exist_ok=a.resume);(a.out_root/'logs').mkdir(exist_ok=True);gpus=a.gpus.split(',')
     rows=load_jsonl(a.data_root/'annotations.jsonl')
     if a.ids:rows=[r for r in rows if int(r['image'].split('_')[0]) in {int(i) for i in a.ids.split(',')}]
+    bind_settings(a.out_root,{k:str(v) if isinstance(v,Path) else v for k,v in vars(a).items()
+        if k not in {'out_root','resume'}},a.resume)
     start=time.perf_counter();jobs=[]
     for i,gpu in enumerate(gpus):
         subset=rows[i::len(gpus)]
         if not subset:continue
-        log=(a.out_root/'logs'/f'plan_{i}.log').open('w')
+        log=(a.out_root/'logs'/f'plan_{i}.log').open('a' if a.resume else 'w')
         python=runtime_path('MLLM_PYTHON','/opt/tiger/tanyue/.venvs/qwen38_audit/bin/python')
         command=[python,'-m','synthesis_pipeline.plan_removal_relations','--data-root',str(a.data_root),'--out-root',str(a.out_root/'planners'/str(i)),
                  '--ids',','.join(r['image'].split('_')[0] for r in subset),'--outside-pointers','--policy',a.policy]
         if a.thinking:command.append('--thinking')
+        if a.resume:command.append('--resume')
         env={**os.environ,'CUDA_VISIBLE_DEVICES':gpu,'PATH':str(Path(python).parent)+':'+os.environ['PATH'],'OMP_NUM_THREADS':'8'}
         jobs.append((i,subprocess.Popen(command,env=env,stdout=log,stderr=subprocess.STDOUT),log))
-    codes=[]
-    for i,proc,log in jobs:codes.append(proc.wait());log.close()
-    if any(codes):raise RuntimeError(f'Planner failures {codes}')
-    merged=a.out_root/'relations';merged.mkdir();(merged/'sources').symlink_to((a.data_root/'sources').resolve())
+    wait_workers(jobs,'Planner')
+    merged=a.out_root/'relations';merged.mkdir(exist_ok=a.resume);ensure_sources(merged,a.data_root/'sources')
     plans=sorted([r for i,_,_ in jobs for r in load_jsonl(a.out_root/'planners'/str(i)/'annotations.jsonl')],key=lambda r:r['image'])
     write_jsonl(merged/'annotations.jsonl',plans)
     write_jsonl(merged/'input_annotations.jsonl',load_jsonl(a.data_root/'annotations.jsonl'))
-    with (a.out_root/'logs/resolve.log').open('w') as log:
+    if len(plans)!=len(rows) or {r['image'] for r in plans}!={r['image'] for r in rows}:raise ValueError('Incomplete planner coverage')
+    with (a.out_root/'logs/resolve.log').open('a' if a.resume else 'w') as log:
         subprocess.run([runtime_path('SAM_PYTHON','/opt/tiger/tanyue/.venvs/mirage_official/bin/python'),'-m','synthesis_pipeline.resolve_removal_relations',
-            '--data-root',str(merged),'--out-root',str(a.out_root/'regions'),'--auxiliary-policy',a.auxiliary_policy,'--keep-fallback',a.keep_fallback,*(['--ground-keeps'] if a.ground_keeps else [])],env={**os.environ,'CUDA_VISIBLE_DEVICES':gpus[0],'OMP_NUM_THREADS':'8'},stdout=log,stderr=subprocess.STDOUT,check=True)
+            '--data-root',str(merged),'--out-root',str(a.out_root/'regions'),'--auxiliary-policy',a.auxiliary_policy,'--keep-fallback',a.keep_fallback,*(['--ground-keeps'] if a.ground_keeps else []),*(['--resume'] if a.resume else [])],env={**os.environ,'CUDA_VISIBLE_DEVICES':gpus[0],'OMP_NUM_THREADS':'8'},stdout=log,stderr=subprocess.STDOUT,check=True)
     if not a.plan_only and load_jsonl(a.out_root/'regions/annotations.jsonl'):
-        with (a.out_root/'logs/editor.log').open('w') as log:
+        with (a.out_root/'logs/editor.log').open('a' if a.resume else 'w') as log:
             subprocess.run([sys.executable,'-m','synthesis_pipeline.run_frozen_prompt_experiment','--data-root',str(a.out_root/'regions'),
                 '--out-root',str(a.out_root/'editing'),'--policy',a.editor_policy,'--gpus',a.gpus,
                 '--qwen21-backend',a.qwen21_backend,'--remove-composition-policy',a.remove_composition_policy,
                 '--latent-protection-policy',a.latent_protection_policy,'--relation-geometry-policy',a.relation_geometry_policy,
-                *(['--qwen21-target-guide'] if a.qwen21_target_guide else [])],stdout=log,stderr=subprocess.STDOUT,check=True)
+                *(['--qwen21-target-guide'] if a.qwen21_target_guide else []),*(['--resume'] if a.resume else [])],stdout=log,stderr=subprocess.STDOUT,check=True)
+    elif not a.plan_only:
+        # Never expose an old manifest after all upstream cases became ineligible.
+        write_jsonl(a.out_root/'editing/context_grounded_v4_qwen21/annotations.jsonl',[])
     (a.out_root/'summary.json').write_text(json.dumps(dict(input_cases=len(rows),policy=a.policy,thinking=a.thinking,editor_policy=a.editor_policy,remove_composition_policy=a.remove_composition_policy,qwen21_backend=a.qwen21_backend,ground_keeps=a.ground_keeps,auxiliary_policy=a.auxiliary_policy,keep_fallback=a.keep_fallback,plan_only=a.plan_only,latent_protection_policy=a.latent_protection_policy,relation_geometry_policy=a.relation_geometry_policy,qwen21_target_guide=a.qwen21_target_guide,wall_seconds=time.perf_counter()-start),indent=2))
 
 

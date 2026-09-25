@@ -54,6 +54,7 @@ def main():
     p.add_argument('--qwen21-target-guide',action='store_true',help='Add aligned boundary guide as second condition; clean image remains first')
     p.add_argument('--removal-conditioning',choices=['source','erase-neutral-v1','erase-prefill-v1','erase-neutral-v2'],default='source')
     p.add_argument('--seed',type=int,default=0)
+    p.add_argument('--resume',action='store_true')
     p.add_argument('--remove-composition-policy',choices=['legacy','adaptive-remove-v1','adaptive-remove-v2','adaptive-remove-v3','adaptive-remove-v4','adaptive-remove-v5'],default='legacy')
     p.add_argument('--latent-protection-policy',choices=['legacy','guard-any-v1','guard-fraction-v1'],default='legacy')
     p.add_argument('--relation-geometry-policy',choices=['legacy','visible-v1'],default='legacy')
@@ -81,9 +82,8 @@ def main():
     if args.manifest_only and not (out / 'sources').exists():
         (out / 'sources').symlink_to((args.data_root / 'sources').resolve())
     if args.manifest_only:
-        (out / "annotations.jsonl").write_text(
-            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
-        )
+        from synthesis_pipeline.prepare_samtok_data import write_jsonl
+        write_jsonl(out/'annotations.jsonl',rows)
         print(out / "annotations.jsonl")
         return
     rows = rows[args.shard :: args.shards]
@@ -91,7 +91,13 @@ def main():
     from utils.qwen_pipeline_loader import load_qwen21_omni_pipeline, load_qwen_pipeline
     from utils.runner_qwen2511 import run_qwen_multi_branch
     crops = load_crop_records(str(args.data_root / "crops/crop_instruction.jsonl")) if args.variant == "mirage_relaxed" else {}
-    pending = [r for r in rows if not (out / "edited" / r["image"]).exists()]
+    from synthesis_pipeline.labeling_checkpoint import CaseCheckpoints, file_digest
+    settings={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()
+              if k not in {'resume','out_root','ids','shard','shards','manifest_only'}}
+    checkpoints=CaseCheckpoints(out,settings)
+    dependencies={r['image']:dict(source_sha256=file_digest(args.data_root/'sources'/r['source_image'])) for r in rows}
+    pending = [r for r in rows if not args.resume or checkpoints.load(r,dependencies[r['image']]) is None]
+    print(json.dumps(dict(stage='editing',total=len(rows),reused=len(rows)-len(pending),pending=len(pending))),flush=True)
     for row in pending:
         validate_refinement_execution(row,args.variant)
     if not pending:
@@ -188,7 +194,10 @@ def main():
                 relation_geometry_policy=args.relation_geometry_policy,
                 removal_conditioning=args.removal_conditioning,
             )
-        image.save(out / "edited" / row["image"])
+        import os
+        image_path=out/'edited'/row['image']
+        temporary=image_path.with_suffix('.png.tmp')
+        image.save(temporary,format='PNG');os.replace(temporary,image_path)
         record = {
             "image": row["image"],
             "variant": args.variant,
@@ -207,6 +216,7 @@ def main():
         records.append(record)
         with (out / f"timing_shard{args.shard}.jsonl").open("a") as f:
             f.write(json.dumps(record) + "\n")
+        checkpoints.save(row,record,artifacts=[image_path],dependencies=dependencies[row['image']])
         print(json.dumps(record), flush=True)
     (out / f"summary_shard{args.shard}.json").write_text(
         json.dumps({"model_load_seconds": load_time, "records": records}, indent=2)

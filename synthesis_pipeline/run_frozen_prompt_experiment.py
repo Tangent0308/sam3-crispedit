@@ -7,6 +7,7 @@ import subprocess
 import time
 import sys
 from utils.runtime_paths import runtime_path, editor_model
+from synthesis_pipeline.labeling_checkpoint import bind_settings, wait_workers
 
 
 def main():
@@ -21,8 +22,11 @@ def main():
     p.add_argument('--model-id',default=editor_model())
     p.add_argument('--qwen21-backend',choices=['diffusers','vllm-omni'],default='diffusers')
     p.add_argument('--qwen21-target-guide',action='store_true')
-    a=p.parse_args();a.out_root.mkdir(parents=True,exist_ok=False)
-    logs=a.out_root/'logs';logs.mkdir();start=time.perf_counter()
+    p.add_argument('--resume',action='store_true')
+    a=p.parse_args();a.out_root.mkdir(parents=True,exist_ok=a.resume)
+    bind_settings(a.out_root,{k:str(v) if isinstance(v,Path) else v for k,v in vars(a).items()
+        if k not in {'resume','out_root'}},a.resume)
+    logs=a.out_root/'logs';logs.mkdir(exist_ok=True);start=time.perf_counter()
     rows=[json.loads(s) for s in (a.data_root/'annotations.jsonl').read_text().splitlines() if s.strip()]
     if not rows:raise ValueError('Empty frozen cohort')
     python=(runtime_path('EDITOR_PYTHON','/opt/tiger/tanyue/.venvs/qwen_omni_21/bin/python')
@@ -36,11 +40,12 @@ def main():
         '--relation-geometry-policy',a.relation_geometry_policy,
         '--qwen21-backend',a.qwen21_backend]
     if a.qwen21_target_guide:options.append('--qwen21-target-guide')
+    if a.resume:options.append('--resume')
     subprocess.run([runtime_path('SAM_PYTHON',sys.executable),'-m','synthesis_pipeline.experiment_edit_quality',*options,'--manifest-only'],check=True)
     jobs=[];gpus=a.gpus.split(',')
     for index,gpu in enumerate(gpus):
         if index>=len(rows):continue
-        handle=(logs/f'editor_{index}.log').open('w')
+        handle=(logs/f'editor_{index}.log').open('a' if a.resume else 'w')
         command=[python,'-m','synthesis_pipeline.experiment_edit_quality',*options,'--shard',str(index),'--shards',str(len(gpus))]
         env={**os.environ,'CUDA_VISIBLE_DEVICES':gpu,'OMP_NUM_THREADS':'8'}
         if a.qwen21_backend == 'vllm-omni':
@@ -51,9 +56,8 @@ def main():
                 str(site/'cuda_runtime/lib'),env.get('LD_LIBRARY_PATH','')])
             env.setdefault('DIFFUSION_ATTENTION_BACKEND','TORCH_SDPA')
         jobs.append((index,subprocess.Popen(command,env=env,stdout=handle,stderr=subprocess.STDOUT),handle))
-    results=[]
-    for index,proc,handle in jobs:
-        code=proc.wait();handle.close();results.append(dict(shard=index,exit_code=code))
+    wait_workers(jobs,'Editor')
+    results=[dict(shard=index,exit_code=proc.returncode) for index,proc,_ in jobs]
     summary=dict(policy=a.policy,remove_composition_policy=a.remove_composition_policy,qwen21_backend=a.qwen21_backend,qwen21_target_guide=a.qwen21_target_guide,latent_protection_policy=a.latent_protection_policy,relation_geometry_policy=a.relation_geometry_policy,cases=len(rows),steps=40,wall_seconds=time.perf_counter()-start,workers=results)
     (a.out_root/'summary.json').write_text(json.dumps(summary,indent=2))
     if any(r['exit_code'] for r in results):raise RuntimeError(f'Failed workers: {results}')

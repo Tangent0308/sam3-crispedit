@@ -45,8 +45,8 @@ image ID 不重编号，每个 region 只执行一次。4个本地8卡池即32�
 | worker入口 | 第3节完整Bash代码；或第2.2节的共享bootstrap调用 |
 | 共享挂载 | 四机均挂载`/mnt/bn/strategy-mllm-train`；源数据/模型可读，任务experiments目录可读写 |
 | 节点本地存储 | `/opt/tiger/tanyue`可写，每机至少预留150GB；repo/环境/编辑模型缓存存放这里 |
-| 镜像工具与网络 | git、Bash、python3/pip、可用NVIDIA驱动；每机可访问GitHub及依赖安装源 |
-| 用户必填 | 同一个全新`SAMTOK_RUN_ID`；无需W&B key |
+| 镜像工具与网络 | git、Bash、flock、python3/pip、可用NVIDIA驱动；每机可访问GitHub及依赖安装源 |
+| 用户必填 | 新任务使用全新`SAMTOK_RUN_ID`；续跑保留run ID并填写新的`SAMTOK_ATTEMPT_ID`；无需W&B key |
 
 Arnold平台注入的变量与本任务的使用方式：
 
@@ -101,7 +101,7 @@ export SAMTOK_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok
 ## 3. 可直接提交的 Arnold 完整入口
 
 下面整段可直接粘贴到 **四个 Arnold worker 的共同 Bash 入口**。先填写唯一的
-`SAMTOK_RUN_ID`；不要四台分别生成时间戳，不要覆盖Arnold分配的`ARNOLD_ID`。
+`SAMTOK_RUN_ID`；续跑保留原run ID并设置新的attempt ID。不要四台分别生成时间戳，不要覆盖Arnold分配的`ARNOLD_ID`。
 正式全量用`SAMTOK_LIMIT_SOURCES=0`，首次真实四机联调建议先改为8。
 
 它不依赖已存在的本地仓库，也不需要先下载或复制bootstrap：
@@ -112,44 +112,65 @@ export SAMTOK_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok
 ```bash
 #!/usr/bin/env bash
 
-# ----- 0. 用户填写区：四个 worker 必须填写同一个新名称 -----
-export SAMTOK_RUN_ID="samtok-remove-4n-20260925"  # 必填；例如 samtok-remove-4n-20260924-003
-export SAMTOK_LIMIT_SOURCES=0  # 正式全量=0；首次四机 smoke 改为8
+# 四个 worker 填写相同配置。新任务默认 SAMTOK_RESUME=0。
+export SAMTOK_RUN_ID="samtok-derived-4n-20260925"
+export SAMTOK_LIMIT_SOURCES=0
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
-# 可选：填写期望的完整commit，防止分支在四机clone期间移动。
+# 恢复已停止的同名任务时，取消下面两行注释；每次重启换新的 attempt ID。
+# export SAMTOK_RESUME=1
+# export SAMTOK_ATTEMPT_ID="resume-001"
+# 可选：四机填写相同完整SHA，固定本次运行代码。
 # export SAMTOK_EXPECTED_COMMIT="实际的40位commit"
 
 # Copy this complete file to a shared pre-clone path or paste it into Arnold entry.
 # Run the SAME entry on all four workers. Each worker clones to node-local storage.
 set -euo pipefail
-: "${SAMTOK_RUN_ID:?Set one new unique run ID, identical on all four workers}"
+: "${SAMTOK_RUN_ID:?Set one run ID, identical on all four workers}"
 : "${ARNOLD_WORKER_NUM:?Arnold topology missing}"
 : "${ARNOLD_WORKER_GPU:?Arnold topology missing}"
 : "${ARNOLD_ID:?Arnold topology missing}"
 [[ "$SAMTOK_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
 [[ "$ARNOLD_WORKER_NUM" == 4 && "$ARNOLD_WORKER_GPU" == 8 && "$ARNOLD_ID" =~ ^[0-3]$ ]] || { echo 'Requires 4 nodes x 8 GPUs' >&2; exit 2; }
 export SAMTOK_RUN_ROOT="${SAMTOK_RUN_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID}"
+export SAMTOK_RESUME="${SAMTOK_RESUME:-0}"
+[[ "$SAMTOK_RESUME" == 0 || "$SAMTOK_RESUME" == 1 ]] || { echo 'SAMTOK_RESUME must be 0 or 1' >&2; exit 2; }
+resume_args=()
+attempt_suffix=""
+export SAMTOK_CONTROL_ROOT="$SAMTOK_RUN_ROOT"
+if [[ "$SAMTOK_RESUME" == 1 ]]; then
+  : "${SAMTOK_ATTEMPT_ID:?Resume needs a NEW attempt ID, identical on all four workers}"
+  [[ "$SAMTOK_ATTEMPT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo 'Invalid attempt ID' >&2; exit 2; }
+  [[ -f "$SAMTOK_RUN_ROOT/reports/partition.json" ]] || { echo 'No prepared run to resume' >&2; exit 2; }
+  export SAMTOK_CONTROL_ROOT="$SAMTOK_RUN_ROOT/attempts/$SAMTOK_ATTEMPT_ID"
+  attempt_suffix="/attempts/$SAMTOK_ATTEMPT_ID"
+  resume_args=(--resume)
+elif [[ -n "${SAMTOK_ATTEMPT_ID:-}" ]]; then
+  echo 'SAMTOK_ATTEMPT_ID is only valid with SAMTOK_RESUME=1' >&2; exit 2
+fi
 export SAMTOK_DATA_ROOT="${SAMTOK_DATA_ROOT:-$SAMTOK_RUN_ROOT/data/source}"
 export SAMTOK_PARQUET="${SAMTOK_PARQUET:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Training_Data/mix_gres8k_ver4k_train.parquet}"
-export SAMTOK_REPO_DIR="${SAMTOK_REPO_DIR:-/opt/tiger/tanyue/labeling_runs/$SAMTOK_RUN_ID/node$ARNOLD_ID/repo}"
+export SAMTOK_REPO_DIR="${SAMTOK_REPO_DIR:-/opt/tiger/tanyue/labeling_runs/$SAMTOK_RUN_ID$attempt_suffix/node$ARNOLD_ID/repo}"
 export SAMTOK_REPO_URL="${SAMTOK_REPO_URL:-https://github.com/Tangent0308/sam3-crispedit.git}"
 export SAMTOK_BRANCH="${SAMTOK_BRANCH:-samtok-derived-edit-labeling}"
-mkdir -p "$SAMTOK_RUN_ROOT/logs" "$SAMTOK_RUN_ROOT/control"
-# Atomic claim: old run IDs and accidental duplicate entries must never reuse markers.
-(set -o noclobber; printf '%s\n' "$(hostname) $$" > "$SAMTOK_RUN_ROOT/control/bootstrap.node$ARNOLD_ID.claim") || exit 1
-exec > >(tee -a "$SAMTOK_RUN_ROOT/logs/bootstrap.node$ARNOLD_ID.log") 2>&1
+mkdir -p "$SAMTOK_CONTROL_ROOT/logs" "$SAMTOK_CONTROL_ROOT/control" "$SAMTOK_RUN_ROOT/control"
+# Held by the shell and inherited by exec; released automatically after job exit.
+exec 9>>"$SAMTOK_RUN_ROOT/control/bootstrap.node$ARNOLD_ID.lock"
+flock -n 9 || { echo 'Another attempt is active on this rank' >&2; exit 1; }
+# Each restart gets new barriers and claims; old markers remain as evidence.
+(set -o noclobber; printf '%s\n' "$(hostname) $$" > "$SAMTOK_CONTROL_ROOT/control/bootstrap.node$ARNOLD_ID.claim") || exit 1
+exec > >(tee -a "$SAMTOK_CONTROL_ROOT/logs/bootstrap.node$ARNOLD_ID.log") 2>&1
 on_exit() {
   local rc=$?
   if (( rc != 0 )); then
     printf '{"error":"bootstrap node %s exited %s; see bootstrap log"}\n' "$ARNOLD_ID" "$rc" \
-      > "$SAMTOK_RUN_ROOT/control/bootstrap.node$ARNOLD_ID.failed.json.tmp"
-    mv "$SAMTOK_RUN_ROOT/control/bootstrap.node$ARNOLD_ID.failed.json.tmp" "$SAMTOK_RUN_ROOT/control/bootstrap.node$ARNOLD_ID.failed.json"
+      > "$SAMTOK_CONTROL_ROOT/control/bootstrap.node$ARNOLD_ID.failed.json.tmp"
+    mv "$SAMTOK_CONTROL_ROOT/control/bootstrap.node$ARNOLD_ID.failed.json.tmp" "$SAMTOK_CONTROL_ROOT/control/bootstrap.node$ARNOLD_ID.failed.json"
   fi
 }
 trap on_exit EXIT
 check_peers() {
-  if compgen -G "$SAMTOK_RUN_ROOT/control/*.failed.json" > /dev/null; then
+  if compgen -G "${SAMTOK_CONTROL_ROOT:-$SAMTOK_RUN_ROOT}/control/*.failed.json" > /dev/null; then
     echo 'Peer bootstrap failed; see experiments logs' >&2; exit 1
   fi
 }
@@ -162,8 +183,8 @@ fi
 mkdir -p "$(dirname "$SAMTOK_REPO_DIR")"
 git clone --branch "$SAMTOK_BRANCH" --single-branch "$SAMTOK_REPO_URL" "$SAMTOK_REPO_DIR"
 cd "$SAMTOK_REPO_DIR"
-mkdir -p "$SAMTOK_RUN_ROOT/reports"
-git rev-parse HEAD > "$SAMTOK_RUN_ROOT/reports/checkout.node$ARNOLD_ID.txt"
+mkdir -p "$SAMTOK_CONTROL_ROOT/reports"
+git rev-parse HEAD > "$SAMTOK_CONTROL_ROOT/reports/checkout.node$ARNOLD_ID.txt"
 if [[ -n "${SAMTOK_EXPECTED_COMMIT:-}" ]]; then
   [[ "$(git rev-parse HEAD)" == "$SAMTOK_EXPECTED_COMMIT" ]] || { echo 'Unexpected branch revision' >&2; exit 1; }
 fi
@@ -184,14 +205,14 @@ bash scripts/labeling/setup_env.sh
 export SAMTOK_ENV_REPORT="$SAMTOK_RUNTIME_ROOT/environment.json"
 # Do not stage tens of GB or prepare data while another worker failed its imports.
 check_peers
-printf '{"ready":true}\n' > "$SAMTOK_RUN_ROOT/control/environment.node$ARNOLD_ID.ok.json.tmp"
-mv "$SAMTOK_RUN_ROOT/control/environment.node$ARNOLD_ID.ok.json.tmp" "$SAMTOK_RUN_ROOT/control/environment.node$ARNOLD_ID.ok.json"
+printf '{"ready":true}\n' > "${SAMTOK_CONTROL_ROOT:-$SAMTOK_RUN_ROOT}/control/environment.node$ARNOLD_ID.ok.json.tmp"
+mv "${SAMTOK_CONTROL_ROOT:-$SAMTOK_RUN_ROOT}/control/environment.node$ARNOLD_ID.ok.json.tmp" "${SAMTOK_CONTROL_ROOT:-$SAMTOK_RUN_ROOT}/control/environment.node$ARNOLD_ID.ok.json"
 start_wait=$SECONDS
 while true; do
   check_peers
   all_ready=1
   for peer_rank in 0 1 2 3; do
-    [[ -f "$SAMTOK_RUN_ROOT/control/environment.node$peer_rank.ok.json" ]] || all_ready=0
+    [[ -f "${SAMTOK_CONTROL_ROOT:-$SAMTOK_RUN_ROOT}/control/environment.node$peer_rank.ok.json" ]] || all_ready=0
   done
   (( all_ready == 1 )) && break
   (( SECONDS - start_wait < 10800 )) || { echo 'Peer environment timeout' >&2; exit 1; }
@@ -202,7 +223,7 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 if [[ "${SAMTOK_STAGE_EDITOR_MODEL:-1}" == 1 ]]; then
   editor_cache="${SAMTOK_MODEL_CACHE_ROOT:-/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID}/qwen21"
   "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.stage_labeling_model \
-    --source "$SAMTOK_QWEN21_MODEL" --destination "$editor_cache" --run-root "$SAMTOK_RUN_ROOT"
+    --source "$SAMTOK_QWEN21_MODEL" --destination "$editor_cache" --run-root "$SAMTOK_CONTROL_ROOT" "${resume_args[@]}"
   export SAMTOK_QWEN21_MODEL="$editor_cache"
 fi
 # Node 0 materializes once if no prepared manifest was supplied. All original
@@ -212,23 +233,24 @@ if [[ "$ARNOLD_ID" == 0 ]]; then
   if [[ ! -f "$SAMTOK_DATA_ROOT/annotations.jsonl" ]]; then
     "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.prepare_removal_inputs \
       --parquet "$SAMTOK_PARQUET" --out-root "$SAMTOK_DATA_ROOT" \
-      --limit-sources "${SAMTOK_LIMIT_SOURCES:-0}" --run-root "$SAMTOK_RUN_ROOT"
+      --limit-sources "${SAMTOK_LIMIT_SOURCES:-0}" --run-root "$SAMTOK_CONTROL_ROOT" "${resume_args[@]}"
   fi
   check_peers
-  printf '{"ready":true}\n' > "$SAMTOK_RUN_ROOT/control/data.ok.json.tmp"
-  mv "$SAMTOK_RUN_ROOT/control/data.ok.json.tmp" "$SAMTOK_RUN_ROOT/control/data.ok.json"
+  printf '{"ready":true}\n' > "$SAMTOK_CONTROL_ROOT/control/data.ok.json.tmp"
+  mv "$SAMTOK_CONTROL_ROOT/control/data.ok.json.tmp" "$SAMTOK_CONTROL_ROOT/control/data.ok.json"
 fi
 start_wait=$SECONDS
-until [[ -f "$SAMTOK_RUN_ROOT/control/data.ok.json" ]]; do
+until [[ -f "$SAMTOK_CONTROL_ROOT/control/data.ok.json" ]]; do
   check_peers
   (( SECONDS - start_wait < 10800 )) || { echo 'Data preparation timeout' >&2; exit 1; }
   sleep 2
 done
 check_peers
 # No MASTER_PORT / ARNOLD_WORKER_HOSTS rendezvous: independent data shards.
+if [[ "$SAMTOK_RESUME" == 1 ]]; then resume_args+=(--attempt-id "$SAMTOK_ATTEMPT_ID"); fi
 exec "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.run_multinode_labeling \
   --data-root "$SAMTOK_DATA_ROOT" --run-root "$SAMTOK_RUN_ROOT" --run-id "$SAMTOK_RUN_ID" \
-  --rank "$ARNOLD_ID" --gpus 0,1,2,3,4,5,6,7
+  --rank "$ARNOLD_ID" --gpus 0,1,2,3,4,5,6,7 "${resume_args[@]}"
 ```
 
 注意：
@@ -247,7 +269,7 @@ exec "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.run_multinode_labeling \
   `sudo apt-get install ffmpeg libsm6 libxext6 tmux htop`。本流程使用headless图像依赖。
 - 默认清除代理直连GitHub；环境必须走代理时，在用户填写区设置`SAMTOK_KEEP_PROXY=1`。
   不要把代理凭据、访问令牌写进文档。四机都需要访问代码仓库、依赖仓库和安装源。
-- 首次正式运行不是自动恢复任务；任一节点失败后保留日志，排查后换新run ID，不复用旧claim。
+- 新任务使用新run ID；恢复已停止任务时按3.2节保留run ID、设置新的attempt ID。旧claim和失败日志保留，新一轮使用独立协调目录。
 
 ### 3.1 提交前确认远端已包含所需文件
 
@@ -264,6 +286,70 @@ git ls-tree -r --name-only sam3/samtok-derived-edit-labeling -- \
 应能看到两个labeling shell脚本、三份锁定依赖文件和上面的四个Python入口。
 本地有文件不等于远端有文件；四机实际执行的是clone下来的分支内容。
 若用`SAMTOK_EXPECTED_COMMIT`固定版本，四台必须填写相同的完整SHA。
+
+
+### 3.2 从当前进度续跑（包括旧版产生的规划结果）
+
+先在Arnold停止旧的整个四机任务，确认四个worker及其子进程已退出，再提交一个新的4 workers × 8 GPUs任务。
+四个worker使用同一入口、同一run ID和同一新的attempt ID：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+export SAMTOK_RUN_ID="samtok-derived-4n-20260925"
+export SAMTOK_RESUME=1
+export SAMTOK_ATTEMPT_ID="resume-001"  # 下次再重启改成resume-002，不重复使用
+export SAMTOK_LIMIT_SOURCES=0
+bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/launchers/bootstrap_arnold_4node.sh
+```
+
+这仍会在每台机器本地clone对应分支并安装环境。clone目录增加
+`/attempts/$SAMTOK_ATTEMPT_ID/`，避免碰到上次留下的repo/venv。
+已准备好的源数据不重新生成，节点分片保持原ID、原归属；输入manifest、节点数或冻结方法不一致时明确拒绝续跑。
+同节点的并发attempt通过文件锁互斥。旧版任务没有新锁，所以第一次升级前必须先停止旧任务。
+
+| 阶段 | 可复用的进度 | 会重新执行的部分 |
+|---|---|---|
+| 规划 | 旧版完整JSONL中与输入一致、原始回复可解析且重新通过原校验器的accept/defer；不加载模型处理已完成项 | 未落盘、截断、解析失败、字段错误、target point错误等记录 |
+| 输入空mask | 保留原ID并记录`invalid_input_empty_mask`，不调用模型、不出图，汇总保留no_output原因 | 不伪造mask，也不把空mask送入crop函数 |
+| 邻居/附件区域解析 | 本版本逐case完成记录及依赖一致；成功解析或明确defer均可复用 | 缺失完成记录、规划改变、源图或输出support损坏 |
+| 编辑 | 本版本完成记录、输入/40步/seed/策略一致，最终PNG校验值匹配 | 只有文件但无完成记录、半写入PNG、内容损坏、上游输入改变 |
+| 审核 | 已完整解析的pass或fail，原图/编辑图/指令及审核设置一致 | 回复无法解析、缺失完成记录、图片或指令变化 |
+| 汇总 | 从本轮经过检查的各阶段结果重新汇总 | 不将旧done或finalize标记视作本轮完成 |
+
+“正确进度”指完整且通过一致性检查的阶段结果，不代表所有模型判定都人工正确。
+有效的质量fail或语义defer会保留，避免续跑变成反复抽样直到pass；技术失败则重算覆盖当前manifest中的错误记录。
+本轮升级可以直接读取已有规划JSONL；旧版未产生逐case校验记录的后续阶段采用保守重算。
+当前run尚在规划阶段，因此这一限制不会丢弃已经生成的成图。
+
+新日志与旧日志分开：
+
+```text
+$SAMTOK_RUN_ROOT/attempts/resume-001/
+├── logs/bootstrap.node<N>.log
+├── logs/pipeline.node<N>.log
+├── logs/audit.node<N>.log
+├── reports/topology.node<N>.json
+├── reports/progress.node<N>.json
+└── control/  # 本次attempt的claim、failed、done、finalize
+```
+
+数据和各阶段结果继续写入原来的`nodes/node<N>/`；内部worker日志追加保留历史，
+`checkpoints/`只记录逐case完成和依赖校验。重新运行的记录在JSONL中替换，不重复计数。
+新的规划日志会打印`total / reused / empty_masks / pending`和`planned 已处理/总数`；
+编辑、审核也打印复用与待执行数量。不要按追加日志的行数累计完成量，应读取当前JSONL或summary。
+
+```bash
+run_root="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925"
+tail -f "$run_root/attempts/resume-001/logs/bootstrap.node0.log"
+# 实际规划worker的模型输出和进度：
+tail -f "$run_root/nodes/node0/pipeline/logs/plan_0.log"
+```
+
+本轮故障定位：`000408_gres_r480_m0_remove.png`的原始RLE面积为0；
+10,633个region中仅此1条为空，和4,666条No target是不同的检查。
+之前在构造crop时抛出异常，且调度器顺序等待其他worker，导致错误很晚才向上传播。
+现在空mask在模型加载前记录并跳过；任一worker异常会及时上报，其他已完成case仍可用于下一轮续跑。
 
 ## 4. clone、安装和真实路径
 
@@ -334,7 +420,7 @@ SAM:
 ```
 
 训练用的2511不是这里的编辑模型。模型不联网补下载；不能读共享数据/权重时必须先修挂载。
-Arnold镜像需已有git、curl、可运行的python3/pip、NVIDIA驱动；无需sudo apt大范围修改宿主。
+Arnold镜像需已有git、curl、flock、可运行的python3/pip、NVIDIA驱动；无需sudo apt大范围修改宿主。
 
 ## 5. 日志、输出与进度
 
@@ -381,7 +467,8 @@ cat "$RUN_ROOT/reports/final.json"
 
 ## 6. 防覆盖与故障
 
-每个run ID只能提交一次；每个节点以独占claim文件认领，重复启动不会覆盖已有输出。
+新run ID只初始化一次；续跑显式设置`SAMTOK_RESUME=1`并使用新的attempt ID。
+每个attempt中每个节点以独占claim认领，同rank的运行使用文件锁互斥，重复启动会拒绝。
 四节点比对源manifest SHA、代码SHA、完整冻结profile、包版本、GPU数、共享模型路径/配置。
 默认要求4个不同hostname和每节点8个GPU槽位。`--local-test`只用于开发模拟，正式bootstrap不传。
 
@@ -396,11 +483,24 @@ cat "$RUN_ROOT/reports/final.json"
 完整入口或使用已更新的共享bootstrap。仅拉新repo但继续使用旧的内联入口，会缺少新环境同步逻辑。
 不要删除旧run的失败标记来强行续跑，也不要仅卸载GUI包后复用混装环境：卸载可能同时移除共享cv2文件。
 
-默认节点加入等待3小时，单阶段/最终等待7天。大任务按实际预算评估；入口不提供透明断点续跑、
-自动换seed重试、失败case重采样或补齐到100k。故障后保留目录，换run ID；不要手动伪造done文件。
+默认节点加入等待3小时，单阶段/最终等待7天。大任务按实际预算评估；支持第3.2节的显式断点续跑，
+不自动重启Arnold任务、换seed重试、对质量fail重采样或补齐到100k。
+故障后保留目录，同run ID加新attempt ID恢复；不要手动伪造done文件或清空旧失败标记。
 `SAMTOK_REPO_DIR`、`SAMTOK_RUN_ROOT`、模型位置和数据位置可覆盖，但四机共享数据/输出位置必须一致。
 
 ## 7. 本次验证边界
+
+2026-09-25空mask与断点续跑修复：新增11项恢复测试，覆盖中断后保留正确规划、
+空mask跳过、坏JSON重算、PNG损坏重生成、上游图片变化使审核失效、有效fail保留、
+四个本地逻辑rank使用新attempt恢复、旧失败标记隔离、worker及时报错和模型缓存修复；相关回归通过。
+真实模型smoke使用原任务的3条输入（已有正确规划、模拟坏规划、真实空mask各1条）：
+正确规划保持一致，坏规划重算1次，空mask跳过，2条完成40步编辑。
+再次执行同一流程后规划调用0次、SAM查询0次、编辑调用0次，两张PNG的SHA256完全不变；
+生成流程恢复检查约12.86秒。真实27B审核2条得到1 pass / 1 fail，无解析错误；
+审核续跑复用两条结果、调用0次、约2.00秒，有效fail没有被重采样。
+这些测试验证恢复行为，不将2条小样本解释为质量通过率评估，也未重启正式四机任务。
+完整数字存于当前run的`reports/resume_fix_validation.json`。
+停止后的旧进度盘点为3,512条已落盘规划：3,484条可复用、28条格式/字段错误需重算。
 
 当前交互会话的真实配置为1台8卡，因此不能声称已完成真实四台主机32卡的网络/共享存储联调。
 已覆盖的本地测试和真实模型链路结果记录在统一的 `docs/SAMTOK_QUALITY_ITERATION.md` 最新部署小节；

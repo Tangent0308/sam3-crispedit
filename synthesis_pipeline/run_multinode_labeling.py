@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import traceback
+import fcntl
 
 PROFILE = {
     'planner': 'relations-v16', 'thinking': True, 'ground_keeps': True,
@@ -174,29 +175,35 @@ def run_stage(command, logfile, root, timeout):
     return time.monotonic() - start
 
 
-def pipeline_command(data, out, gpus):
+def pipeline_command(data, out, gpus, resume=False):
     return [sys.executable, '-m', 'synthesis_pipeline.run_relation_cohort',
             '--data-root', str(data), '--out-root', str(out), '--gpus', gpus,
             '--policy', PROFILE['planner'], '--thinking', '--ground-keeps',
             '--auxiliary-policy', PROFILE['auxiliary'], '--keep-fallback', PROFILE['keep_fallback'],
             '--editor-policy', PROFILE['editor'], '--qwen21-backend', PROFILE['backend'],
             '--latent-protection-policy', PROFILE['latent'], '--relation-geometry-policy', PROFILE['geometry'],
-            '--remove-composition-policy', PROFILE['composition']]
+            '--remove-composition-policy', PROFILE['composition'], *(['--resume'] if resume else [])]
 
 
-def prepare(data, root, nodes):
+def prepare(data, root, nodes, resume=False):
     rows = read_rows(data / 'annotations.jsonl')
     if not rows:
         raise ValueError('Empty dataset')
     shards = split_sources(rows, nodes)
+    previous = root/'reports/partition.json'
+    if resume and previous.exists():
+        old = json.loads(previous.read_text())
+        if old['input_sha256'] != digest(data/'annotations.jsonl') or old['counts'] != [len(s) for s in shards]:
+            raise ValueError('Resume input/partition differs from original run')
     # Validate every source exists before launching GPU work, not just node 0's.
     for name in {r['source_image'] for r in rows}:
         if not (data / 'sources' / name).is_file():
             raise FileNotFoundError(data / 'sources' / name)
     for rank, shard in enumerate(shards):
         dest = root / 'inputs' / f'node{rank}'
-        dest.mkdir(parents=True, exist_ok=False)
-        (dest / 'sources').symlink_to((data / 'sources').resolve())
+        dest.mkdir(parents=True, exist_ok=resume)
+        from synthesis_pipeline.labeling_checkpoint import ensure_sources
+        ensure_sources(dest, data/'sources')
         write_rows(dest / 'annotations.jsonl', shard)
         write_rows(dest / 'input_annotations.jsonl', shard)
     manifest = dict(cases=len(rows), source_images=len({r['source_image'] for r in rows}),
@@ -265,6 +272,8 @@ def main():
     p.add_argument('--join-timeout', type=int, default=10800)
     p.add_argument('--local-test', action='store_true', help='Allow same-host ranks and fewer GPUs; real models still run')
     p.add_argument('--coordination-only', action='store_true', help='No models or generated outputs; test control plane only')
+    p.add_argument('--resume', action='store_true', help='Validate and reuse complete case checkpoints')
+    p.add_argument('--attempt-id', default='', help='New coordination namespace for each restart')
     a = p.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', a.run_id): p.error('Invalid run ID')
     if not 0 <= a.rank < a.nodes: p.error('Invalid rank')
@@ -273,8 +282,23 @@ def main():
     if len(set(gpus)) != len(gpus) or any(not g.isdigit() for g in gpus): p.error('Invalid GPU list')
     if not a.local_test and len(gpus) != 8: p.error('Production requires 8 GPUs per node')
     if a.coordination_only and not a.local_test: p.error('coordination-only requires local-test')
+    if a.resume != bool(a.attempt_id): p.error('--resume requires a new --attempt-id; fresh runs omit both')
+    if a.attempt_id and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',a.attempt_id): p.error('Invalid attempt ID')
     a.run_root = a.run_root.resolve(); a.data_root = a.data_root.resolve()
-    root = a.run_root; control = root/'control'; control.mkdir(parents=True, exist_ok=True)
+    root = a.run_root
+    if a.resume:
+        if not (root/'reports/partition.json').is_file():
+            raise ValueError('Resume requires an existing prepared run and partition report')
+        for previous in (root/'reports').glob('topology.node*.json'):
+            old=json.loads(previous.read_text())
+            if old['run_id']!=a.run_id or old['profile']!=PROFILE:
+                raise ValueError('Resume run ID/profile differs from original run')
+    coordination = root/'attempts'/a.attempt_id if a.resume else root
+    control = coordination/'control'; control.mkdir(parents=True, exist_ok=True)
+    (root/'control').mkdir(exist_ok=True)
+    execution_lock=(root/'control'/f'execution.node{a.rank}.lock').open('a')
+    # Kernel releases the lock after a stopped job; never unlink a live lock.
+    fcntl.flock(execution_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     # Atomic exclusive claim prevents stale done markers or duplicate node launches.
     claim = control/f'node{a.rank}.claim'
     with claim.open('x') as f: f.write(f'{socket.gethostname()} {os.getpid()}\n')
@@ -291,11 +315,11 @@ def main():
         report = dict(run_id=a.run_id, nodes=a.nodes, rank=a.rank, hostname=socket.gethostname(),
                       gpu_count=len(gpus), code_sha256=code_digest(), profile=PROFILE,
                       input_sha256=digest(a.data_root/'annotations.jsonl'),
-                      local_test=a.local_test, coordination_only=a.coordination_only,
+                      local_test=a.local_test, coordination_only=a.coordination_only,attempt_id=a.attempt_id,
                       environment=versions, models=None if a.coordination_only else model_identity())
-        atomic(root/'reports'/f'topology.node{a.rank}.json', report)
-        reports = [root/'reports'/f'topology.node{i}.json' for i in range(a.nodes)]
-        wait_for(reports, root, a.join_timeout)
+        atomic(coordination/'reports'/f'topology.node{a.rank}.json', report)
+        reports = [coordination/'reports'/f'topology.node{i}.json' for i in range(a.nodes)]
+        wait_for(reports, coordination, a.join_timeout)
         peers = [json.loads(f.read_text()) for f in reports]
         comparable = lambda r: {k:v for k,v in r.items() if k not in {'rank','hostname'}}
         if any(comparable(r) != comparable(report) for r in peers):
@@ -303,23 +327,23 @@ def main():
         if not a.local_test and len({r['hostname'] for r in peers}) != 4:
             raise ValueError('Production requires four distinct hostnames')
         if a.rank == 0:
-            atomic(root/'reports/topology.json', peers)
-            prepare(a.data_root, root, a.nodes)
+            atomic(coordination/'reports/topology.json', peers)
+            prepare(a.data_root, root, a.nodes, resume=a.resume)
             atomic(control/'partition.ok.json', {'ready': True})
-        wait_for([control/'partition.ok.json'], root, a.join_timeout)
+        wait_for([control/'partition.ok.json'], coordination, a.join_timeout)
         data = root/'inputs'/f'node{a.rank}'; out = root/'nodes'/f'node{a.rank}'
-        out.mkdir(parents=True, exist_ok=False)
+        out.mkdir(parents=True, exist_ok=a.resume)
         rows = read_rows(data/'annotations.jsonl')
         times = {}; started = time.monotonic()
         def progress(stage):
-            atomic(root/'reports'/f'progress.node{a.rank}.json',
+            atomic(coordination/'reports'/f'progress.node{a.rank}.json',
                    dict(stage=stage, input_cases=len(rows), seconds=time.monotonic()-started, timings=times))
             print(f'node{a.rank}: {stage}, input={len(rows)}', flush=True)
         if not a.coordination_only:
             if rows:
                 progress('planning_grounding_editing')
-                times['pipeline'] = run_stage(pipeline_command(data,out/'pipeline',a.gpus),
-                    root/'logs'/f'pipeline.node{a.rank}.log',root,a.timeout)
+                times['pipeline'] = run_stage(pipeline_command(data,out/'pipeline',a.gpus,a.resume),
+                    coordination/'logs'/f'pipeline.node{a.rank}.log',coordination,a.timeout)
             final = out/'pipeline/editing/context_grounded_v4_qwen21'
             ready = read_rows(final/'annotations.jsonl') if (final/'annotations.jsonl').exists() else []
             progress('audit')
@@ -327,21 +351,21 @@ def main():
                 times['audit'] = run_stage([sys.executable,'-m','synthesis_pipeline.audit_removal_concise',
                     '--data-root',str(out/'pipeline/regions'),'--edited-dir',str(final/'edited'),
                     '--out-root',str(out/'audit'),'--gpus',a.gpus,'--policy',PROFILE['audit'],
-                    '--input-layout',PROFILE['layout'],'--pixel-veto'],
-                    root/'logs'/f'audit.node{a.rank}.log',root,a.timeout)
+                    '--input-layout',PROFILE['layout'],'--pixel-veto',*(['--resume'] if a.resume else [])],
+                    coordination/'logs'/f'audit.node{a.rank}.log',coordination,a.timeout)
             else:
                 write_rows(out/'audit/audit.jsonl', [])
                 atomic(out/'audit/summary.json',dict(cases=0,calls=0,reason='no_executable_cases'))
         progress('node_done' if not a.coordination_only else 'coordination_only_done')
         atomic(control/f'node{a.rank}.done.json',dict(timings=times,coordination_only=a.coordination_only))
-        wait_for([control/f'node{i}.done.json' for i in range(a.nodes)], root, a.timeout)
+        wait_for([control/f'node{i}.done.json' for i in range(a.nodes)], coordination, a.timeout)
         if a.rank == 0:
             if a.coordination_only:
-                atomic(root/'reports/final.json',dict(coordination_only=True,generated=0,profile=PROFILE))
+                atomic(coordination/'reports/final.json',dict(coordination_only=True,generated=0,profile=PROFILE))
             else:
                 print(json.dumps(merge(root,a.nodes)), flush=True)
             atomic(control/'finalize.ok.json',dict(coordination_only=a.coordination_only))
-        wait_for([control/'finalize.ok.json'], root, a.timeout)
+        wait_for([control/'finalize.ok.json'], coordination, a.timeout)
     except BaseException:
         atomic(control/f'node{a.rank}.failed.json',dict(error=traceback.format_exc()))
         raise

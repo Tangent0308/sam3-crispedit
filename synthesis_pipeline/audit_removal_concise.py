@@ -17,6 +17,7 @@ from synthesis_pipeline.audit_edit_pairs import mask_array
 from synthesis_pipeline.audit_quality_v4 import native_full_pair, paired_overview, clean_overview
 from synthesis_pipeline.generate_samtok_plan import parse_json_object
 from synthesis_pipeline.prepare_samtok_data import load_jsonl, write_jsonl
+from synthesis_pipeline.labeling_checkpoint import CaseCheckpoints, bind_settings, file_digest, wait_workers
 from utils import vlm_utils as vlm
 from utils.edit_quality_guard import removal_change_evidence
 
@@ -134,6 +135,8 @@ def main():
     p.add_argument('--batch-size', type=int, default=4)
     p.add_argument('--policy',choices=['legacy','mask-coverage-v2','pixels-first-v3','visual-evidence-v4','completion-v5','completion-v6'],default='legacy')
     p.add_argument('--pixel-veto',action='store_true',help='Removal-only conservative low-change veto; never yields a pass')
+    p.add_argument('--resume',action='store_true')
+    p.add_argument('--checkpoint-root',type=Path)
     a = p.parse_args()
     if a.policy in {'pixels-first-v3','completion-v5','completion-v6'} and a.input_layout=='paired':
         raise ValueError('After-first audit requires separate full images')
@@ -145,7 +148,10 @@ def main():
     for row in rows:
         if not (a.edited_dir/row['image']).is_file():
             raise FileNotFoundError(a.edited_dir/row['image'])
-    a.out_root.mkdir(parents=True, exist_ok=False)
+    a.out_root.mkdir(parents=True, exist_ok=a.resume)
+    settings=dict(policy=a.policy,input_layout=a.input_layout,pixel_veto=a.pixel_veto,
+                  batch_size=a.batch_size,model=qwen38_model())
+    bind_settings(a.out_root,settings,a.resume)
     started = time.perf_counter()
     if not a.worker:
         jobs=[]
@@ -156,19 +162,18 @@ def main():
             if not selected: continue
             manifest=a.out_root/f'input_{i}.jsonl'
             write_jsonl(manifest, selected)
-            log=(a.out_root/f'worker_{i}.log').open('w')
+            log=(a.out_root/f'worker_{i}.log').open('a' if a.resume else 'w')
             command=[python,'-m','synthesis_pipeline.audit_removal_concise','--worker',
                 '--data-root',str(a.data_root),'--edited-dir',str(a.edited_dir),
                 '--annotations-jsonl',str(manifest),'--out-root',str(a.out_root/f'worker_{i}'),
-                '--input-layout',a.input_layout,'--batch-size',str(a.batch_size),'--policy',a.policy]
+                '--input-layout',a.input_layout,'--batch-size',str(a.batch_size),'--policy',a.policy,
+                '--checkpoint-root',str(a.out_root)]
             if a.pixel_veto:command.append('--pixel-veto')
+            if a.resume:command.append('--resume')
             env={**os.environ,'CUDA_VISIBLE_DEVICES':gpu,'OMP_NUM_THREADS':'8',
                  'PATH':str(Path(python).parent)+os.pathsep+os.environ.get('PATH','')}
             jobs.append((i,subprocess.Popen(command,env=env,stdout=log,stderr=subprocess.STDOUT),log))
-        codes=[]
-        for i,proc,log in jobs:
-            codes.append(proc.wait());log.close()
-        if any(codes):raise RuntimeError(f'Audit worker failures: {codes}')
+        wait_workers(jobs,'Audit')
         results=[r for i,_,_ in jobs for r in load_jsonl(a.out_root/f'worker_{i}/audit.jsonl')]
         order={r['image']:i for i,r in enumerate(rows)}
         results.sort(key=lambda r:order[r['image']])
@@ -177,17 +182,29 @@ def main():
         summaries=[json.loads((a.out_root/f'worker_{i}/summary.json').read_text()) for i,_,_ in jobs]
         calls=sum(r['calls'] for r in summaries)
         inference=sum(r['inference_seconds'] for r in summaries)
+        reused=sum(r.get('reused',0) for r in summaries)
     else:
-        inputs=a.out_root/'inputs';inputs.mkdir()
-        vlm.configure_backend('qwen38-vllm',model_id=qwen38_model(),device='cuda:0',dtype='bf16')
-        backend=vlm.get_backend()
-        backend.enable_thinking=True
-        backend.chat_template_overrides={'reasoning_effort':'low'}
-        backend.sampling_overrides={'temperature':1.,'top_p':.95,'top_k':20,'presence_penalty':0.,'repetition_penalty':1.}
+        inputs=a.out_root/'inputs';inputs.mkdir(exist_ok=True)
+        checkpoints=CaseCheckpoints(a.checkpoint_root or a.out_root,settings)
+        dependencies={r['image']:dict(source_sha256=file_digest(a.data_root/'sources'/r['source_image']),
+            edited_sha256=file_digest(a.edited_dir/r['image'])) for r in rows}
         results=[];calls=0;inference=0.
+        pending=[]
+        for row in rows:
+            saved=checkpoints.load(row,dependencies[row['image']]) if a.resume else None
+            if saved is not None and saved.get('parsed') is not None:results.append(saved)
+            else:pending.append(row)
+        reused=len(results)
+        print(json.dumps(dict(stage='audit',total=len(rows),reused=reused,pending=len(pending))),flush=True)
+        if pending:
+            vlm.configure_backend('qwen38-vllm',model_id=qwen38_model(),device='cuda:0',dtype='bf16')
+            backend=vlm.get_backend()
+            backend.enable_thinking=True
+            backend.chat_template_overrides={'reasoning_effort':'low'}
+            backend.sampling_overrides={'temperature':1.,'top_p':.95,'top_k':20,'presence_penalty':0.,'repetition_penalty':1.}
         try:
-            for offset in range(0,len(rows),a.batch_size):
-                batch=rows[offset:offset+a.batch_size];messages=[];evidence=[]
+            for offset in range(0,len(pending),a.batch_size):
+                batch=pending[offset:offset+a.batch_size];messages=[];evidence=[]
                 for row in batch:
                     source=Image.open(a.data_root/'sources'/row['source_image']).convert('RGB')
                     after=Image.open(a.edited_dir/row['image']).convert('RGB')
@@ -229,12 +246,15 @@ def main():
                         model_decision=('unparsed' if parsed is None else 'pass' if admitted(parsed) else 'fail'),pixel_evidence=pixels,pixel_veto_applied=bool(pixel_rejected),
                         raw_response=raw,prompt=prompt,input_images=paths,input_layout=input_layout,editing_instruction=row['editing_instruction'],
                         edited_path=str((a.edited_dir/row['image']).resolve()),reviewer='Qwen3.8-27B-vLLM; not assistant review'))
+                    if parsed is not None:
+                        checkpoints.save(row,results[-1],artifacts=paths,dependencies=dependencies[row['image']])
                 write_jsonl(a.out_root/'audit.jsonl',results)
                 print(f'audited {len(results)}/{len(rows)}',flush=True)
         finally:
-            vlm.shutdown_backend()
+            if pending:vlm.shutdown_backend()
+    order={r['image']:i for i,r in enumerate(rows)};results.sort(key=lambda r:order[r['image']])
     write_jsonl(a.out_root/'audit.jsonl',results)
-    summary=dict(cases=len(rows),calls=calls,input_layout=a.input_layout,policy=a.policy,pixel_veto=a.pixel_veto,
+    summary=dict(cases=len(rows),calls=calls,reused=reused,input_layout=a.input_layout,policy=a.policy,pixel_veto=a.pixel_veto,
         decisions=dict(Counter(r['decision'] for r in results)),parse_errors=sum(r['parsed'] is None for r in results),
         inference_seconds=inference,wall_seconds=time.perf_counter()-started)
     (a.out_root/'summary.json').write_text(json.dumps(summary,indent=2))
