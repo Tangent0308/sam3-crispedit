@@ -13,7 +13,7 @@
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-export CRISPEDIT_RUN_ID="crispedit_full_localenv_20260924_b"
+export CRISPEDIT_RUN_ID="crispedit_full_localenv_20260925"
 export CRISPEDIT_BRANCH="crispedit-labeling"
 export CRISPEDIT_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 : "${ARNOLD_ID:?Arnold must supply node rank}"
@@ -89,7 +89,7 @@ node0 在预检查完成后动态扫描源数据、生成 `RUN_DIR/plan.json`，
 ## 3. 日志、调试和恢复
 
 上述入口的具体日志目录是：
-`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/labeling_4node_crispedit_full_localenv_20260924_b/logs/`。
+`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/labeling_4node_crispedit_full_localenv_20260925/logs/`。
 
 ```text
 RUN_DIR/
@@ -109,13 +109,17 @@ RUN_DIR/
 ```
 
 ```bash
-RUN_DIR=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/labeling_4node_crispedit_full_localenv_20260924_b
+RUN_DIR=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/labeling_4node_crispedit_full_localenv_20260925
 tail -f "$RUN_DIR/logs/bootstrap.node0.log"
 tail -f "$RUN_DIR/logs/quality.node0.log"
 ```
 
 `complete.ok` 代表数据结构/流程校验完成；mask 语义质量需另行抽查。`Peer failed` 时查看失败标记内的上游原因和对应阶段日志。
 任务由 Arnold 托管，不依赖登录终端。手动四机启动时，每台分别在 tmux 内执行完整入口。
+
+grounding 的单行模型响应解析失败会保留在该 shard 中，记录为
+`grounding_status=PARSE_ERROR`、`qc_flag=GROUND_FAIL`，并在 mask 阶段生成空 mask
+行供最终统计；这类行不会再触发四机全局失败。模型引擎或批处理运行时错误仍会中止 grounding，避免把服务故障当成有效结果。
 
 恢复仅用于已经进入数据规划、且**代码/参数/源数据完全相同**的失败任务：确认旧进程退出，保留 RUN_ID、RUN_DIR 和其他配置，四台共同增加：
 
@@ -127,6 +131,17 @@ bash scripts/bootstrap_crispedit_4node.sh
 
 若调度到新机器，先按完整入口重新 clone，并设置 `CRISPEDIT_COMMIT` 为原运行的完整 commit SHA，再传上述两个变量启动。成功标记在 `control/retry_01/complete.ok`。
 代码或安装配置修改后必须用新 RUN_ID；勿删除失败标记或修改计划摘要来绕过恢复校验。旧 prefilter 仍通过其独立结果目录复用。
+
+续传前必须确认四台机器使用同一个 `CRISPEDIT_RESUME_TOKEN`，并保留
+`RUN_DIR/plan.json`、`RUN_DIR/work/` 以及已有的 shard 结果。新的 token 只会新建
+`control/<token>/` 协调目录，质量、场景和 grounding 的完整 shard 会按输入签名复用，
+缺失或不完整的 shard 才会重新推理。
+
+本次 `labeling_4node_crispedit_full_localenv_20260925` 是在上述单行解析错误修复前运行的，
+失败原因是 `color_00003.parquet` 中一行触发了旧版全局校验。该 run 的 `plan.json` 固定了旧代码摘要，
+因此拉取修复后的提交后应使用新的 `CRISPEDIT_RUN_ID` 启动完整入口；质量和场景结果目录会继续复用，
+不要删除旧的 `work/` 或正式 prefilter 目录。以后若代码摘要、参数和源数据完全不变，才使用上面的
+`CRISPEDIT_RESUME=1` + 新 token 续传同一个 run。
 
 ## 4. 故障修复与验证
 
@@ -143,6 +158,17 @@ bash scripts/bootstrap_crispedit_4node.sh
 [本轮 19 条可视化](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/review/index.html)。自动 OK 只作运行验证，不等于语义准确率。
 验证期间已移除旧共享基础 Python，后续阶段仍成功；测试用 clone 完成后清理，Git 提交及日志保留。
 物理四机重新提交由用户执行，不将本机四 rank 验证称为四台物理机器验收。
+
+### 4.1 grounding 单行解析错误修复
+
+旧版调度器在 `verify_label_shards` 中把任意 `ground_parse_ok=false` 都提升为全局异常。
+`color_00003.parquet` 的一个模型响应虽然已经被 grounding runner 标为
+`PARSE_ERROR/GROUND_FAIL`，仍因此触发了四个节点的 `Peer failed`。当前实现只把带有
+`runtime_error` 的推理运行时错误视为阶段失败；普通解析失败会继续合并，mask runner 会为该行
+写入空 mask 和 `GROUND_FAIL`，最终校验统计其失败数量。
+
+本地验证：`.venv-crispedit/bin/python -m pytest -q tests/test_crispedit_distributed.py`，9 项通过，
+其中包含可恢复解析失败和运行时错误仍会阻断的回归检查。
 
 `labeling_4node_crispedit_full_localenv_20260924_b` 首次提交没有进入环境安装或数据规划。远程
 `crispedit-labeling` 当时仍为旧提交 `dd51f01`，任务 clone 到的旧 bootstrap 会再次管理仓库；它看到入口刚创建的

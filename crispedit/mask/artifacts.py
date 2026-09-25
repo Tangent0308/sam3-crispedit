@@ -43,8 +43,17 @@ def reusable_table(path, digest, schema, expected_indices):
         if "ERROR" in table["qc_flag"].to_pylist():
             return None
         if "ground_parse_ok" in table.column_names:
-            for row in table.select(["qc_flag", "ground_parse_ok"]).to_pylist():
-                if row["qc_flag"] != "PREFILTER_SKIP" and not row["ground_parse_ok"]:
+            columns = ["qc_flag", "ground_parse_ok"]
+            if "grounding_status" in table.column_names:
+                columns.append("grounding_status")
+            for row in table.select(columns).to_pylist():
+                recoverable_parse_error = (
+                    row.get("qc_flag") == "GROUND_FAIL"
+                    and row.get("grounding_status") == "PARSE_ERROR"
+                )
+                if (row["qc_flag"] != "PREFILTER_SKIP"
+                        and not row["ground_parse_ok"]
+                        and not recoverable_parse_error):
                     return None
         return table
     except (OSError, pa.ArrowException, ValueError):

@@ -402,9 +402,24 @@ def verify_label_shards(root, names, labels, stage):
         if any(r['mask_selection_reason'] != 'SELECTED' for r in table.select(['mask_selection_reason']).to_pylist()):
             raise ValueError(f'{stage} contains a non-double-PASS row: {name}')
         if stage == 'grounding':
-            for r in table.select(['ground_parse_ok', 'ground_json']).to_pylist():
+            columns = ['ground_parse_ok', 'ground_json', 'qc_flag']
+            if 'grounding_status' in table.column_names:
+                columns.append('grounding_status')
+            for r in table.select(columns).to_pylist():
                 payload = json.loads(r['ground_json'])
-                if not r['ground_parse_ok'] or payload.get('runtime_error'):
+                # A malformed model response is a row-level grounding failure.
+                # grounding_runner records it as PARSE_ERROR/GROUND_FAIL and
+                # the mask stage emits an empty, reviewable row for it.  Do
+                # not let that single row abort all four workers.  Runtime
+                # failures still indicate a broken inference batch and must
+                # stop the run so that it can be resumed after investigation.
+                recoverable_parse_error = (
+                    not r['ground_parse_ok']
+                    and r.get('qc_flag') == 'GROUND_FAIL'
+                    and r.get('grounding_status') == 'PARSE_ERROR'
+                )
+                if payload.get('runtime_error') or (
+                        not r['ground_parse_ok'] and not recoverable_parse_error):
                     raise ValueError(f'Grounding parse/runtime error: {name}')
         elif 'ERROR' in table['qc_flag'].to_pylist():
             raise ValueError(f'SAM runtime error: {name}')
