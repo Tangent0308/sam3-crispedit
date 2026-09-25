@@ -2437,3 +2437,43 @@ adaptive-remove-v5、40步/seed0、completion-v5/adaptive/pixel-veto均保持原
 共享bootstrap副本已安装至指南所列路径，内容与仓库脚本逐字节相同。
 不将单机模拟结果说成真实四机网络/共享存储已联调，也不将小批次冷启动时间外推为100k吞吐。
 未启动正式全量任务；真实四机首次提交应先限制8张源图smoke，再换run ID执行全量。
+
+## 2026-09-25：修复Arnold编辑环境的OpenCV混装
+
+实际任务`samtok-remove-4n-20260925`四台均clone到`cd9129a`，node1/node3在约03:33 UTC
+导入editor环境的cv2时出现`ImportError: libxcb.so.1`，随后`editor environment check failed`。
+node0/node2通过旧检查并继续复制模型，尚未开始生成。初步判断为系统库差异不充分，进一步发现
+`requirements/labeling-editor.lock.txt`同时包含`opencv-python==5.0.0.93`和
+`opencv-python-headless==5.0.0.93`。OpenCV wheel自带METADATA明确要求四种分发包只能选一个，
+它们共享cv2命名空间和文件；实际二进制会受到文件覆盖影响。成功节点可能加载headless或具备GUI库，
+不能仅凭成功/失败判断系统镜像不同。上一轮本地v3环境实际加载headless，所以旧预检漏掉了混装。
+
+本次修改：
+
+- 编辑环境只保留同版本headless；官方Omni固定源码继续`--no-deps`安装，其cv2图像API由headless提供。
+  不改变规划、出图、融合、审核prompt或模型参数。
+- 每个环境安装后立即检查OpenCV分发包唯一性；完整预检还检查实际`GUI: NONE`，将实际版本/构建写入报告。
+  即便cv2暂时能import，只要GUI与headless混装也会明确拒绝。本地旧v3混装环境已实测被新检查拒绝。
+- 四台全部通过环境检查并发布environment marker后才允许复制权重；有失败标记时，即使ready标记齐全也退出。
+  大文件复制和读回SHA校验、源数据分批准备增加失败检测；中断时保留临时文件而不写成功manifest。
+  单次阻塞I/O和共享文件系统可见性仍影响检测延迟，安装本身仍会运行到结束后检查peer。
+- 四机指南完整Arnold入口同步以上实现，并纳入此前已完成但未提交的Arnold说明。
+  旧run不自动重启，使用新的run ID和新环境；不能删除failed marker强行继续。
+
+全新三环境安装位置：`/opt/tiger/tanyue/labeling_runtime_opencv_fix_20260925`。
+三个环境实际GUI均为NONE，SAM/vLLM/官方Omni/regional扩展及CUDA预检成功。
+新editor的cv2.abi3.so与上一轮成功验证环境实际使用的二进制SHA256完全一致：
+`9e29605abcc31c9942d0e7dffc53b4ccaa601676c794327b0ea71a570a0c26c2`；ldd未发现X11/xcb/Qt依赖。
+新增回归覆盖混装、GUI二进制残留、权重校验期间peer失败以及四节点环境等待和失败优先行为。
+
+本轮证据保存在
+`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/opencv_fix_20260925/`，
+`logs/setup.log`为从空目录安装记录，`run/`为真实模型完整链路验证。
+验证已完成：本机8卡分为四worker各2卡，8源图9region，9/9成图、9/9审核，四worker退出0，
+`run/control/finalize.ok.json`已产生；模型9 pass、0解析错误，本轮未新增Assistant逐图质量评审。
+逐图完整解码、前后尺寸与ID覆盖检查通过，日志确认40步/seed0及原冻结profile。
+编辑本体均值15.19秒（14.81–15.69秒），并发链路最长约749.3秒/12.5分钟，不含环境安装。
+首次新环境的27B共享权重读取和Triton预热占用明显时间，这不是稳定吞吐或提速对比实验。
+完整回归348 passed / 6 skipped，5项融合测试另在新SAM环境通过；21项部署测试包含真实Bash环境门禁。
+两个准备CLI也读取原失败run的真实marker验证：均在创建输出目录前拒绝继续。
+原四机任务未重启；真实四台主机上的重提验证仍需使用更新后的Arnold入口、新run ID及新环境。

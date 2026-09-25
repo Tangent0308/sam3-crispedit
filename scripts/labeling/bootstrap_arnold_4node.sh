@@ -27,6 +27,11 @@ on_exit() {
   fi
 }
 trap on_exit EXIT
+check_peers() {
+  if compgen -G "$SAMTOK_RUN_ROOT/control/*.failed.json" > /dev/null; then
+    echo 'Peer bootstrap failed; see experiments logs' >&2; exit 1
+  fi
+}
 export PYTHONUNBUFFERED=1
 # No credentials are printed; retain standard git credential helpers.
 if [[ "${SAMTOK_KEEP_PROXY:-0}" != 1 ]]; then
@@ -56,33 +61,49 @@ for file in "$SAMTOK_QWEN38_MODEL/config.json" "$SAMTOK_QWEN21_MODEL/model_index
 done
 bash scripts/labeling/setup_env.sh
 export SAMTOK_ENV_REPORT="$SAMTOK_RUNTIME_ROOT/environment.json"
+# Do not stage tens of GB or prepare data while another worker failed its imports.
+check_peers
+printf '{"ready":true}\n' > "$SAMTOK_RUN_ROOT/control/environment.node$ARNOLD_ID.ok.json.tmp"
+mv "$SAMTOK_RUN_ROOT/control/environment.node$ARNOLD_ID.ok.json.tmp" "$SAMTOK_RUN_ROOT/control/environment.node$ARNOLD_ID.ok.json"
+start_wait=$SECONDS
+while true; do
+  check_peers
+  all_ready=1
+  for peer_rank in 0 1 2 3; do
+    [[ -f "$SAMTOK_RUN_ROOT/control/environment.node$peer_rank.ok.json" ]] || all_ready=0
+  done
+  (( all_ready == 1 )) && break
+  (( SECONDS - start_wait < 10800 )) || { echo 'Peer environment timeout' >&2; exit 1; }
+  sleep 2
+done
 export DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 if [[ "${SAMTOK_STAGE_EDITOR_MODEL:-1}" == 1 ]]; then
   editor_cache="${SAMTOK_MODEL_CACHE_ROOT:-/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID}/qwen21"
   "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.stage_labeling_model \
-    --source "$SAMTOK_QWEN21_MODEL" --destination "$editor_cache"
+    --source "$SAMTOK_QWEN21_MODEL" --destination "$editor_cache" --run-root "$SAMTOK_RUN_ROOT"
   export SAMTOK_QWEN21_MODEL="$editor_cache"
 fi
 # Node 0 materializes once if no prepared manifest was supplied. All original
 # regions are kept; 0 means all positives, not an invented 100k duplication.
+check_peers
 if [[ "$ARNOLD_ID" == 0 ]]; then
   if [[ ! -f "$SAMTOK_DATA_ROOT/annotations.jsonl" ]]; then
     "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.prepare_removal_inputs \
       --parquet "$SAMTOK_PARQUET" --out-root "$SAMTOK_DATA_ROOT" \
-      --limit-sources "${SAMTOK_LIMIT_SOURCES:-0}"
+      --limit-sources "${SAMTOK_LIMIT_SOURCES:-0}" --run-root "$SAMTOK_RUN_ROOT"
   fi
+  check_peers
   printf '{"ready":true}\n' > "$SAMTOK_RUN_ROOT/control/data.ok.json.tmp"
   mv "$SAMTOK_RUN_ROOT/control/data.ok.json.tmp" "$SAMTOK_RUN_ROOT/control/data.ok.json"
 fi
 start_wait=$SECONDS
 until [[ -f "$SAMTOK_RUN_ROOT/control/data.ok.json" ]]; do
-  if compgen -G "$SAMTOK_RUN_ROOT/control/*.failed.json" > /dev/null; then
-    echo 'Peer bootstrap failed; see experiments logs' >&2; exit 1
-  fi
+  check_peers
   (( SECONDS - start_wait < 10800 )) || { echo 'Data preparation timeout' >&2; exit 1; }
   sleep 2
 done
+check_peers
 # No MASTER_PORT / ARNOLD_WORKER_HOSTS rendezvous: independent data shards.
 exec "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.run_multinode_labeling \
   --data-root "$SAMTOK_DATA_ROOT" --run-root "$SAMTOK_RUN_ROOT" --run-id "$SAMTOK_RUN_ID" \

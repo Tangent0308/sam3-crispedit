@@ -33,8 +33,11 @@ for role in sam mllm editor; do
     --index-url "$SAMTOK_PACKAGE_INDEX" --extra-index-url https://download.pytorch.org/whl/cu129 \
     --index-strategy unsafe-best-match \
     -r "requirements/labeling-$role.lock.txt"
+  "$envdir/bin/python" -c 'from synthesis_pipeline.check_labeling_environment import check_opencv; print(check_opencv())'
 done
 # Preserve the tested SAM source import without resolving its old numpy<2 metadata.
+# Omni's GUI OpenCV dependency shares cv2 with headless; --no-deps is intentional.
+# Its image APIs are provided by the pinned headless wheel; no GUI/video client is used.
 # Preserve the exact Omni official implementation; regional behavior lives in this repo.
 "$UV_BIN" pip install --python "$SAMTOK_RUNTIME_ROOT/editor/bin/python" \
   --no-deps --index-url "$SAMTOK_PACKAGE_INDEX" -e "$SAMTOK_RUNTIME_ROOT/omni-source"
