@@ -124,6 +124,13 @@ def failed(root):
     return files[0] if files else None
 
 
+def check_peer_failure(root):
+    if root is not None:
+        problem = failed(Path(root))
+        if problem:
+            raise RuntimeError(f'Peer failed: {problem}')
+
+
 def wait_for(paths, root, timeout):
     start = time.monotonic()
     while True:

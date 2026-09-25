@@ -32,6 +32,39 @@ image ID 不重编号，每个 region 只执行一次。4个本地8卡池即32�
 
 ## 2. 最短正式入口：四台 worker 都执行
 
+### 2.1 Arnold 任务配置与平台变量
+
+仿照训练指南，在Arnold提交一个**4 workers、每worker 8张GPU**的任务，四台使用相同镜像和入口。
+当前实测硬件为H100 80GB；不能把单机8卡模拟测试理解为已验证其他显存规格。
+每台worker只启动一次下面的Bash入口，由pipeline创建本机GPU进程；不要额外配置成每GPU再启动一次入口。
+
+| 配置项 | 应填写或确认的内容 |
+|---|---|
+| worker数量 | 4 |
+| 每worker GPU数量 | 8，总计32卡 |
+| worker入口 | 第3节完整Bash代码；或第2.2节的共享bootstrap调用 |
+| 共享挂载 | 四机均挂载`/mnt/bn/strategy-mllm-train`；源数据/模型可读，任务experiments目录可读写 |
+| 节点本地存储 | `/opt/tiger/tanyue`可写，每机至少预留150GB；repo/环境/编辑模型缓存存放这里 |
+| 镜像工具与网络 | git、Bash、python3/pip、可用NVIDIA驱动；每机可访问GitHub及依赖安装源 |
+| 用户必填 | 同一个全新`SAMTOK_RUN_ID`；无需W&B key |
+
+Arnold平台注入的变量与本任务的使用方式：
+
+| 变量 | 预期值/含义 | 当前打标入口如何使用 |
+|---|---|---|
+| `ARNOLD_WORKER_NUM` | `4` | 必填，启动前检查 |
+| `ARNOLD_WORKER_GPU` | `8` | 必填，安装后还检查实际可见GPU |
+| `ARNOLD_ID` | 当前机器编号`0/1/2/3` | 必填，决定分片、日志和node0协调角色 |
+| `ARNOLD_WORKER_HOSTS` | 平台分配的worker地址列表 | 不解析，不作为启动前提；推理不需要rendezvous |
+| `ARNOLD_WORKER_0_HOST` | 平台可能提供的node0地址 | 不使用 |
+| `PORT` / `MASTER_PORT` | worker服务端口/训练遗留变量 | 不用于本流程，不需要手工统一 |
+
+不要自行覆盖Arnold节点变量。统一run ID和共享文件系统负责节点间协调，不需要照搬训练的
+`NNODES/NODE_RANK/WORLD_SIZE`或NCCL配置。也无需tmux/nohup：入口在Arnold任务前台运行，
+平台负责进程生命周期，日志同时输出到任务控制台和experiments。
+
+### 2.2 已有共享bootstrap时的最短入口
+
 先确保分支已包含本指南和 `scripts/labeling/`，再将
 `scripts/labeling/bootstrap_arnold_4node.sh` 复制到四机可访问的共享路径，或将其完整内容粘贴为 Arnold entry。
 本次维护的共享副本路径为：
@@ -65,31 +98,172 @@ export SAMTOK_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok
 这里必须已有 `annotations.jsonl` 和 `sources/`；该20例目录只适合部署 smoke，不是正式全量输入。
 不设置此变量时，默认数据准备位置为本次 `$SAMTOK_RUN_ROOT/data/source/`。
 
-## 3. 不依赖预先复制共享脚本的入口
+## 3. 可直接提交的 Arnold 完整入口
 
-下面同样由四台 worker 执行。先下载小型 bootstrap，然后由 bootstrap 真正 clone 分支并安装；
-不是尝试调用一个“还没 clone 的 repo”里的文件。下载与后续输出都保存到 experiments。
+下面整段可直接粘贴到 **四个 Arnold worker 的共同 Bash 入口**。先填写唯一的
+`SAMTOK_RUN_ID`；不要四台分别生成时间戳，不要覆盖Arnold分配的`ARNOLD_ID`。
+正式全量用`SAMTOK_LIMIT_SOURCES=0`，首次真实四机联调建议先改为8。
+
+它不依赖已存在的本地仓库，也不需要先下载或复制bootstrap：
+**Arnold拓扑检查 → 共享日志/失败标记 → 每机本地clone → 安装uv和三套环境 →
+本地权重缓存 → node0准备源数据 → 四节点一致性检查及分片 → 生成、审核和汇总**。
+以下主体与仓库的`scripts/labeling/bootstrap_arnold_4node.sh`一致，额外提供用户填写区。
 
 ```bash
 #!/usr/bin/env bash
-set -euo pipefail
-export SAMTOK_RUN_ID="samtok-remove-4n-20260924-002"
+
+# ----- 0. 用户填写区：四个 worker 必须填写同一个新名称 -----
+export SAMTOK_RUN_ID="samtok-remove-4n-20260925"  # 必填；例如 samtok-remove-4n-20260924-003
+export SAMTOK_LIMIT_SOURCES=0  # 正式全量=0；首次四机 smoke 改为8
+export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
-export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
-: "${ARNOLD_ID:?Arnold must set rank}"
-mkdir -p "$SAMTOK_RUN_ROOT/logs"
-exec > >(tee -a "$SAMTOK_RUN_ROOT/logs/entry.node$ARNOLD_ID.log") 2>&1
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
-entry_file="$(mktemp /tmp/samtok-label-bootstrap.XXXXXX.sh)"
-curl --fail --location --retry 3 \
-  "https://raw.githubusercontent.com/Tangent0308/sam3-crispedit/$SAMTOK_BRANCH/scripts/labeling/bootstrap_arnold_4node.sh" \
-  --output "$entry_file"
-bash "$entry_file"
+# 可选：填写期望的完整commit，防止分支在四机clone期间移动。
+# export SAMTOK_EXPECTED_COMMIT="实际的40位commit"
+
+# Copy this complete file to a shared pre-clone path or paste it into Arnold entry.
+# Run the SAME entry on all four workers. Each worker clones to node-local storage.
+set -euo pipefail
+: "${SAMTOK_RUN_ID:?Set one new unique run ID, identical on all four workers}"
+: "${ARNOLD_WORKER_NUM:?Arnold topology missing}"
+: "${ARNOLD_WORKER_GPU:?Arnold topology missing}"
+: "${ARNOLD_ID:?Arnold topology missing}"
+[[ "$SAMTOK_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
+[[ "$ARNOLD_WORKER_NUM" == 4 && "$ARNOLD_WORKER_GPU" == 8 && "$ARNOLD_ID" =~ ^[0-3]$ ]] || { echo 'Requires 4 nodes x 8 GPUs' >&2; exit 2; }
+export SAMTOK_RUN_ROOT="${SAMTOK_RUN_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID}"
+export SAMTOK_DATA_ROOT="${SAMTOK_DATA_ROOT:-$SAMTOK_RUN_ROOT/data/source}"
+export SAMTOK_PARQUET="${SAMTOK_PARQUET:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Training_Data/mix_gres8k_ver4k_train.parquet}"
+export SAMTOK_REPO_DIR="${SAMTOK_REPO_DIR:-/opt/tiger/tanyue/labeling_runs/$SAMTOK_RUN_ID/node$ARNOLD_ID/repo}"
+export SAMTOK_REPO_URL="${SAMTOK_REPO_URL:-https://github.com/Tangent0308/sam3-crispedit.git}"
+export SAMTOK_BRANCH="${SAMTOK_BRANCH:-samtok-derived-edit-labeling}"
+mkdir -p "$SAMTOK_RUN_ROOT/logs" "$SAMTOK_RUN_ROOT/control"
+# Atomic claim: old run IDs and accidental duplicate entries must never reuse markers.
+(set -o noclobber; printf '%s\n' "$(hostname) $$" > "$SAMTOK_RUN_ROOT/control/bootstrap.node$ARNOLD_ID.claim") || exit 1
+exec > >(tee -a "$SAMTOK_RUN_ROOT/logs/bootstrap.node$ARNOLD_ID.log") 2>&1
+on_exit() {
+  local rc=$?
+  if (( rc != 0 )); then
+    printf '{"error":"bootstrap node %s exited %s; see bootstrap log"}\n' "$ARNOLD_ID" "$rc" \
+      > "$SAMTOK_RUN_ROOT/control/bootstrap.node$ARNOLD_ID.failed.json.tmp"
+    mv "$SAMTOK_RUN_ROOT/control/bootstrap.node$ARNOLD_ID.failed.json.tmp" "$SAMTOK_RUN_ROOT/control/bootstrap.node$ARNOLD_ID.failed.json"
+  fi
+}
+trap on_exit EXIT
+check_peers() {
+  if compgen -G "$SAMTOK_RUN_ROOT/control/*.failed.json" > /dev/null; then
+    echo 'Peer bootstrap failed; see experiments logs' >&2; exit 1
+  fi
+}
+export PYTHONUNBUFFERED=1
+# No credentials are printed; retain standard git credential helpers.
+if [[ "${SAMTOK_KEEP_PROXY:-0}" != 1 ]]; then
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+fi
+[[ ! -e "$SAMTOK_REPO_DIR" ]] || { echo "Clone path already exists: $SAMTOK_REPO_DIR" >&2; exit 1; }
+mkdir -p "$(dirname "$SAMTOK_REPO_DIR")"
+git clone --branch "$SAMTOK_BRANCH" --single-branch "$SAMTOK_REPO_URL" "$SAMTOK_REPO_DIR"
+cd "$SAMTOK_REPO_DIR"
+mkdir -p "$SAMTOK_RUN_ROOT/reports"
+git rev-parse HEAD > "$SAMTOK_RUN_ROOT/reports/checkout.node$ARNOLD_ID.txt"
+if [[ -n "${SAMTOK_EXPECTED_COMMIT:-}" ]]; then
+  [[ "$(git rev-parse HEAD)" == "$SAMTOK_EXPECTED_COMMIT" ]] || { echo 'Unexpected branch revision' >&2; exit 1; }
+fi
+python3 -m pip install --user --index-url "${SAMTOK_PACKAGE_INDEX:-https://bytedpypi.byted.org/simple/}" 'uv==0.11.32'
+export UV_BIN="$(python3 -c 'import site; print(site.getuserbase())')/bin/uv"
+export SAMTOK_RUNTIME_ROOT="$SAMTOK_REPO_DIR/.runtime"
+export SAMTOK_MLLM_PYTHON="$SAMTOK_RUNTIME_ROOT/mllm/bin/python"
+export SAMTOK_EDITOR_PYTHON="$SAMTOK_RUNTIME_ROOT/editor/bin/python"
+export SAMTOK_SAM_PYTHON="$SAMTOK_RUNTIME_ROOT/sam/bin/python"
+export SAMTOK_SAM3_SOURCE="$SAMTOK_RUNTIME_ROOT/sam3-source"
+export SAMTOK_QWEN38_MODEL="${SAMTOK_QWEN38_MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B}"
+export SAMTOK_QWEN21_MODEL="${SAMTOK_QWEN21_MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1}"
+export SAMTOK_SAM3_CHECKPOINT="${SAMTOK_SAM3_CHECKPOINT:-/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt}"
+for file in "$SAMTOK_QWEN38_MODEL/config.json" "$SAMTOK_QWEN21_MODEL/model_index.json" "$SAMTOK_SAM3_CHECKPOINT"; do
+  [[ -r "$file" ]] || { echo "Missing shared input: $file" >&2; exit 1; }
+done
+bash scripts/labeling/setup_env.sh
+export SAMTOK_ENV_REPORT="$SAMTOK_RUNTIME_ROOT/environment.json"
+# Do not stage tens of GB or prepare data while another worker failed its imports.
+check_peers
+printf '{"ready":true}\n' > "$SAMTOK_RUN_ROOT/control/environment.node$ARNOLD_ID.ok.json.tmp"
+mv "$SAMTOK_RUN_ROOT/control/environment.node$ARNOLD_ID.ok.json.tmp" "$SAMTOK_RUN_ROOT/control/environment.node$ARNOLD_ID.ok.json"
+start_wait=$SECONDS
+while true; do
+  check_peers
+  all_ready=1
+  for peer_rank in 0 1 2 3; do
+    [[ -f "$SAMTOK_RUN_ROOT/control/environment.node$peer_rank.ok.json" ]] || all_ready=0
+  done
+  (( all_ready == 1 )) && break
+  (( SECONDS - start_wait < 10800 )) || { echo 'Peer environment timeout' >&2; exit 1; }
+  sleep 2
+done
+export DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+if [[ "${SAMTOK_STAGE_EDITOR_MODEL:-1}" == 1 ]]; then
+  editor_cache="${SAMTOK_MODEL_CACHE_ROOT:-/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID}/qwen21"
+  "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.stage_labeling_model \
+    --source "$SAMTOK_QWEN21_MODEL" --destination "$editor_cache" --run-root "$SAMTOK_RUN_ROOT"
+  export SAMTOK_QWEN21_MODEL="$editor_cache"
+fi
+# Node 0 materializes once if no prepared manifest was supplied. All original
+# regions are kept; 0 means all positives, not an invented 100k duplication.
+check_peers
+if [[ "$ARNOLD_ID" == 0 ]]; then
+  if [[ ! -f "$SAMTOK_DATA_ROOT/annotations.jsonl" ]]; then
+    "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.prepare_removal_inputs \
+      --parquet "$SAMTOK_PARQUET" --out-root "$SAMTOK_DATA_ROOT" \
+      --limit-sources "${SAMTOK_LIMIT_SOURCES:-0}" --run-root "$SAMTOK_RUN_ROOT"
+  fi
+  check_peers
+  printf '{"ready":true}\n' > "$SAMTOK_RUN_ROOT/control/data.ok.json.tmp"
+  mv "$SAMTOK_RUN_ROOT/control/data.ok.json.tmp" "$SAMTOK_RUN_ROOT/control/data.ok.json"
+fi
+start_wait=$SECONDS
+until [[ -f "$SAMTOK_RUN_ROOT/control/data.ok.json" ]]; do
+  check_peers
+  (( SECONDS - start_wait < 10800 )) || { echo 'Data preparation timeout' >&2; exit 1; }
+  sleep 2
+done
+check_peers
+# No MASTER_PORT / ARNOLD_WORKER_HOSTS rendezvous: independent data shards.
+exec "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.run_multinode_labeling \
+  --data-root "$SAMTOK_DATA_ROOT" --run-root "$SAMTOK_RUN_ROOT" --run-id "$SAMTOK_RUN_ID" \
+  --rank "$ARNOLD_ID" --gpus 0,1,2,3,4,5,6,7
 ```
 
-如果网络要求代理，可改用第一种共享入口并设置 `SAMTOK_KEEP_PROXY=1`；不在脚本内硬编码代理或凭据。
-bootstrap 默认直连。四机代码SHA、依赖版本和输入SHA必须一致，否则在规划前失败，不会混用移动中的分支。
-更严格的发布可设置 `SAMTOK_EXPECTED_COMMIT`，要求 clone HEAD 等于指定完整 commit。
+注意：
+
+- `ARNOLD_WORKER_NUM`、`ARNOLD_WORKER_GPU`、`ARNOLD_ID`由平台提供，上面只检查和读取；
+  不要通过手工设置4/8伪装资源已分配，也不要让所有worker使用同一个rank。
+- 这不是训练入口，不设置`MASTER_ADDR`、`MASTER_PORT`、`WORLD_SIZE`，也不启动
+  `torchrun`或`accelerate launch`。`ARNOLD_WORKER_HOSTS`即使存在，也不用于共享文件系统协调。
+- 各机本地clone和环境分别安装；只有源图准备由node0执行一次。与训练指南的
+  “node0安装共享环境、其他节点等待”不同，不要把本地`SAMTOK_REPO_DIR`改成四机共同写的同一个目录。
+- 不需要`source .venv/bin/activate`：pipeline显式使用SAM、MLLM、editor各自的Python，
+  激活一套环境不能替代另外两套。
+- 日志从建立run目录后开始覆盖clone、安装、缓存、数据准备及调度；最前面的必填值/拓扑错误
+  只显示在Arnold任务控制台，因为这时尚未建立安全的run日志路径。
+- 镜像缺少git/python3/pip或GPU驱动时，应先选择/配置正确镜像；无需照搬训练指南的
+  `sudo apt-get install ffmpeg libsm6 libxext6 tmux htop`。本流程使用headless图像依赖。
+- 默认清除代理直连GitHub；环境必须走代理时，在用户填写区设置`SAMTOK_KEEP_PROXY=1`。
+  不要把代理凭据、访问令牌写进文档。四机都需要访问代码仓库、依赖仓库和安装源。
+- 首次正式运行不是自动恢复任务；任一节点失败后保留日志，排查后换新run ID，不复用旧claim。
+
+### 3.1 提交前确认远端已包含所需文件
+
+在当前开发仓库运行以下不修改工作树的检查（远端名为`sam3`；新clone的默认远端名则为`origin`）：
+
+```bash
+git fetch sam3 samtok-derived-edit-labeling
+git ls-tree -r --name-only sam3/samtok-derived-edit-labeling -- \
+  scripts/labeling requirements synthesis_pipeline/run_multinode_labeling.py \
+  synthesis_pipeline/prepare_removal_inputs.py synthesis_pipeline/check_labeling_environment.py \
+  synthesis_pipeline/stage_labeling_model.py
+```
+
+应能看到两个labeling shell脚本、三份锁定依赖文件和上面的四个Python入口。
+本地有文件不等于远端有文件；四机实际执行的是clone下来的分支内容。
+若用`SAMTOK_EXPECTED_COMMIT`固定版本，四台必须填写相同的完整SHA。
 
 ## 4. clone、安装和真实路径
 
@@ -123,6 +297,16 @@ SAM源代码固定 `fff5ca124cf2551dd73c0de2af9c64bdadeea0b3`；Omni固定
 安装用 `unsafe-best-match` 解决PyTorch索引遮蔽普通包问题。SAM的无CUDA后缀版本使用严格 `===`，避免
 `==2.8.0` 误选另一CUDA构建。环境会占用较多本地磁盘，预留至少100GB用于环境、依赖源码和缓存。
 安装结束逐环境检查版本、CUDA、SAM/Omni API import，写 `.runtime/environment.json`；失败不进入生成。
+
+OpenCV只允许安装`opencv-python-headless`（SAM 4.11.0.86；MLLM/editor 5.0.0.93）。
+不要同时安装`opencv-python`或contrib变体：这些wheel都覆盖同一个`cv2`目录，混装会使实际加载的
+二进制不确定。预检同时检查包唯一性与`cv2.getBuildInformation()`中的`GUI: NONE`，记录到environment报告。
+官方Omni依赖元数据包含GUI包，但本流程使用其图像推理API，按固定lock和`--no-deps`安装，
+由同版本headless提供`cv2`；不要随后运行普通`pip install -e .runtime/omni-source`重新引入GUI包。
+
+四机各自通过环境检查后写`control/environment.node<N>.ok.json`，必须四份齐全且无失败marker，
+才能进入权重复制。复制与读回校验、源数据分批准备也检查peer失败，失败的临时文件保留供排查，
+不会发布成功缓存清单或data.ok。共享存储可见性、单次阻塞I/O仍会影响失败传播延迟。
 
 随后默认将Qwen-Image-2.1逐文件复制、SHA256校验到每台机器本地的
 `/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID/qwen21`，再启动8个编辑进程。
@@ -205,6 +389,13 @@ cat "$RUN_ROOT/reports/final.json"
 不会单独把半批结果标为完成。被外部SIGKILL的进程无法写marker，因此仍依赖等待超时；当前没有心跳租约恢复。
 环境准备期间其他节点可能仍在安装，安装是有限操作；安装后进入门禁会看到失败，不继续生成。
 
+2026-09-25的`samtok-remove-4n-20260925`在node1/node3报`libxcb.so.1`，根因是旧editor锁文件
+同时包含GUI与headless OpenCV，不能仅凭此断定四台系统镜像不同。旧预检只读取headless包版本，
+未检查实际cv2构建；即使列出的版本一致也可能加载到GUI二进制。当前已删除GUI包并加强检查。
+修复后应从新环境安装，使用新的run ID（例如`samtok-remove-4n-20260925-r1`），并复制第3节更新后的
+完整入口或使用已更新的共享bootstrap。仅拉新repo但继续使用旧的内联入口，会缺少新环境同步逻辑。
+不要删除旧run的失败标记来强行续跑，也不要仅卸载GUI包后复用混装环境：卸载可能同时移除共享cv2文件。
+
 默认节点加入等待3小时，单阶段/最终等待7天。大任务按实际预算评估；入口不提供透明断点续跑、
 自动换seed重试、失败case重采样或补齐到100k。故障后保留目录，换run ID；不要手动伪造done文件。
 `SAMTOK_REPO_DIR`、`SAMTOK_RUN_ROOT`、模型位置和数据位置可覆盖，但四机共享数据/输出位置必须一致。
@@ -220,3 +411,9 @@ cat "$RUN_ROOT/reports/final.json"
 最终安装脚本也从空目录跑通三套环境，单元测试341 passed，另5项融合测试在新环境通过。
 首次真实四机建议先用8张源图做smoke，确认四台bootstrap日志与finalize完成，再换run ID令limit=0正式运行。
 小批次冷启动时间不能外推为100k稳定吞吐，也不保证四机刚好达到四倍加速。
+
+2026-09-25 OpenCV修复的验证记录见统一迭代文档最后小节，证据目录为
+`experiments/SAMTok_Derived_Edit_Labeling/opencv_fix_20260925`。新锁文件已从空目录安装，
+全部环境实际使用headless；回归测试348 passed / 6 skipped，5项融合测试另在新SAM环境通过。
+修复后单机8卡模拟四worker的9个region已全部完成出图、审核及汇总，四worker退出0，
+`run/control/finalize.ok.json`存在。模型审核9 pass，未新增人工质量验收。原四机任务没有自动重启。

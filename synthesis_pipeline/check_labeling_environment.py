@@ -1,5 +1,6 @@
 """Check each isolated runtime and record comparable cross-node package versions."""
 import argparse
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -8,8 +9,31 @@ import subprocess
 from synthesis_pipeline.run_multinode_labeling import atomic
 
 
+def check_opencv():
+    """All OpenCV wheels own cv2: reject mixed installs before importing it."""
+    providers = {}
+    for name in ('opencv-python', 'opencv-python-headless',
+                 'opencv-contrib-python', 'opencv-contrib-python-headless'):
+        try:
+            providers[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            pass
+    if set(providers) != {'opencv-python-headless'}:
+        raise RuntimeError(f'Expected only opencv-python-headless; found {providers}. '
+                           'OpenCV wheels overwrite the same cv2 files. Recreate the runtime '
+                           'from the corrected locks; installing X11 libraries does not fix this conflict.')
+    import cv2
+    gui = next((line.split(':', 1)[1].strip() for line in cv2.getBuildInformation().splitlines()
+                if line.strip().startswith('GUI:')), None)
+    if gui != 'NONE':
+        raise RuntimeError(f'Loaded cv2 is not headless (GUI={gui}); recreate this runtime')
+    return {'version': cv2.__version__, 'gui': gui, 'providers': providers}
+
+
 PROBE = r'''
 import importlib.metadata as m,json,sys
+from synthesis_pipeline.check_labeling_environment import check_opencv
+opencv=check_opencv()
 import torch,cv2,numpy,PIL,pycocotools
 assert sys.version_info[:2]==(3,12),sys.version
 assert torch.cuda.is_available(), 'CUDA unavailable'
@@ -38,7 +62,7 @@ else:
  from vllm_omni.model_extras import build_image_to_image_prompt
  from utils.qwen21_omni_regional import RegionalQwenImage21Pipeline
  names+=['vllm','vllm-omni','diffusers','scipy']
-print('ENV_JSON='+json.dumps(dict(python=sys.version.split()[0],packages={n:m.version(n) for n in names},cuda=torch.version.cuda,
+print('ENV_JSON='+json.dumps(dict(python=sys.version.split()[0],packages={n:m.version(n) for n in names},opencv=opencv,cuda=torch.version.cuda,
  gpu_count=torch.cuda.device_count(),gpu_names=[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])))
 '''
 

@@ -112,6 +112,48 @@ def test_model_staging_byte_identity_and_no_overwrite(tmp_path):
     with pytest.raises(ValueError):stage(source,source/'nested')
 
 
+def test_model_staging_peer_failure_never_publishes_cache(tmp_path, monkeypatch):
+    from synthesis_pipeline import stage_labeling_model as module
+    from synthesis_pipeline.run_multinode_labeling import check_peer_failure
+    source=tmp_path/'source';source.mkdir()
+    (source/'model_index.json').write_text('{}')
+    root=tmp_path/'run';dest=tmp_path/'cache'
+    calls=0
+    def interrupt_after_copy(run_root):
+        nonlocal calls
+        calls+=1
+        # Initial check, file check, copy block, then read-back verification.
+        if calls==4:atomic(root/'control/node1.failed.json',{'error':'injected peer failure'})
+        check_peer_failure(run_root)
+    monkeypatch.setattr(module,'check_peer_failure',interrupt_after_copy)
+    with pytest.raises(RuntimeError,match='Peer failed'):module.stage(source,dest,root)
+    assert not (dest/'staging_manifest.json').exists()
+    assert (dest/'model_index.json.staging').is_file()
+    untouched=tmp_path/'never_started'
+    with pytest.raises(RuntimeError,match='Peer failed'):module.stage(source,untouched,root)
+    assert not untouched.exists()
+
+
+@pytest.mark.parametrize('providers,gui,allowed',[
+    ({'opencv-python-headless':'5.0.0.93'},'NONE',True),
+    ({'opencv-python-headless':'5.0.0.93','opencv-python':'5.0.0.93'},'NONE',False),
+    ({'opencv-python-headless':'5.0.0.93'},'QT6',False),
+    ({'opencv-python':'5.0.0.93'},'QT6',False),
+])
+def test_opencv_checks_distribution_ownership_and_actual_build(monkeypatch,providers,gui,allowed):
+    import types
+    from synthesis_pipeline import check_labeling_environment as module
+    def version(name):
+        if name in providers:return providers[name]
+        raise module.importlib.metadata.PackageNotFoundError(name)
+    monkeypatch.setattr(module.importlib.metadata,'version',version)
+    monkeypatch.setitem(sys.modules,'cv2',types.SimpleNamespace(
+        __version__='5.0.0',getBuildInformation=lambda:f'  GUI: {gui}\n'))
+    if allowed:assert module.check_opencv()['gui']=='NONE'
+    else:
+        with pytest.raises(RuntimeError):module.check_opencv()
+
+
 def test_four_rank_coordination_and_duplicate_launch(tmp_path):
     data=tmp_path/'data';(data/'sources').mkdir(parents=True)
     rows=[row(i,'same.png' if i<2 else None) for i in range(7)]
@@ -127,3 +169,29 @@ def test_four_rank_coordination_and_duplicate_launch(tmp_path):
         assert job.returncode==0,output
     assert json.loads((tmp_path/'run/reports/final.json').read_text())['generated']==0
     assert subprocess.run([*common,'--rank','0'],capture_output=True).returncode!=0
+
+
+@pytest.mark.parametrize('peer_fails',[False,True])
+def test_bootstrap_waits_for_all_environments_before_staging(tmp_path,peer_fails):
+    import os
+    script=(Path(__file__).resolve().parents[1]/'scripts/labeling/bootstrap_arnold_4node.sh').read_text()
+    check=script.split('check_peers() {',1)[1].split('\n}',1)[0]
+    gate=script.split('# Do not stage tens of GB',1)[1].split('export DIFFUSION_ATTENTION_BACKEND',1)[0]
+    gate=gate.split('\n',1)[1]
+    shell='set -euo pipefail\ncheck_peers() {'+check+'\n}\n'+gate+'\necho STAGING_ALLOWED\n'
+    for rank in (1,2):atomic(tmp_path/f'control/environment.node{rank}.ok.json',{'ready':True})
+    proc=subprocess.Popen(['bash','-c',shell],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+        env={**os.environ,'SAMTOK_RUN_ROOT':str(tmp_path),'ARNOLD_ID':'0'})
+    try:
+        deadline=time.monotonic()+5
+        while not (tmp_path/'control/environment.node0.ok.json').exists() and time.monotonic()<deadline:
+            time.sleep(.05)
+        assert (tmp_path/'control/environment.node0.ok.json').exists()
+        assert proc.poll() is None  # peer 3 is not ready: must not copy weights yet.
+        if peer_fails:atomic(tmp_path/'control/bootstrap.node3.failed.json',{'error':'cv2 import failed'})
+        atomic(tmp_path/'control/environment.node3.ok.json',{'ready':True})
+        output=proc.communicate(timeout=8)[0]
+        assert proc.returncode==(1 if peer_fails else 0),output
+        assert ('STAGING_ALLOWED' in output)==(not peer_fails),output
+    finally:
+        if proc.poll() is None:proc.kill();proc.wait()
