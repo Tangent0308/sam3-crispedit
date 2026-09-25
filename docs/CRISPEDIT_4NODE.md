@@ -7,7 +7,7 @@
 ## 1. 四台 Arnold worker 使用相同完整入口
 
 每台 8 GPU；Arnold 提供 `ARNOLD_WORKER_NUM=4`、`ARNOLD_WORKER_GPU=8` 和 `ARNOLD_ID=0/1/2/3`。
-先把修复提交推送至远程分支，再提交任务。每次新运行更换唯一 RUN_ID，四台保持一致；本次失败的 `crispedit_full_20260924_a` 不复用。
+先把修复提交推送至远程分支，再提交任务。每次新运行更换唯一 RUN_ID，四台保持一致。仅在任务尚未进入数据规划、共享目录中没有数据产物时，才可清空失败状态后复用 RUN_ID。
 需要 Git、Python3/pip、GNU tar、flock、可访问 GitHub/PyPI/PyTorch 下载站点的网络，以及每节点至少约 40GB 可用本地空间。
 
 ```bash
@@ -37,13 +37,22 @@ unset CRISPEDIT_PYTHON CRISPEDIT_SAM_PYTHON CRISPEDIT_USE_EXISTING_REPO
 
 mkdir -p "$CRISPEDIT_RUN_DIR/logs" "$(dirname "$CRISPEDIT_REPO_DIR")"
 exec > >(tee -a "$CRISPEDIT_RUN_DIR/logs/entry.node${ARNOLD_ID}.log") 2>&1
-[[ ! -e $CRISPEDIT_REPO_DIR ]] || { echo 'Local clone exists; use a new run ID or the resume instructions'; exit 2; }
-git clone --single-branch --branch "$CRISPEDIT_BRANCH" "$CRISPEDIT_REPO_URL" "$CRISPEDIT_REPO_DIR"
-cd "$CRISPEDIT_REPO_DIR"
-# Optional: set CRISPEDIT_COMMIT to a fixed commit for an exact rerun/resume.
-if [[ -n ${CRISPEDIT_COMMIT:-} ]]; then
-  git checkout --detach "$CRISPEDIT_COMMIT"
+
+# Arnold may retry the user command on the same worker. A completed clone is
+# reusable, but an unrelated/partial directory or a modified checkout is not.
+if [[ ! -e $CRISPEDIT_REPO_DIR ]]; then
+  git clone --single-branch --branch "$CRISPEDIT_BRANCH" "$CRISPEDIT_REPO_URL" "$CRISPEDIT_REPO_DIR"
+else
+  [[ -d $CRISPEDIT_REPO_DIR/.git ]] || { echo "Existing path is not a Git clone: $CRISPEDIT_REPO_DIR" >&2; exit 2; }
 fi
+cd "$CRISPEDIT_REPO_DIR"
+[[ $(git remote get-url origin) == "$CRISPEDIT_REPO_URL" ]] || { echo 'Existing clone has the wrong origin' >&2; exit 2; }
+git diff --quiet && git diff --cached --quiet || { echo 'Existing clone has tracked modifications' >&2; exit 2; }
+git fetch --no-tags origin "$CRISPEDIT_BRANCH"
+target_commit=${CRISPEDIT_COMMIT:-$(git rev-parse FETCH_HEAD)}
+[[ $target_commit =~ ^[0-9a-f]{40}$ ]] || { echo 'CRISPEDIT_COMMIT must be a full 40-character SHA' >&2; exit 2; }
+git merge-base --is-ancestor "$target_commit" FETCH_HEAD || { echo 'Pinned commit is not on the requested remote branch' >&2; exit 2; }
+git checkout --detach "$target_commit"
 bash scripts/bootstrap_crispedit_4node.sh
 ```
 
@@ -108,7 +117,7 @@ tail -f "$RUN_DIR/logs/quality.node0.log"
 `complete.ok` 代表数据结构/流程校验完成；mask 语义质量需另行抽查。`Peer failed` 时查看失败标记内的上游原因和对应阶段日志。
 任务由 Arnold 托管，不依赖登录终端。手动四机启动时，每台分别在 tmux 内执行完整入口。
 
-恢复仅用于**同一份代码/参数/源数据**的失败任务：确认旧进程退出，保留 RUN_ID、RUN_DIR 和其他配置，四台共同增加：
+恢复仅用于已经进入数据规划、且**代码/参数/源数据完全相同**的失败任务：确认旧进程退出，保留 RUN_ID、RUN_DIR 和其他配置，四台共同增加：
 
 ```bash
 export CRISPEDIT_RESUME=1
@@ -116,7 +125,7 @@ export CRISPEDIT_RESUME_TOKEN="retry_01"  # 每次换新名称，四台一致
 bash scripts/bootstrap_crispedit_4node.sh
 ```
 
-若调度到新机器，先按完整入口重新 clone（固定原 commit），再传上述两个变量启动。成功标记在 `control/retry_01/complete.ok`。
+若调度到新机器，先按完整入口重新 clone，并设置 `CRISPEDIT_COMMIT` 为原运行的完整 commit SHA，再传上述两个变量启动。成功标记在 `control/retry_01/complete.ok`。
 代码或安装配置修改后必须用新 RUN_ID；勿删除失败标记或修改计划摘要来绕过恢复校验。旧 prefilter 仍通过其独立结果目录复用。
 
 ## 4. 故障修复与验证
@@ -134,6 +143,12 @@ bash scripts/bootstrap_crispedit_4node.sh
 [本轮 19 条可视化](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/review/index.html)。自动 OK 只作运行验证，不等于语义准确率。
 验证期间已移除旧共享基础 Python，后续阶段仍成功；测试用 clone 完成后清理，Git 提交及日志保留。
 物理四机重新提交由用户执行，不将本机四 rank 验证称为四台物理机器验收。
+
+`labeling_4node_crispedit_full_localenv_20260924_b` 首次提交没有进入环境安装或数据规划。远程
+`crispedit-labeling` 当时仍为旧提交 `dd51f01`，任务 clone 到的旧 bootstrap 会再次管理仓库；它看到入口刚创建的
+node-local clone 后以 `Repository exists` 退出，其他节点随即报告 `Environment setup failed`。Arnold 重试使相同文本重复写入日志。
+修复后的 bootstrap 只负责当前 clone 内的安装和运行；完整入口会校验已有目录的 `.git`、origin、tracked diff 与目标 commit，
+再 fetch 并以 detached commit 启动，因此同一 worker 上的命令重试不会因 clone 已存在而失败，也不会误用其他仓库或本地修改。
 
 已删除共享启动副本 `workspaces/crispedit_labeling_20260924`（含环境包）、
 `workspaces/sam3-crispedit_prefilter_4node_20260923`（含基础 Python/venv），以及本机旧的 `.cache/crispedit_runtime_20260924`。
