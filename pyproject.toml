@@ -36,12 +36,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-crispedit = [
+scaleedit = [
     "transformers",
     "accelerate",
     "pyarrow",
     "Pillow",
-    "opencv-python",
+    "opencv-python-headless",
     "einops",
     "pycocotools",
 ]
@@ -92,7 +92,7 @@ train = [
 "Bug Tracker" = "https://github.com/facebookresearch/sam3/issues"
 
 [tool.setuptools.packages.find]
-include = ["sam3*", "crispedit*", "scaleedit*", "difficulty_filter*"]
+include = ["sam3*", "scaleedit*"]
 exclude = ["build*", "scripts*", "examples*"]
 
 [tool.setuptools.package-data]
