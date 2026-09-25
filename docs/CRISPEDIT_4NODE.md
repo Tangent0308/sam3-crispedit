@@ -130,7 +130,7 @@ bash scripts/bootstrap_crispedit_4node.sh
 ```
 
 若调度到新机器，先按完整入口重新 clone，并设置 `CRISPEDIT_COMMIT` 为原运行的完整 commit SHA，再传上述两个变量启动。成功标记在 `control/retry_01/complete.ok`。
-代码或安装配置修改后必须用新 RUN_ID；勿删除失败标记或修改计划摘要来绕过恢复校验。旧 prefilter 仍通过其独立结果目录复用。
+普通代码或安装配置修改后必须用新 RUN_ID；勿删除失败标记或修改计划摘要来绕过恢复校验。旧 prefilter 仍通过其独立结果目录复用。
 
 续传前必须确认四台机器使用同一个 `CRISPEDIT_RESUME_TOKEN`，并保留
 `RUN_DIR/plan.json`、`RUN_DIR/work/` 以及已有的 shard 结果。新的 token 只会新建
@@ -139,9 +139,25 @@ bash scripts/bootstrap_crispedit_4node.sh
 
 本次 `labeling_4node_crispedit_full_localenv_20260925` 是在上述单行解析错误修复前运行的，
 失败原因是 `color_00003.parquet` 中一行触发了旧版全局校验。该 run 的 `plan.json` 固定了旧代码摘要，
-因此拉取修复后的提交后应使用新的 `CRISPEDIT_RUN_ID` 启动完整入口；质量和场景结果目录会继续复用，
-不要删除旧的 `work/` 或正式 prefilter 目录。以后若代码摘要、参数和源数据完全不变，才使用上面的
-`CRISPEDIT_RESUME=1` + 新 token 续传同一个 run。
+应按下面的兼容续传命令启动；质量、场景和已完成 grounding 结果会继续复用，不要删除旧的 `work/`
+或正式 prefilter 目录。其他代码变更仍应新建 RUN_ID。
+
+对于本次已经完成 grounding、但在旧版汇总校验处失败的
+`labeling_4node_crispedit_full_localenv_20260925`，四台机器使用最新
+`crispedit-labeling` 提交重新 clone 后，可直接沿用原 RUN_ID 续传：
+
+```bash
+export CRISPEDIT_RUN_ID="crispedit_full_localenv_20260925"
+export CRISPEDIT_BRANCH="crispedit-labeling"
+export CRISPEDIT_RESUME=1
+export CRISPEDIT_RESUME_TOKEN="retry_grounding_fix_01"  # 四台相同，每次重试更换
+export CRISPEDIT_ALLOW_CODE_CHANGE_ON_RESUME=1
+bash scripts/bootstrap_crispedit_4node.sh
+```
+
+这个兼容开关只允许当前修复继续旧 plan，仍会检查输入路径、过滤参数、源文件快照和四机配置；
+旧 run 的完整 grounding shard 会被复用，流程会从 grounding 汇总继续并进入 mask。不要把该开关用于
+其他未审查的代码变更。若旧 `work/` 结果不完整，调度器会自动补跑缺失 shard。
 
 ## 4. 故障修复与验证
 
