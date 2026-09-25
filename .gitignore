@@ -90,6 +90,10 @@ celerybeat-schedule
 # Environments
 .env
 .venv
+.venv-scaleedit-current/
+.uv-python/
+.uv-cache/
+.scaleedit-env.lock
 env/
 venv/
 ENV/
