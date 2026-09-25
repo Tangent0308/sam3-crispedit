@@ -20,16 +20,17 @@ def main():
     p.add_argument('--out-root',type=Path,required=True)
     p.add_argument('--limit-sources',type=int,default=0,help='0=all; positive values only for a bounded smoke run')
     p.add_argument('--run-root',type=Path,help='Stop source preparation when a peer fails')
+    p.add_argument('--resume',action='store_true')
     a=p.parse_args()
     if a.limit_sources<0:p.error('limit-sources must be nonnegative')
     check_peer_failure(a.run_root)
-    a.out_root.mkdir(parents=True,exist_ok=False)
+    a.out_root.mkdir(parents=True,exist_ok=a.resume)
     rows,index_summary=build_positive_index(a.parquet,a.out_root/'positive_rows.jsonl',False)
     if a.limit_sources:rows=rows[:a.limit_sources]
     import pyarrow.parquet as pq
     # Read one parquet record batch at a time, not all embedded image bytes.
     selected={int(r['parquet_row_index']):r for r in rows}
-    source_dir=a.out_root/'sources';source_dir.mkdir()
+    source_dir=a.out_root/'sources';source_dir.mkdir(exist_ok=a.resume)
     records=[];offset=0
     with tqdm(total=len(rows),desc='materialize positive source images') as bar:
         for batch in pq.ParquetFile(a.parquet).iter_batches(batch_size=64,columns=['images']):

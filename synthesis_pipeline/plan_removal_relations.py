@@ -15,6 +15,9 @@ from synthesis_pipeline.prepare_samtok_data import write_jsonl, load_jsonl
 from utils.context_edit import protected_neighbors
 import utils.vlm_utils as vlm
 from utils.removal_relations import relation_context_bbox, relation_input_evidence, is_grounded_relation_policy
+from synthesis_pipeline.labeling_checkpoint import (
+    CaseCheckpoints, bind_settings, ensure_sources, recover_rows, fingerprint, file_digest,
+)
 
 
 PROMPT = '''Plan a localized removal using two images: the clean full photograph,
@@ -501,30 +504,81 @@ def point_repair_feedback(mask, previous):
         'Prior draft (untrusted): '+json.dumps(previous,ensure_ascii=False))
 
 
+def reusable_plan(saved, row, mask, policy):
+    """Adopt validated legacy plans; retry malformed responses, not valid defers."""
+    if not saved or any(saved.get(k) != v for k,v in row.items()):return False
+    if saved.get('relation_policy') != policy:return False
+    try:
+        value=parse_relation_response(saved.get('relation_raw_response',''),policy)
+        status=validate_relation_plan(value,policy,mask)
+        return (value==saved.get('relation_plan') and status==saved.get('relation_status')
+                and status in {'accepted','defer','defer_support_conflict'})
+    except (TypeError,ValueError,KeyError,IndexError,AttributeError):
+        return False
+
+
+def planner_pending(rows, data_root, out_root, policy, resume, checkpoints, dependencies):
+    old={r['image']:r for r in recover_rows(out_root/'annotations.jsonl')} if resume else {}
+    results=[];pending=[];empty=0;reused=0
+    for row in rows:
+        with Image.open(data_root/'sources'/row['source_image']) as source:
+            mask=mask_array(source.size,row['mask'])
+        if not mask.any():
+            empty+=1
+            results.append({**row,'relation_plan':None,'relation_status':'invalid_input_empty_mask',
+                'relation_raw_response':'','relation_policy':policy,
+                'relation_input_error':'Source mask has zero foreground pixels; no model call or edit performed.'})
+            print(json.dumps(dict(image=row['image'],status='invalid_input_empty_mask')),flush=True)
+        else:
+            saved=checkpoints.load(row,dependencies[row['image']]) if resume else None
+            # Only records from before checkpoint support may be adopted from JSONL.
+            # A mismatching existing checkpoint means the source/dependency changed.
+            if resume and not (checkpoints.root/(row['image']+'.json')).exists():
+                saved=old.get(row['image'])
+            if reusable_plan(saved,row,mask,policy):
+                results.append(saved);reused+=1
+                checkpoints.save(row,saved,dependencies=dependencies[row['image']])
+            else:pending.append(row)
+    return results,pending,reused,empty
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--data-root',type=Path,required=True);p.add_argument('--out-root',type=Path,required=True)
     p.add_argument('--ids',default='');p.add_argument('--batch-size',type=int,default=4)
     p.add_argument('--outside-pointers',action='store_true')
     p.add_argument('--thinking',action='store_true',help='Opt-in low-effort reasoning ablation; does not add model calls')
+    p.add_argument('--resume',action='store_true')
     p.add_argument('--policy',choices=['legacy','relations-v4','relations-v5','relations-v6','relations-v7','relations-v8','relations-v9','relations-v10','relations-v11','relations-v12','relations-v13','relations-v14','relations-v15','relations-v16'],default='legacy')
-    a=p.parse_args();a.out_root.mkdir(parents=True,exist_ok=False)
+    a=p.parse_args();a.out_root.mkdir(parents=True,exist_ok=a.resume)
     rows=load_jsonl(a.data_root/'annotations.jsonl')
     if a.ids:
         ids={int(x) for x in a.ids.split(',')};rows=[r for r in rows if int(r['image'].split('_')[0]) in ids]
         if len(rows)!=len(ids):raise ValueError('Missing IDs')
     if any(r['task_type']!='remove' for r in rows):raise ValueError('Removal-only pilot')
-    (a.out_root/'sources').symlink_to((a.data_root/'sources').resolve());(a.out_root/'inputs').mkdir()
+    settings=dict(rows=fingerprint(rows),policy=a.policy,thinking=a.thinking,
+        outside_pointers=a.outside_pointers,batch_size=a.batch_size)
+    bind_settings(a.out_root,settings,a.resume);checkpoints=CaseCheckpoints(a.out_root,settings)
+    ensure_sources(a.out_root,a.data_root/'sources');(a.out_root/'inputs').mkdir(exist_ok=True)
+    hashes={name:file_digest(a.data_root/'sources'/name) for name in {r['source_image'] for r in rows}}
+    dependencies={r['image']:dict(source_sha256=hashes[r['source_image']]) for r in rows}
+    results,pending,reused,empty=planner_pending(rows,a.data_root,a.out_root,a.policy,a.resume,checkpoints,dependencies)
+    write_jsonl(a.out_root/'annotations.jsonl',results)
+    print(json.dumps(dict(stage='planning',total=len(rows),reused=reused,empty_masks=empty,pending=len(pending))),flush=True)
+    if not pending:
+        (a.out_root/'summary.json').write_text(json.dumps(dict(cases=len(results),reused=reused,
+            empty_masks=empty,thinking=a.thinking,calls=0,repair_calls=0,load_seconds=0,wall_seconds=0),indent=2))
+        return
     from utils.runtime_paths import qwen38_model
     start=time.perf_counter();vlm.configure_backend('qwen38-vllm',model_id=qwen38_model(),device='cuda:0',dtype='bf16')
-    backend=vlm.get_backend();loaded=time.perf_counter();results=[];repair_calls=0
+    backend=vlm.get_backend();loaded=time.perf_counter();repair_calls=0;calls=0
     if a.thinking:
         backend.enable_thinking=True
         backend.chat_template_overrides={'reasoning_effort':'low'}
         backend.sampling_overrides={'temperature':1.,'top_p':.95,'top_k':20,'presence_penalty':0.,'repetition_penalty':1.}
     try:
-        for offset in range(0,len(rows),a.batch_size):
-            batch=rows[offset:offset+a.batch_size];messages=[];masks=[];prompts=[]
+        for offset in range(0,len(pending),a.batch_size):
+            batch=pending[offset:offset+a.batch_size];messages=[];masks=[];prompts=[]
             for row in batch:
                 source=Image.open(a.data_root/'sources'/row['source_image']).convert('RGB')
                 mask=mask_array(source.size,row['mask'])
@@ -541,6 +595,7 @@ def main():
                 messages.append([{'role':'user','content':[{'type':'image','image':source},{'type':'image','image':crop},{'type':'text','text':prompt}]}])
             outputs=backend.chat_batch(messages,max_new_tokens=4096 if a.thinking else 1280 if a.policy in {'relations-v7','relations-v8','relations-v9'} else 1536 if a.policy in {'relations-v5','relations-v6'} else 1408 if a.policy=='relations-v4' else 768)
             if len(outputs)!=len(batch):raise ValueError('Incomplete VLM batch')
+            calls+=len(outputs)
             for row,raw,mask,prompt,message in zip(batch,outputs,masks,prompts,messages):
                 value=parse_relation_response(raw,a.policy);status=validate_relation_plan(value,a.policy,mask)
                 history=[]
@@ -552,12 +607,17 @@ def main():
                     value=parse_relation_response(raw,a.policy);status=validate_relation_plan(value,a.policy,mask)
                     (a.out_root/'inputs'/Path(row['image']).with_suffix('.txt')).write_text(prompt)
                 results.append({**row,'relation_plan':value,'relation_status':status,'relation_raw_response':raw,'relation_policy':a.policy,'relation_planning_prompt':prompt,'relation_repair_history':history})
+                write_jsonl(a.out_root/'annotations.jsonl',results)
+                if status in {'accepted','defer','defer_support_conflict'}:
+                    checkpoints.save(row,results[-1],dependencies=dependencies[row['image']])
                 print(json.dumps(dict(image=row['image'],status=status,plan=value)),flush=True)
-            write_jsonl(a.out_root/'annotations.jsonl',results)
+            print(f'planned {len(results)}/{len(rows)} (reused={reused}, empty={empty})',flush=True)
     finally:
         vlm.shutdown_backend()
     (a.out_root/'prompt.txt').write_text(prompt)
-    (a.out_root/'summary.json').write_text(json.dumps(dict(cases=len(results),thinking=a.thinking,calls=len(results)+repair_calls,repair_calls=repair_calls,load_seconds=loaded-start,wall_seconds=time.perf_counter()-start),indent=2))
+    order={r['image']:i for i,r in enumerate(rows)};results.sort(key=lambda r:order[r['image']])
+    write_jsonl(a.out_root/'annotations.jsonl',results)
+    (a.out_root/'summary.json').write_text(json.dumps(dict(cases=len(results),reused=reused,empty_masks=empty,thinking=a.thinking,calls=calls+repair_calls,repair_calls=repair_calls,load_seconds=loaded-start,wall_seconds=time.perf_counter()-start),indent=2))
 
 
 if __name__=='__main__':main()

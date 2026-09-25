@@ -8,21 +8,29 @@ from pathlib import Path
 from synthesis_pipeline.run_multinode_labeling import atomic, check_peer_failure
 
 
-def stage(source, destination, run_root=None):
+def stage(source, destination, run_root=None, resume=False):
     check_peer_failure(run_root)
     source=Path(source).resolve();destination=Path(destination).absolute()
     if not (source/'model_index.json').is_file():raise FileNotFoundError(source/'model_index.json')
     if destination==source or source in destination.parents:
         raise ValueError('Model cache must be separate from source')
-    destination.mkdir(parents=True,exist_ok=False)
+    destination.mkdir(parents=True,exist_ok=resume)
     records=[]
     files=sorted(p for p in source.rglob('*') if p.is_file() and not any(x.startswith('.') for x in p.relative_to(source).parts))
     for i,file in enumerate(files):
         check_peer_failure(run_root)
         rel=file.relative_to(source);out=destination/rel;out.parent.mkdir(parents=True,exist_ok=True)
         temporary=out.with_name(out.name+'.staging')
+        if resume and out.is_file():
+            from synthesis_pipeline.labeling_checkpoint import file_digest
+            sha=file_digest(file)
+            check_peer_failure(run_root)
+            if out.stat().st_size==file.stat().st_size and file_digest(out)==sha:
+                records.append(dict(file=str(rel),bytes=out.stat().st_size,sha256=sha))
+                print(f'reused {i+1}/{len(files)}: {rel}',flush=True)
+                continue
         h=hashlib.sha256();size=0
-        with file.open('rb') as inp,temporary.open('xb') as dst:
+        with file.open('rb') as inp,temporary.open('wb' if resume else 'xb') as dst:
             while block:=inp.read(8<<20):
                 check_peer_failure(run_root)
                 dst.write(block);h.update(block);size+=len(block)
@@ -47,7 +55,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',type=Path,required=True);p.add_argument('--destination',type=Path,required=True)
     p.add_argument('--run-root',type=Path,help='Abort copy/verification when a peer fails')
-    a=p.parse_args();stage(a.source,a.destination,a.run_root)
+    p.add_argument('--resume',action='store_true')
+    a=p.parse_args();stage(a.source,a.destination,a.run_root,resume=a.resume)
 
 
 if __name__=='__main__':main()

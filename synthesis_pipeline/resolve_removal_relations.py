@@ -15,6 +15,7 @@ from PIL import Image
 from synthesis_pipeline.audit_edit_pairs import mask_array
 from synthesis_pipeline.prepare_samtok_data import load_jsonl,write_jsonl,encode_rle
 from utils.context_edit import protected_neighbors
+from synthesis_pipeline.labeling_checkpoint import CaseCheckpoints, bind_settings, ensure_sources, file_digest
 
 
 def _mask_bbox_iou(mask,bbox):
@@ -166,14 +167,26 @@ def main():
     p.add_argument('--ground-keeps',action='store_true')
     p.add_argument('--auxiliary-policy',choices=['legacy','ownership-v1'],default='legacy')
     p.add_argument('--keep-fallback',choices=['none','box-protect-v1'],default='none')
-    a=p.parse_args();a.out_root.mkdir(parents=True,exist_ok=False);(a.out_root/'sources').symlink_to((a.data_root/'sources').resolve())
+    p.add_argument('--resume',action='store_true')
+    a=p.parse_args();a.out_root.mkdir(parents=True,exist_ok=a.resume);ensure_sources(a.out_root,a.data_root/'sources')
+    settings=dict(ground_keeps=a.ground_keeps,auxiliary_policy=a.auxiliary_policy,keep_fallback=a.keep_fallback)
+    bind_settings(a.out_root,settings,a.resume);checkpoints=CaseCheckpoints(a.out_root,settings)
     torch.set_num_threads(8)
-    (a.out_root/'support').mkdir();(a.out_root/'candidates').mkdir()
+    (a.out_root/'support').mkdir(exist_ok=True);(a.out_root/'candidates').mkdir(exist_ok=True)
     rows=load_jsonl(a.data_root/'annotations.jsonl');results=[];records=[]
-    start=time.perf_counter();processor=None;query_count=0;guided_count=0;encoded_sources=0
+    start=time.perf_counter();processor=None;query_count=0;guided_count=0;encoded_sources=0;reused=0
     for row in rows:
+        dependencies=dict(source_sha256=file_digest(a.data_root/'sources'/row['source_image']))
+        saved=checkpoints.load(row,dependencies) if a.resume else None
+        if saved is not None:
+            records.append(saved['resolution'])
+            if saved['annotation'] is not None:results.append(saved['annotation'])
+            reused+=1
+            continue
         if row['relation_status']!='accepted':
-            records.append(dict(image=row['image'],status=row['relation_status']));continue
+            record=dict(image=row['image'],status=row['relation_status']);records.append(record)
+            checkpoints.save(row,dict(resolution=record,annotation=None),dependencies=dependencies)
+            continue
         source=Image.open(a.data_root/'sources'/row['source_image']).convert('RGB');target=mask_array(source.size,row['mask']).astype(bool)
         rle=row.get('region_contract',{}).get('protected_mask');protected=(mask_array(source.size,rle).astype(bool) if rle else protected_neighbors(a.data_root,row,source.size))&~target
         plan=row['relation_plan'];extra=np.zeros_like(target);record=dict(image=row['image'],status='accepted',relations=[]);state=None;co_removals=[];candidate_file_index=0
@@ -250,7 +263,9 @@ def main():
                     extra|=selected&~target
                     if added_pixels:co_removals.append(relation['description'])
         records.append(record);write_jsonl(a.out_root/'resolution.jsonl',records)
-        if record['status']!='accepted':continue
+        if record['status']!='accepted':
+            checkpoints.save(row,dict(resolution=record,annotation=None),dependencies=dependencies)
+            continue
         execution=target|extra
         protected|=box_guard&~execution
         if np.any(execution&protected):raise ValueError('Removal and retained geometry overlap')
@@ -261,11 +276,13 @@ def main():
                 auxiliary_mask=encode_rle(extra),resolved_co_removals=co_removals,provenance='relation_v2_point_bbox_guided_auxiliary_segmentation',source_mask_unchanged=True),
             'relation_execution_context':'Keep '+ '; '.join(r['description'] for r in plan['relations'] if r['action']=='keep')+'. '+plan['reconstruction']}
         Image.fromarray(extra.astype(np.uint8)*255).save(a.out_root/'support'/row['image'])
+        checkpoints.save(row,dict(resolution=record,annotation=result),
+            artifacts=[a.out_root/'support'/row['image']],dependencies=dependencies)
         results.append(result);write_jsonl(a.out_root/'annotations.jsonl',results)
         print(json.dumps(dict(image=row['image'],status=record['status'],extra_pixels=int(extra.sum()))),flush=True)
     write_jsonl(a.out_root/'resolution.jsonl',records)
     write_jsonl(a.out_root/'annotations.jsonl',results)
-    (a.out_root/'summary.json').write_text(json.dumps(dict(input_cases=len(rows),accepted=len(results),ground_keeps=a.ground_keeps,auxiliary_policy=a.auxiliary_policy,keep_fallback=a.keep_fallback,wall_seconds=time.perf_counter()-start,
+    (a.out_root/'summary.json').write_text(json.dumps(dict(input_cases=len(rows),accepted=len(results),reused=reused,ground_keeps=a.ground_keeps,auxiliary_policy=a.auxiliary_policy,keep_fallback=a.keep_fallback,wall_seconds=time.perf_counter()-start,
         source_mask_audit_calls=0,auxiliary_segmentation_queries=query_count,auxiliary_box_guided_queries=guided_count,
         auxiliary_source_encodings=encoded_sources),indent=2))
 
