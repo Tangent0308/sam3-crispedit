@@ -191,6 +191,33 @@ def test_mask_merger_rejects_other_run_and_wrong_row_ids(tmp_path):
         pipeline.merge_labels(args, labels, 'mask')
 
 
+def test_grounding_parse_error_is_row_level_and_mergeable(tmp_path):
+    root = tmp_path / 'grounding'
+    root.mkdir()
+    name = 'add_00000.parquet'
+    pq.write_table(pa.table({
+        'row_idx': [3],
+        'mask_selection_reason': ['SELECTED'],
+        'ground_parse_ok': [False],
+        'grounding_status': ['PARSE_ERROR'],
+        'ground_json': [json.dumps({'requests': []})],
+        'qc_flag': ['GROUND_FAIL'],
+    }), root / name)
+    labels = {'rows': {name: [3]}}
+    pipeline.verify_label_shards(root, [name], labels, 'grounding')
+
+    pq.write_table(pa.table({
+        'row_idx': [3],
+        'mask_selection_reason': ['SELECTED'],
+        'ground_parse_ok': [False],
+        'grounding_status': ['GROUND_FAIL'],
+        'ground_json': [json.dumps({'runtime_error': 'engine stopped'})],
+        'qc_flag': ['GROUND_FAIL'],
+    }), root / name)
+    with pytest.raises(ValueError, match='Grounding parse/runtime error'):
+        pipeline.verify_label_shards(root, [name], labels, 'grounding')
+
+
 def test_exact_shard_list_is_shared_by_both_stages(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
