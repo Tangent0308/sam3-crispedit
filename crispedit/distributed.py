@@ -492,8 +492,15 @@ def run(args) -> None:
             plan['label_dir'] != str(args.label_dir) or plan['checkpoint_path'] != str(args.checkpoint_path) or
             plan['settings'] != run_settings(args)):
         raise ValueError("Saved plan does not match this node's configuration")
-    if plan["code_sha256"] != code_digest():
+    code_changed = plan["code_sha256"] != code_digest()
+    if code_changed and not (args.resume and args.allow_code_change_on_resume):
         raise ValueError("This node's pipeline code differs from the saved run plan")
+    if code_changed:
+        print(
+            "warning: resuming a saved plan with an explicitly allowed code change; "
+            "input/settings/source snapshot checks remain enforced",
+            flush=True,
+        )
     if plan['source_snapshot'] != source_snapshot(args.source_dir, plan['source_shards']):
         raise ValueError('Source snapshot changed since planning')
     print(f"node{args.rank}: quality={len(plan['quality_assignments'][args.rank])} "
@@ -603,6 +610,11 @@ def main() -> None:
                         help="Reuse this run after all prior node processes have stopped")
     parser.add_argument("--resume-token", default="",
                         help="New attempt ID shared by all four nodes; required with --resume")
+    parser.add_argument(
+        "--allow-code-change-on-resume",
+        action="store_true",
+        help="Allow a reviewed compatibility fix while resuming an existing saved plan",
+    )
     args = parser.parse_args()
     try:
         run(args)

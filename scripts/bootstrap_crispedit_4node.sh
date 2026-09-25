@@ -21,6 +21,9 @@ if [[ ${CRISPEDIT_RESUME:-0} == 1 ]]; then
   attempt=$CRISPEDIT_RESUME_TOKEN
   [[ $attempt != initial && $attempt =~ ^[A-Za-z0-9._-]+$ ]] || exit 2
   resume_args=(--resume --resume-token "$attempt")
+  if [[ ${CRISPEDIT_ALLOW_CODE_CHANGE_ON_RESUME:-0} == 1 ]]; then
+    resume_args+=(--allow-code-change-on-resume)
+  fi
 fi
 control=$run_dir/bootstrap_control/$attempt
 mkdir -p "$control" "$run_dir/logs"
