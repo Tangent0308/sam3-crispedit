@@ -9,6 +9,8 @@ set -euo pipefail
 [[ "$SAMTOK_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
 [[ "$ARNOLD_WORKER_NUM" == 4 && "$ARNOLD_WORKER_GPU" == 8 && "$ARNOLD_ID" =~ ^[0-3]$ ]] || { echo 'Requires 4 nodes x 8 GPUs' >&2; exit 2; }
 export SAMTOK_RUN_ROOT="${SAMTOK_RUN_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID}"
+export SAMTOK_PIPELINE_MODE="${SAMTOK_PIPELINE_MODE:-remove}"
+[[ "$SAMTOK_PIPELINE_MODE" == remove || "$SAMTOK_PIPELINE_MODE" == multitype ]] || { echo 'SAMTOK_PIPELINE_MODE must be remove or multitype' >&2; exit 2; }
 export SAMTOK_RESUME="${SAMTOK_RESUME:-0}"
 [[ "$SAMTOK_RESUME" == 0 || "$SAMTOK_RESUME" == 1 ]] || { echo 'SAMTOK_RESUME must be 0 or 1' >&2; exit 2; }
 resume_args=()
@@ -24,7 +26,11 @@ if [[ "$SAMTOK_RESUME" == 1 ]]; then
 elif [[ -n "${SAMTOK_ATTEMPT_ID:-}" ]]; then
   echo 'SAMTOK_ATTEMPT_ID is only valid with SAMTOK_RESUME=1' >&2; exit 2
 fi
-export SAMTOK_DATA_ROOT="${SAMTOK_DATA_ROOT:-$SAMTOK_RUN_ROOT/data/source}"
+if [[ "$SAMTOK_PIPELINE_MODE" == multitype ]]; then
+  export SAMTOK_DATA_ROOT="${SAMTOK_DATA_ROOT:-$SAMTOK_RUN_ROOT/data/add_replace_attribute}"
+else
+  export SAMTOK_DATA_ROOT="${SAMTOK_DATA_ROOT:-$SAMTOK_RUN_ROOT/data/source}"
+fi
 export SAMTOK_PARQUET="${SAMTOK_PARQUET:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Training_Data/mix_gres8k_ver4k_train.parquet}"
 export SAMTOK_REPO_DIR="${SAMTOK_REPO_DIR:-/opt/tiger/tanyue/labeling_runs/$SAMTOK_RUN_ID$attempt_suffix/node$ARNOLD_ID/repo}"
 export SAMTOK_REPO_URL="${SAMTOK_REPO_URL:-https://github.com/Tangent0308/sam3-crispedit.git}"
@@ -107,9 +113,15 @@ fi
 check_peers
 if [[ "$ARNOLD_ID" == 0 ]]; then
   if [[ ! -f "$SAMTOK_DATA_ROOT/annotations.jsonl" ]]; then
-    "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.prepare_removal_inputs \
-      --parquet "$SAMTOK_PARQUET" --out-root "$SAMTOK_DATA_ROOT" \
-      --limit-sources "${SAMTOK_LIMIT_SOURCES:-0}" --run-root "$SAMTOK_CONTROL_ROOT" "${resume_args[@]}"
+    if [[ "$SAMTOK_PIPELINE_MODE" == multitype ]]; then
+      "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.prepare_multitype_inputs \
+        --parquet "$SAMTOK_PARQUET" --out-root "$SAMTOK_DATA_ROOT" \
+        --limit-sources "${SAMTOK_LIMIT_SOURCES:-0}" --force-index
+    else
+      "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.prepare_removal_inputs \
+        --parquet "$SAMTOK_PARQUET" --out-root "$SAMTOK_DATA_ROOT" \
+        --limit-sources "${SAMTOK_LIMIT_SOURCES:-0}" --run-root "$SAMTOK_CONTROL_ROOT" "${resume_args[@]}"
+    fi
   fi
   check_peers
   printf '{"ready":true}\n' > "$SAMTOK_CONTROL_ROOT/control/data.ok.json.tmp"
@@ -124,6 +136,12 @@ done
 check_peers
 # No MASTER_PORT / ARNOLD_WORKER_HOSTS rendezvous: independent data shards.
 if [[ "$SAMTOK_RESUME" == 1 ]]; then resume_args+=(--attempt-id "$SAMTOK_ATTEMPT_ID"); fi
-exec "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.run_multinode_labeling \
-  --data-root "$SAMTOK_DATA_ROOT" --run-root "$SAMTOK_RUN_ROOT" --run-id "$SAMTOK_RUN_ID" \
-  --rank "$ARNOLD_ID" --gpus 0,1,2,3,4,5,6,7 "${resume_args[@]}"
+if [[ "$SAMTOK_PIPELINE_MODE" == multitype ]]; then
+  exec "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.run_multinode_multitype_labeling \
+    --data-root "$SAMTOK_DATA_ROOT" --run-root "$SAMTOK_RUN_ROOT" --run-id "$SAMTOK_RUN_ID" \
+    --rank "$ARNOLD_ID" --gpus 0,1,2,3,4,5,6,7 "${resume_args[@]}"
+else
+  exec "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.run_multinode_labeling \
+    --data-root "$SAMTOK_DATA_ROOT" --run-root "$SAMTOK_RUN_ROOT" --run-id "$SAMTOK_RUN_ID" \
+    --rank "$ARNOLD_ID" --gpus 0,1,2,3,4,5,6,7 "${resume_args[@]}"
+fi
