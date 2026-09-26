@@ -646,11 +646,3 @@ nodes/node3/pipeline/editing/context_grounded_v4_qwen21/edited/
 5. 按“模型/人工通过、像素误拒、编辑失败、instruction/mask 不匹配”筛选。
 
 20 条样例中，5 条模型与人工均通过，4 条模型视觉判断通过但被像素阈值误拒，8 条存在目标残留或背景质量问题，3 条存在 instruction 与 mask 语义不匹配。HTML 图片已经内嵌，不依赖外部图片路径，适合直接在预览器中打开。
-
-旧版汇总页仍保留在：
-
-```text
-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/results/inspection.html
-```
-
-该页面顶部已加入新版`audit_gallery.html`入口。
