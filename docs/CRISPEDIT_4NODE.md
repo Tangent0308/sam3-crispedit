@@ -147,11 +147,61 @@ bash scripts/bootstrap_crispedit_4node.sh
 `crispedit-labeling` 提交重新 clone 后，可直接沿用原 RUN_ID 续传：
 
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
 export CRISPEDIT_RUN_ID="crispedit_full_localenv_20260925"
 export CRISPEDIT_BRANCH="crispedit-labeling"
+export CRISPEDIT_COMMIT="970a64add1b6814974561ec2c4c536a44443f310"
+export CRISPEDIT_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
+
 export CRISPEDIT_RESUME=1
 export CRISPEDIT_RESUME_TOKEN="retry_grounding_fix_01"  # 四台相同，每次重试更换
 export CRISPEDIT_ALLOW_CODE_CHANGE_ON_RESUME=1
+
+: "${ARNOLD_ID:?Arnold must supply node rank}"
+: "${ARNOLD_WORKER_NUM:?Arnold must supply worker count}"
+: "${ARNOLD_WORKER_GPU:?Arnold must supply GPU count}"
+[[ "$ARNOLD_WORKER_NUM" == 4 ]]
+[[ "$ARNOLD_WORKER_GPU" == 8 ]]
+[[ "$ARNOLD_ID" =~ ^[0-3]$ ]]
+[[ "$CRISPEDIT_RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]
+
+export CRISPEDIT_RUN_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/labeling_4node_${CRISPEDIT_RUN_ID}"
+export CRISPEDIT_INPUT_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M"
+export CRISPEDIT_QUALITY_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter"
+export CRISPEDIT_SCENE_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit"
+export CRISPEDIT_LABEL_DIR="$CRISPEDIT_RUN_DIR/labels"
+export CRISPEDIT_MODEL_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B"
+export CRISPEDIT_SAM3_CHECKPOINT_PATH="/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt"
+export CRISPEDIT_FILTER_BATCH_SIZE=4
+export CRISPEDIT_GROUNDING_BATCH_SIZE=16
+export CRISPEDIT_REPO_DIR="/opt/tiger/tanyue/workspaces/sam3-crispedit-${CRISPEDIT_RUN_ID}-node${ARNOLD_ID}"
+
+unset CRISPEDIT_RUNTIME_ARCHIVE CRISPEDIT_BASE_PYTHON CRISPEDIT_LOCAL_RUNTIME_DIR
+unset CRISPEDIT_PYTHON CRISPEDIT_SAM_PYTHON CRISPEDIT_USE_EXISTING_REPO
+
+mkdir -p "$CRISPEDIT_RUN_DIR/logs" "$(dirname "$CRISPEDIT_REPO_DIR")"
+exec > >(tee -a "$CRISPEDIT_RUN_DIR/logs/entry.node${ARNOLD_ID}.log") 2>&1
+
+if [[ ! -e "$CRISPEDIT_REPO_DIR" ]]; then
+  git clone --single-branch --branch "$CRISPEDIT_BRANCH" \
+    "$CRISPEDIT_REPO_URL" "$CRISPEDIT_REPO_DIR"
+else
+  [[ -d "$CRISPEDIT_REPO_DIR/.git" ]]
+fi
+
+cd "$CRISPEDIT_REPO_DIR"
+[[ "$(git remote get-url origin)" == "$CRISPEDIT_REPO_URL" ]]
+git diff --quiet
+git diff --cached --quiet
+git fetch --no-tags origin "$CRISPEDIT_BRANCH"
+
+target_commit="$CRISPEDIT_COMMIT"
+[[ "$target_commit" =~ ^[0-9a-f]{40}$ ]]
+git merge-base --is-ancestor "$target_commit" FETCH_HEAD
+git checkout --detach "$target_commit"
+
 bash scripts/bootstrap_crispedit_4node.sh
 ```
 
