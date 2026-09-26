@@ -39,6 +39,23 @@ PROFILE = {
 }
 
 
+def runtime_env(command, overrides=None):
+    """Build a child environment with the selected Python's tools on PATH.
+
+    vLLM/FlashInfer invokes build tools such as ``ninja`` by executable name
+    from inside the Python process.  Calling a venv's Python by absolute path
+    does not put that venv's ``bin`` directory on PATH, so make this explicit
+    for every subprocess stage.
+    """
+    env = {**os.environ, **(overrides or {}), "PYTHONUNBUFFERED": "1"}
+    if command:
+        executable = Path(command[0])
+        if executable.is_absolute() and executable.name.startswith("python"):
+            python_bin = str(executable.parent)
+            env["PATH"] = python_bin + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def read_rows(path: Path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
@@ -115,7 +132,7 @@ def run_stage(command, log_path: Path, root: Path, timeout: int, env=None):
         process = subprocess.Popen(
             command,
             cwd=REPO,
-            env={**os.environ, **(env or {}), "PYTHONUNBUFFERED": "1"},
+            env=runtime_env(command, env),
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -169,11 +186,15 @@ def run_planning_pool(data_root: Path, planning_root: Path, rows, gpu_ids, coord
         (shard_data / "sources").symlink_to((data_root / "sources").resolve())
         write_rows(shard_data / "annotations.jsonl", subset)
         write_rows(shard_data / "input_annotations.jsonl", rows)
-        log = (coordination / "logs" / f"planning.gpu{gpu}.log").open("w")
-        env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu, "PYTHONUNBUFFERED": "1", "OMP_NUM_THREADS": "8"}
         command = [mllm_python, "-m", "synthesis_pipeline.plan_dataset_regions",
                    "--data-root", str(shard_data), "--out-root", str(shard_out),
                    "--model-id", model_id]
+        node_id = os.environ.get("ARNOLD_ID", "local")
+        log = (coordination / "logs" / f"planning.node{node_id}.gpu{gpu}.log").open("w")
+        env = runtime_env(command, {
+            "CUDA_VISIBLE_DEVICES": gpu,
+            "OMP_NUM_THREADS": "8",
+        })
         jobs.append((index, subset, subprocess.Popen(command, cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT), log))
     errors = []
     pending = list(jobs)
@@ -408,7 +429,10 @@ def main():
                            os.environ.get("SAMTOK_QWEN21_MODEL", "/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1"),
                            "--steps", str(PROFILE["steps"]), "--qwen21-prompt-policy", PROFILE["editor_prompt_policy"],
                            "--qwen21-backend", PROFILE["editor_backend"], "--shard", str(shard), "--shards", str(len(gpu_ids))]
-                process_env = {**os.environ, **env, "CUDA_VISIBLE_DEVICES": gpu, "PYTHONUNBUFFERED": "1"}
+                process_env = runtime_env(command, {
+                    **env,
+                    "CUDA_VISIBLE_DEVICES": gpu,
+                })
                 jobs.append((subprocess.Popen(command, cwd=REPO, env=process_env, stdout=log, stderr=subprocess.STDOUT), log))
             errors = []
             for process, log in jobs:
