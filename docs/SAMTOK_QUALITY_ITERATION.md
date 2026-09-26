@@ -1,5 +1,19 @@
 # SAMTok 派生编辑数据：质量优化与迭代记录
 
+## Retention notice
+
+The historical pilot and iteration artifact directories described below were
+cleaned after the formal four-node run completed. The retained formal result
+is available at
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/`:
+`final/` contains the delivered manifests and reports, while `intermediate/`
+provides the full source, planning, editing, audit, checkpoint, and log view.
+The canonical run root remains
+`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/`.
+
+The old paths in this historical record are descriptive only; do not use them
+as current data or resume paths.
+
 本文件是所有质量迭代的唯一主记录，按时间保存实验、失败原因、修复、运行命令与复核结果。后续迭代继续追加在这里，不再新增按日期拆分的记录文档。历史数字保留其当时评判口径，后续修正以较新的章节为准。
 
 - [最新：新源图开发与留出验证 v10](#fresh-v10)

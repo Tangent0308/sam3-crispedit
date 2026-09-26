@@ -1,5 +1,22 @@
 # SAMTok-derived edit pipeline
 
+## Retained formal run
+
+The only retained generated dataset is the completed four-node run. Use the
+Arnold entry and resume instructions in
+[`../docs/SAMTOK_LABELING_四机运行指南.md`](../docs/SAMTOK_LABELING_四机运行指南.md).
+Its delivered manifests and gallery are at
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/`;
+the complete source/planning/editing/audit evidence is exposed through
+`.../SAMTok_Derived_Edit_Labeling/intermediate/`, with the canonical immutable
+run root under
+`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/`.
+
+The pilot commands below are historical development templates. Their old
+external pilot directories were intentionally removed after the formal run and
+must not be treated as current inputs or resume paths; use a new explicit
+output directory for any future experiment.
+
 For the detailed Chinese design document, including the task taxonomy,
 instruction-generation safeguards, per-case manual review policy, and the
 100-case pilot, see

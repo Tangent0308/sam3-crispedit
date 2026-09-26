@@ -17,8 +17,14 @@ The data flow is:
 5. Audit localization/background preservation with batched Qwen3-VL vLLM and
    export a comparison gallery.
 
-Pilot data and full-run artifacts are intentionally stored outside Git under
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/`.
+The completed four-node run is retained outside Git under the organized result
+root
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/`.
+The `final/` directory contains the copied manifests and HTML reports; the
+`intermediate/` directory is a stable view of the full source, planning,
+editing, audit, checkpoint, and log artifacts from the completed run. The
+canonical immutable run root remains under
+`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/`.
 
 ## Environment
 
