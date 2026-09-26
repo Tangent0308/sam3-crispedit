@@ -517,3 +517,140 @@ cat "$RUN_ROOT/reports/final.json"
 全部环境实际使用headless；回归测试348 passed / 6 skipped，5项融合测试另在新SAM环境通过。
 修复后单机8卡模拟四worker的9个region已全部完成出图、审核及汇总，四worker退出0，
 `run/control/finalize.ok.json`存在。模型审核9 pass，未新增人工质量验收。原四机任务没有自动重启。
+
+## 8. 2026-09-25 正式四机运行结果
+
+本节记录一次已经完成的 Arnold 四机正式运行，便于后续核对实际吞吐、数据分母和最终产物。
+
+### 8.1 运行身份与目录
+
+```text
+run_id:       samtok-derived-4n-20260925
+final attempt: resume-002
+code commit:  165bfaf2a57bce1563686b1e2e786093851c3ba8
+```
+
+共享运行根目录：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925
+```
+
+最终 attempt 目录：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/attempts/resume-002
+```
+
+本轮曾经使用过`resume-001`，该 attempt 在外部任务生命周期终止时停止；正确的规划、SAM、编辑和审核检查点均保留，之后使用新的`resume-002`续跑。`resume-002`最终产生四个节点的`node<N>.done.json`，并写入：
+
+```text
+attempts/resume-002/control/finalize.ok.json
+```
+
+### 8.2 数据规模与阶段统计
+
+本轮配置为 GRES-8k / VER-4k 派生数据，任务类型为`remove`，每个索引到的 source mask 形成一条单 region case，同一 source 的多个 mask 一图多用；空 mask 在规划阶段单独拦截。
+
+| 阶段 | 数量 | 说明 |
+|---|---:|---|
+| 正例 source 图像 | 7,671 | GRES 3,671，VER 4,000 |
+| 计划处理 case | 10,633 | 7,671 张 source 的全部索引 mask |
+| 规划后接受并进入出图 | 9,436 | 四节点均完成编辑 |
+| 规划阶段 no_output | 1,197 | 未进入编辑模型 |
+| 实际生成 edited PNG | 9,436 | 文件全部存在并完成解码 |
+| 审核通过 | **7,990** | 最终可用候选 |
+| 审核失败 | 1,446 | 有 edited 输出，但不进入最终通过清单 |
+
+最终比例为：
+
+```text
+规划接受率       = 9,436 / 10,633 = 88.74%
+出图后审核通过率 = 7,990 /  9,436 = 84.68%
+相对计划最终通过 = 7,990 / 10,633 = 75.14%
+```
+
+1,197 条`no_output`的规划状态分布如下。这些是规划阶段主动拒绝或无法确定依附关系的 case，不是运行崩溃：
+
+| resolution_status | 数量 |
+|---|---:|
+| `defer_unresolved_keep` | 517 |
+| `defer_unresolved_auxiliary` | 339 |
+| `defer` | 330 |
+| `defer_support_conflict` | 6 |
+| `invalid_input_empty_mask` | 1 |
+| `invalid_relation_bbox` | 1 |
+| `invalid_decision` | 1 |
+| `defer_target_point_outside_mask` | 1 |
+| `invalid_reconstruction` | 1 |
+
+审核的 9,436 条中，最终`audit.jsonl`记录为 7,990 pass / 1,446 fail。审核模型原始结构化判断为 8,037 model pass、1,349 model fail 和 50 条 unparsed；像素局部性规则对其中一部分追加了 veto，因此最终准入以`audit.jsonl`的`decision`为准。
+
+### 8.3 运行时间与节点状态
+
+四节点从分片完成（约 13:38:51 UTC）到最终汇总（约 17:56:34 UTC）墙钟时间约 **4 小时 18 分钟**。各节点报告如下：
+
+| 节点 | 输入 case | pipeline 秒数 | audit 秒数 | 总秒数 |
+|---|---:|---:|---:|---:|
+| node0 | 2,659 | 9,167.32 | 5,922.27 | 15,093.43 |
+| node1 | 2,659 | 6,321.05 | 6,155.55 | 12,480.48 |
+| node2 | 2,657 | 7,039.00 | 5,796.57 | 12,836.22 |
+| node3 | 2,658 | 6,396.61 | 5,957.49 | 12,357.81 |
+
+本轮没有发现 OOM、CUDA error、Traceback、worker failed 或失败 marker。node0 是最后完成 audit 的节点，随后由协调器写入`finalize.ok.json`。
+
+### 8.4 结果文件与图片路径
+
+汇总结果：
+
+```text
+results/all_cases.jsonl    # 全部 10,633 条，包含 pass / fail / no_output
+results/audit.jsonl        # 9,436 条实际出图 case 的完整审核记录
+results/model_pass.jsonl   # 7,990 条最终审核通过数据
+```
+
+编辑图片仍按节点保存，示例目录为：
+
+```text
+nodes/node0/pipeline/editing/context_grounded_v4_qwen21/edited/
+nodes/node1/pipeline/editing/context_grounded_v4_qwen21/edited/
+nodes/node2/pipeline/editing/context_grounded_v4_qwen21/edited/
+nodes/node3/pipeline/editing/context_grounded_v4_qwen21/edited/
+```
+
+完整性检查对`audit.jsonl`引用的 9,436 张 edited PNG 逐张执行了存在性检查、PNG 解码和像素加载：
+
+```text
+缺失文件       0
+解码失败       0
+空文件         0
+图片模式       9,436 张全部为 RGB
+```
+
+其中有 1 张结果接近纯白，是白色背景上的 iPhone 被移除后的有效结果，不是损坏图片。
+
+### 8.5 可视化结果
+
+推荐查看新版审核画廊：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/results/audit_gallery.html
+```
+
+该 HTML 包含 20 个代表性 case，每条同时展示：
+
+1. `BEFORE + MASK OUTLINE`：原图和 mask 邻域 crop，mask 外侧以黑白轮廓标注，mask 内保留原始像素；
+2. `AFTER`：相同坐标的编辑结果；
+3. Qwen3.8-27B 模型审核的`target_removed`、`quality`、`instruction_match`、像素证据和理由；
+4. Assistant review：对这 20 条样例逐条查看后的人工判断和原因；
+5. 按“模型/人工通过、像素误拒、编辑失败、instruction/mask 不匹配”筛选。
+
+20 条样例中，5 条模型与人工均通过，4 条模型视觉判断通过但被像素阈值误拒，8 条存在目标残留或背景质量问题，3 条存在 instruction 与 mask 语义不匹配。HTML 图片已经内嵌，不依赖外部图片路径，适合直接在预览器中打开。
+
+旧版汇总页仍保留在：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/results/inspection.html
+```
+
+该页面顶部已加入新版`audit_gallery.html`入口。
