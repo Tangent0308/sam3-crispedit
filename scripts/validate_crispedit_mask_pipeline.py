@@ -63,13 +63,32 @@ def validate(args):
                         raise ValueError(f"mask canvas contract violated: {name}:{index}")
                 if m["qc_flag"] == "PREFILTER_SKIP":
                     raise ValueError(f"selected row was skipped: {name}:{index}")
-                counts["ground_parse_errors"] += not g["ground_parse_ok"]
+                ground_parse_error = not g["ground_parse_ok"]
+                counts["ground_parse_errors"] += ground_parse_error
+                recoverable_ground_parse_error = (
+                    ground_parse_error
+                    and g.get("grounding_status") == "PARSE_ERROR"
+                    and g.get("qc_flag") == "GROUND_FAIL"
+                    and m.get("qc_flag") == "GROUND_FAIL"
+                )
+                counts["recoverable_ground_parse_errors"] += recoverable_ground_parse_error
+                counts["nonrecoverable_ground_parse_errors"] += (
+                    ground_parse_error and not recoverable_ground_parse_error
+                )
                 payload = json.loads(g["ground_json"])
                 observation = payload.get("observation")
                 counts['no_realized_changes'] += bool(payload.get('no_realized_changes'))
                 if payload.get('no_realized_changes') and (m['qc_flag'] == 'OK' or m['mask_sum']):
                     raise ValueError(f'no-edit observation produced a successful mask: {name}:{index}')
-                counts["observation_parse_errors"] += bool(observation) and not observation.get("parse_ok", False)
+                observation_parse_error = bool(observation) and not observation.get("parse_ok", False)
+                counts["observation_parse_errors"] += observation_parse_error
+                recoverable_observation_parse_error = (
+                    observation_parse_error and m.get("qc_flag") == "GROUND_FAIL"
+                )
+                counts["recoverable_observation_parse_errors"] += recoverable_observation_parse_error
+                counts["nonrecoverable_observation_parse_errors"] += (
+                    observation_parse_error and not recoverable_observation_parse_error
+                )
                 counts["observation_retries"] += max(0, len((observation or {}).get("attempts", []))-1)
                 scope = (observation or {}).get('scope_review', {})
                 counts['scope_requests'] += len(scope.get('attempts', []))
@@ -142,7 +161,12 @@ def main():
     summary = validate(args)
     (args.run_dir / "validation_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2)+"\n")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    if any(summary["counts"].get(key) for key in ("runtime_errors", "ground_parse_errors", "observation_parse_errors")):
+    fatal_counts = (
+        "runtime_errors",
+        "nonrecoverable_ground_parse_errors",
+        "nonrecoverable_observation_parse_errors",
+    )
+    if any(summary["counts"].get(key) for key in fatal_counts):
         raise SystemExit(1)
 
 
