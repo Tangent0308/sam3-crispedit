@@ -1,0 +1,72 @@
+[
+  {
+    "card": "formal_pass_01_000004_gres_r5_m0_remove.jpg",
+    "image": "000004_gres_r5_m0_remove.png",
+    "source_subset": "gres",
+    "node": 0,
+    "instruction": "Remove bottom-left dark sofa/armchair with cushions and draped cloth."
+  },
+  {
+    "card": "formal_pass_02_000025_gres_r31_m0_remove.jpg",
+    "image": "000025_gres_r31_m0_remove.png",
+    "source_subset": "gres",
+    "node": 1,
+    "instruction": "Remove White mug at top‑left corner (frame‑truncated)."
+  },
+  {
+    "card": "formal_pass_03_000002_gres_r2_m0_remove.jpg",
+    "image": "000002_gres_r2_m0_remove.png",
+    "source_subset": "gres",
+    "node": 2,
+    "instruction": "Remove standing lamb with dark face and dark lower legs in the center."
+  },
+  {
+    "card": "formal_pass_04_000008_gres_r11_m0_remove.jpg",
+    "image": "000008_gres_r11_m0_remove.png",
+    "source_subset": "gres",
+    "node": 3,
+    "instruction": "Remove Right cat silhouette (profile head, ears, collar and upper body)."
+  },
+  {
+    "card": "formal_pass_05_010631_gres_r12334_m0_remove.jpg",
+    "image": "010631_gres_r12334_m0_remove.png",
+    "source_subset": "gres",
+    "node": 1,
+    "instruction": "Remove left bicycle (front wheel, handlebar, fork and top tube at left)."
+  },
+  {
+    "card": "formal_pass_06_000000_ver_r0_m0_remove.jpg",
+    "image": "000000_ver_r0_m0_remove.png",
+    "source_subset": "ver",
+    "node": 0,
+    "instruction": "Remove black tripod with camera on the railing (right of the central pair, left of the APOLA sign)."
+  },
+  {
+    "card": "formal_pass_07_000001_ver_r1_m0_remove.jpg",
+    "image": "000001_ver_r1_m0_remove.png",
+    "source_subset": "ver",
+    "node": 1,
+    "instruction": "Remove black wall‑mounted light fixture (glowing lamp) inside the arch."
+  },
+  {
+    "card": "formal_pass_08_000010_ver_r18_m0_remove.jpg",
+    "image": "000010_ver_r18_m0_remove.png",
+    "source_subset": "ver",
+    "node": 2,
+    "instruction": "Remove green striped barrier pole to the right of the car."
+  },
+  {
+    "card": "formal_pass_09_000003_ver_r4_m0_remove.jpg",
+    "image": "000003_ver_r4_m0_remove.png",
+    "source_subset": "ver",
+    "node": 3,
+    "instruction": "Remove Man walking away in cream long‑sleeve top, blue jeans and dark cap on the left walkway."
+  },
+  {
+    "card": "formal_pass_10_000018_ver_r28_m0_remove.jpg",
+    "image": "000018_ver_r28_m0_remove.png",
+    "source_subset": "ver",
+    "node": 2,
+    "instruction": "Remove Airborne soccer player in white jersey with green accents kicking the ball (right side)."
+  }
+]
