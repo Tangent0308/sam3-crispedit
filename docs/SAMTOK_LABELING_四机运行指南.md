@@ -89,13 +89,15 @@ bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Lab
 历史试验是否重复不在这个全量入口额外筛选，避免擅自改变全量数据范围。
 
 只跑小规模四机 smoke 时，设 `SAMTOK_LIMIT_SOURCES=8` 并换新 run ID。它限制源图数，不是 region 数。
-若已经准备好了输入，在同一入口额外指定：
+若已经准备好了输入，在同一入口额外指定（仅适用于当前正式 run 的物化源目录或新建的
+独立输入目录；历史 pilot 目录已经清理，不再使用）：
 
 ```bash
-export SAMTOK_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/fresh_ownership_v15_20260924"
+export SAMTOK_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID/data/source"
 ```
 
-这里必须已有 `annotations.jsonl` 和 `sources/`；该20例目录只适合部署 smoke，不是正式全量输入。
+这里必须已有 `annotations.jsonl` 和 `sources/`。正式 run 默认使用
+`$SAMTOK_RUN_ROOT/data/source/`，不需要额外指定。
 不设置此变量时，默认数据准备位置为本次 `$SAMTOK_RUN_ROOT/data/source/`。
 
 ## 3. 可直接提交的 Arnold 完整入口
@@ -536,6 +538,39 @@ code commit:  165bfaf2a57bce1563686b1e2e786093851c3ba8
 /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925
 ```
 
+整理后的正式数据交付根目录：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling
+```
+
+该目录不是重新生成的一份独立 run，而是正式 run 的稳定交付视图：
+
+```text
+SAMTok_Derived_Edit_Labeling/
+├── final/                         # 复制的最终清单、审核结果和 HTML
+│   ├── all_cases.jsonl
+│   ├── audit.jsonl
+│   ├── model_pass.jsonl
+│   ├── audit_gallery.html
+│   ├── inspection.html
+│   ├── inspection_assets/
+│   └── edited_by_node -> .../experiments/.../nodes/
+├── intermediate/                  # 正式 run 的完整中间阶段视图
+│   ├── data_source -> .../data/source/
+│   ├── inputs -> .../inputs/
+│   ├── nodes -> .../nodes/
+│   ├── attempts -> .../attempts/
+│   ├── reports -> .../reports/
+│   ├── control -> .../control/
+│   └── logs -> .../logs/
+└── run_root -> .../experiments/.../samtok-derived-4n-20260925/
+```
+
+`final/`中的 JSONL/HTML 是正式结果的交付副本；大体积的 source、edited、planning、
+audit、checkpoint 和日志通过 `intermediate/` 保持原始目录结构，避免重复存储。所有
+续跑和运行状态仍以 experiments 下的 canonical run root 为准。
+
 最终 attempt 目录：
 
 ```text
@@ -604,10 +639,14 @@ attempts/resume-002/control/finalize.ok.json
 汇总结果：
 
 ```text
-results/all_cases.jsonl    # 全部 10,633 条，包含 pass / fail / no_output
-results/audit.jsonl        # 9,436 条实际出图 case 的完整审核记录
-results/model_pass.jsonl   # 7,990 条最终审核通过数据
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/all_cases.jsonl
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/audit.jsonl
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/model_pass.jsonl
 ```
+
+上述三个文件分别包含全部 10,633 条 case、9,436 条实际出图并审核的 case，以及
+7,990 条最终模型审核通过的 case。canonical run 中的原始对应文件仍位于
+`$RUN_ROOT/results/`。
 
 编辑图片仍按节点保存，示例目录为：
 
@@ -616,6 +655,12 @@ nodes/node0/pipeline/editing/context_grounded_v4_qwen21/edited/
 nodes/node1/pipeline/editing/context_grounded_v4_qwen21/edited/
 nodes/node2/pipeline/editing/context_grounded_v4_qwen21/edited/
 nodes/node3/pipeline/editing/context_grounded_v4_qwen21/edited/
+```
+
+从交付目录访问全部节点图片：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/edited_by_node/
 ```
 
 完整性检查对`audit.jsonl`引用的 9,436 张 edited PNG 逐张执行了存在性检查、PNG 解码和像素加载：
@@ -634,8 +679,14 @@ nodes/node3/pipeline/editing/context_grounded_v4_qwen21/edited/
 推荐查看新版审核画廊：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/results/audit_gallery.html
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/audit_gallery.html
 ```
+
+canonical run 中的原始画廊仍保存在 `$RUN_ROOT/results/audit_gallery.html`。
+
+本次整理前 `datasets/SAMTok_Derived_Edit_Labeling/` 下的 85 个 pilot、规划、生成和
+质量迭代目录已经删除；它们不再是当前正式结果的一部分。历史说明文档中的旧实验路径
+仅用于描述迭代背景，不能作为当前输入或续跑路径。
 
 该 HTML 包含 20 个代表性 case，每条同时展示：
 

@@ -1,7 +1,20 @@
 # SAMTok 派生细粒度编辑数据流水线
 
+## Current retained run
+
+The historical pilot directories previously referenced in this document have
+been intentionally removed. The retained formal four-node result is organized
+at `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/`;
+use `final/` for the delivered manifests/reports and `intermediate/` for the
+full run evidence. The canonical execution root is
+`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/`.
+
+The older paths below are historical experiment names retained as provenance
+in the design narrative; their external artifacts are no longer available and
+must not be used as input to a new run.
+
 最新生成/审核/独立指令重建的消融与运行说明见
-[2026-09-19 质量迭代记录](SAMTOK_QUALITY_ITERATION.md)。旧实验结果保留用于追溯；
+[2026-09-19 质量迭代记录](SAMTOK_QUALITY_ITERATION.md)。历史实验路径仅保留文字记录用于追溯；
 新方法使用显式参数，不会静默替换原 MIRAGE 默认路径。
 
 本文档描述 `samtok-derived-edit-labeling` 分支当前实现的数据策略、指令设计、
