@@ -56,6 +56,19 @@ def runtime_env(command, overrides=None):
     return env
 
 
+def ensure_symlink(link: Path, target: Path):
+    """Create an expected directory symlink once, and safely reuse it on resume."""
+    link = Path(link)
+    target = Path(target).resolve()
+    if link.is_symlink():
+        if link.resolve() == target:
+            return
+        raise ValueError(f"existing symlink points to a different target: {link} -> {link.resolve()}")
+    if link.exists():
+        raise FileExistsError(f"expected symlink path is occupied by a non-symlink: {link}")
+    link.symlink_to(target, target_is_directory=target.is_dir())
+
+
 def read_rows(path: Path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
@@ -183,7 +196,7 @@ def run_planning_pool(data_root: Path, planning_root: Path, rows, gpu_ids, coord
         shard_data = shard_root / f"data{index}"
         shard_out = shard_root / f"out{index}"
         shard_data.mkdir(parents=True, exist_ok=True)
-        (shard_data / "sources").symlink_to((data_root / "sources").resolve())
+        ensure_symlink(shard_data / "sources", data_root / "sources")
         write_rows(shard_data / "annotations.jsonl", subset)
         write_rows(shard_data / "input_annotations.jsonl", rows)
         command = [mllm_python, "-m", "synthesis_pipeline.plan_dataset_regions",
@@ -233,7 +246,7 @@ def run_planning_pool(data_root: Path, planning_root: Path, rows, gpu_ids, coord
         (planning_root / stage).mkdir(parents=True, exist_ok=True)
     write_rows(planning_root / "regions/annotations.jsonl", ordered)
     write_rows(planning_root / "regions/input_annotations.jsonl", rows)
-    (planning_root / "regions/sources").symlink_to((data_root / "sources").resolve())
+    ensure_symlink(planning_root / "regions/sources", data_root / "sources")
     for stage in ("plan", "scope"):
         stage_rows = {}
         for index, subset, _, _ in jobs:

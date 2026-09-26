@@ -193,7 +193,7 @@ Python 子进程中自动把 `.runtime/mllm/bin`、`.runtime/editor/bin` 和 `.r
 set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
-export SAMTOK_ATTEMPT_ID="resume-001"       # 每次续传都换成新的值
+export SAMTOK_ATTEMPT_ID="resume-002"       # resume-001 已失败；每次续传都换成新的值
 export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
