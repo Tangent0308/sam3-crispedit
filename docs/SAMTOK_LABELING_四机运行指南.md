@@ -22,6 +22,12 @@ GRES/VER 正例与每个原始 region
 没有新增强制改写调用：最近冻结流程也是生成加审核，历史的可选改写实验不因四机部署自动启用。
 其他三类编辑没有被转换为 remove；输入含其他类型会明确报错，不能把当前入口称为四类均衡生产。
 
+本次新增的非 remove 入口是独立实验，不会覆盖上述结果：它对每个正例 source 的每个
+原始 mask 分别派生 `add`、`replace`、`attribute` 三条 case（同一 source 图像复用三次），
+并写入独立的 `add_replace_attribute` run/data 目录。规划改用通用的
+`plan_dataset_regions.py`，编辑仍是同一套 Qwen-Image-2.1 + vLLM-Omni + 40 steps；
+remove 的 relation planner、结果和续跑 checkpoint 不会被读取或修改。
+
 四台机器独立处理数据，各用本机 8 卡。**不使用训练的 DDP/Accelerate，也不跨机切分一个模型**。
 参考训练指南的 Arnold 节点编号、统一 run ID、日志和跨节点完成门禁；不复用训练 rendezvous。
 `ARNOLD_WORKER_HOSTS`、`MASTER_PORT`、worker-local `PORT` 均不参与推理协调。
@@ -99,6 +105,69 @@ export SAMTOK_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAM
 这里必须已有 `annotations.jsonl` 和 `sources/`。正式 run 默认使用
 `$SAMTOK_RUN_ROOT/data/source/`，不需要额外指定。
 不设置此变量时，默认数据准备位置为本次 `$SAMTOK_RUN_ROOT/data/source/`。
+
+### 2.3 add/replace/attribute 三类型独立入口
+
+三类型实验使用同样的 Arnold 配置（4 workers × 8 GPUs），但必须使用新的 run ID，并调用
+仓库中的 `scripts/labeling/bootstrap_arnold_4node_multitype.sh`。它会把数据放到：
+
+```text
+$SAMTOK_RUN_ROOT/data/add_replace_attribute/
+```
+
+四个 worker 使用同一段入口：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
+export SAMTOK_LIMIT_SOURCES=0
+bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/launchers/bootstrap_arnold_4node_multitype.sh
+```
+
+该入口的阶段顺序是：正例索引与三类型展开 → 按 source 分片 →
+Qwen3.8-27B 通用 mask-grounding/scope 规划 → 8 卡 Qwen-Image-2.1 编辑 →
+可选的通用二图审核 → 汇总 `results/`。三类原始输入数完全相同；规划拒绝、出图失败和审核
+失败都保留在各阶段 JSONL，不会用其他类型补齐。正式生成保持 40 steps/seed 0；仅用于
+冒烟时可设置 `SAMTOK_LIMIT_SOURCES=2`，但仍会为每个区域生成三种类型。
+
+非 remove 的实验结果建议按类型单独保留（后续再合并）：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/<run-id>/
+  data/add_replace_attribute/                 # 三类型输入 manifest
+  nodes/node<N>/planning/                     # ground/scope/regions
+  nodes/node<N>/generation/context_grounded_v4_qwen21/edited/
+  nodes/node<N>/audit/
+  results/all_cases.jsonl, generated.jsonl, audit.jsonl, model_pass.jsonl
+  results/by_type/{add,replace,attribute}/{all_cases,generated,audit,model_pass}.jsonl
+```
+
+当前已保留的 remove 结果与新三类型实验明确分开：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/final/
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/intermediate/
+```
+
+根目录下的 `final`、`intermediate` 目前只是兼容旧路径的符号链接；后续合并四类时另建
+`merged/`，不直接覆盖 `remove/`。
+
+#### 三类型 smoke 验证记录
+
+使用 pilot 中的真实 GRES source/mask，并补齐与正式 `regions` 相同的
+`region_contract`，在 Qwen-Image-2.1 **vLLM-Omni** 后端分别跑了三类（4 steps 仅用于快速
+验证类型分支，不代表正式质量配置；正式入口仍为 40 steps/seed 0）：
+
+| 类型 | case | 结果 | 单 case 秒数 |
+|---|---|---|---:|
+| add | `002_gres_r94_m0_two_sheep_add_blue_collar.png` | PNG 正常生成，蓝色项圈位于指定羊的颈部 | 5.18 |
+| replace | `005_gres_r376_m1_three_zebras_replace_rightmost_zebra.png` | PNG 正常生成，右侧 zebra 被替换为 antelope | 4.30 |
+| attribute | `006_gres_r382_m0_two_chairs_red_left_chair.png` | PNG 正常生成，目标椅子变为红色且人物保留 | 4.20 |
+
+输出保存在本机 smoke 目录 `/tmp/samtok_multitype_smoke.yOiM8r/`，正式运行不会读取该
+临时目录。三类均通过了 PNG 解码和人工可视检查；4 steps 的 replace 结果边缘仍可能偏软，
+因此不能把 smoke 图当作最终质量结论，正式审核仍由 audit 阶段决定。
 
 ## 3. 可直接提交的 Arnold 完整入口
 
@@ -677,9 +746,9 @@ OOM、CUDA error 或 worker failure。
 汇总结果：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/all_cases.jsonl
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/audit.jsonl
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/model_pass.jsonl
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/final/all_cases.jsonl
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/final/audit.jsonl
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/final/model_pass.jsonl
 ```
 
 上述三个文件分别包含全部 10,633 条 case、9,436 条实际出图并审核的 case，以及
@@ -698,7 +767,7 @@ nodes/node3/pipeline/editing/context_grounded_v4_qwen21/edited/
 从交付目录访问全部节点图片：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/edited_by_node/
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/final/edited_by_node/
 ```
 
 完整性检查对`audit.jsonl`引用的 9,436 张 edited PNG 逐张执行了存在性检查、PNG 解码和像素加载：
@@ -717,7 +786,7 @@ nodes/node3/pipeline/editing/context_grounded_v4_qwen21/edited/
 推荐查看新版审核画廊：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/audit_gallery.html
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/final/audit_gallery.html
 ```
 
 canonical run 中的原始画廊仍保存在 `$RUN_ROOT/results/audit_gallery.html`。

@@ -45,6 +45,11 @@ def main():
         required=True,
     )
     p.add_argument("--ids", default=",".join(map(str, DEV_IDS)))
+    p.add_argument(
+        "--all-cases",
+        action="store_true",
+        help="Use every annotation in data-root instead of the historical DEV_IDS default.",
+    )
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1)
     p.add_argument("--steps", type=int, default=40)
@@ -68,15 +73,16 @@ def main():
         default=None,
     )
     args = p.parse_args()
-    wanted = {int(x) for x in args.ids.split(",")}
     rows = [
         json.loads(x)
         for x in (args.data_root / "annotations.jsonl").read_text().splitlines()
         if x.strip()
     ]
-    rows = [r for r in rows if int(r["image"].split("_")[0]) in wanted]
-    if len(rows) != len(wanted):
-        raise ValueError("Missing requested cases")
+    if not args.all_cases:
+        wanted = {int(x) for x in args.ids.split(",")}
+        rows = [r for r in rows if int(r["image"].split("_")[0]) in wanted]
+        if len(rows) != len(wanted):
+            raise ValueError("Missing requested cases")
     out = args.out_root / args.variant
     (out / "edited").mkdir(parents=True, exist_ok=True)
     if args.manifest_only and not (out / 'sources').exists():

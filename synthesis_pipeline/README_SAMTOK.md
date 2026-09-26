@@ -6,9 +6,9 @@ The only retained generated dataset is the completed four-node run. Use the
 Arnold entry and resume instructions in
 [`../docs/SAMTOK_LABELING_四机运行指南.md`](../docs/SAMTOK_LABELING_四机运行指南.md).
 Its delivered manifests and gallery are at
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/final/`;
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/final/`;
 the complete source/planning/editing/audit evidence is exposed through
-`.../SAMTok_Derived_Edit_Labeling/intermediate/`, with the canonical immutable
+`.../SAMTok_Derived_Edit_Labeling/remove/intermediate/`, with the canonical immutable
 run root under
 `/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/`.
 
@@ -16,6 +16,13 @@ The pilot commands below are historical development templates. Their old
 external pilot directories were intentionally removed after the formal run and
 must not be treated as current inputs or resume paths; use a new explicit
 output directory for any future experiment.
+
+The non-remove four-node runner is independent of that frozen result:
+`scripts/labeling/bootstrap_arnold_4node_multitype.sh` expands every positive
+dataset mask into one `add`, one `replace`, and one `attribute` case, then uses
+the generic mask planner and the same Qwen-Image-2.1 editor. Its run root is
+`.../experiments/SAMTok_Derived_Edit_Labeling/four_node/<run-id>/` and its input
+manifest is under `data/add_replace_attribute/`; it never writes `remove/`.
 
 For the detailed Chinese design document, including the task taxonomy,
 instruction-generation safeguards, per-case manual review policy, and the
