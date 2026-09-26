@@ -152,7 +152,7 @@ set -euo pipefail
 
 export CRISPEDIT_RUN_ID="crispedit_full_localenv_20260925"
 export CRISPEDIT_BRANCH="crispedit-labeling"
-export CRISPEDIT_COMMIT="af589c53e9b165091395f1dc0da3e1ffa034bba0"
+export CRISPEDIT_COMMIT="84f4b5b94d1fe1f99bf03f8feaef9bfc1d7eabd8"
 export CRISPEDIT_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 
 export CRISPEDIT_RESUME=1
