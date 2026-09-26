@@ -13,7 +13,7 @@ for obsolete in CRISPEDIT_RUNTIME_ARCHIVE CRISPEDIT_BASE_PYTHON CRISPEDIT_LOCAL_
   [[ -z ${!obsolete:-} ]] || { echo "Unset obsolete environment override: $obsolete" >&2; exit 2; }
 done
 shared_base=/mnt/bn/strategy-mllm-train/user/tanyue
-run_dir=${CRISPEDIT_RUN_DIR:-$shared_base/experiments/CrispEdit/labeling_4node_${CRISPEDIT_RUN_ID}}
+run_dir=${CRISPEDIT_RUN_DIR:-$shared_base/CrispEdit-labeling/runs/labeling_4node_${CRISPEDIT_RUN_ID}}
 attempt=initial
 resume_args=()
 if [[ ${CRISPEDIT_RESUME:-0} == 1 ]]; then
@@ -60,9 +60,9 @@ for rank in 0 1 2 3; do
 done
 "$python_bin" scripts/preflight_crispedit_env.py --cluster-dir "$control"
 "$python_bin" -u scripts/run_crispedit_pipeline.py \
-  --run-dir "$run_dir" --source-dir "${CRISPEDIT_INPUT_DIR:-$shared_base/datasets/CrispEdit-2M}" \
-  --quality-dir "${CRISPEDIT_QUALITY_DIR:-$shared_base/datasets/CrispEdit-2M-qwen38-pair-prefilter}" \
-  --scene-dir "${CRISPEDIT_SCENE_DIR:-$shared_base/datasets/CrispEdit-2M-difficult-local-edit}" \
+  --run-dir "$run_dir" --source-dir "${CRISPEDIT_INPUT_DIR:-$shared_base/CrispEdit-labeling/source/CrispEdit-2M}" \
+  --quality-dir "${CRISPEDIT_QUALITY_DIR:-$shared_base/CrispEdit-labeling/prefilter/quality}" \
+  --scene-dir "${CRISPEDIT_SCENE_DIR:-$shared_base/CrispEdit-labeling/prefilter/scene}" \
   --label-dir "${CRISPEDIT_LABEL_DIR:-$run_dir/labels}" \
   --model-path "$model" \
   --checkpoint-path "${CRISPEDIT_SAM3_CHECKPOINT_PATH:-/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt}" \

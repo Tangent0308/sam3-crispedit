@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 REPO = "WeiChow/CrispEdit-2M"
 TYPES = ("add", "color", "remove", "replace")
-BASE = Path("/mnt/bn/strategy-mllm-train/user/tanyue/datasets")
+BASE = Path("/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/source")
 
 
 def atomic_json(path: Path, value: dict) -> None:

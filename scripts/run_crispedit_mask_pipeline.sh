@@ -7,9 +7,9 @@ mkdir -p "$run_dir"
 run_dir=$(cd "$run_dir" && pwd)
 selection_args=()
 if [[ -n ${2:-} ]]; then selection_args=(--selection-file "$(realpath "$2")"); fi
-dataset_dir=${CRISPEDIT_INPUT_DIR:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M}
-quality_dir=${CRISPEDIT_QUALITY_DIR:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-qwen38-pair-prefilter/manifest}
-difficulty_dir=${CRISPEDIT_DIFFICULTY_DIR:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit/manifest}
+dataset_dir=${CRISPEDIT_INPUT_DIR:-/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/source/CrispEdit-2M}
+quality_dir=${CRISPEDIT_QUALITY_DIR:-/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/prefilter/quality/manifest}
+difficulty_dir=${CRISPEDIT_DIFFICULTY_DIR:-/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/prefilter/scene/manifest}
 ground_python=${CRISPEDIT_VLLM_PYTHON:-$repo_dir/.venv-crispedit/bin/python}
 mask_python=${CRISPEDIT_SAM_PYTHON:-$repo_dir/.venv-crispedit/bin/python}
 devices=${CRISPEDIT_DEVICES:-0,1,2,3,4,5,6,7}
