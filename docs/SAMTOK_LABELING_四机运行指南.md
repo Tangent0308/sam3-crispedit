@@ -176,6 +176,48 @@ Qwen3.8-27B 通用 mask-grounding/scope 规划 → 8 卡 Qwen-Image-2.1 编辑 �
 失败都保留在各阶段 JSONL，不会用其他类型补齐。正式生成保持 40 steps/seed 0；仅用于
 冒烟时可设置 `SAMTOK_LIMIT_SOURCES=2`，但仍会为每个区域生成三种类型。
 
+### 2.4 规划失败后的完整续传入口（当前三类型 run）
+
+如果任务已经完成 `data/add_replace_attribute/annotations.jsonl`、`summary.json` 和
+`reports/partition.json`，可以从已有的物化数据和分片继续。续传必须保留原来的
+`SAMTOK_RUN_ID`，并为每次尝试使用新的 `SAMTOK_ATTEMPT_ID`；四个 worker 的值必须完全一致。
+续传不会重新读取 parquet，也不会重新物化 7671 张 source 图像。
+
+当前 run 的规划失败是 FlashInfer 找不到虚拟环境内的 `ninja`。新版入口会在环境门禁和每个
+Python 子进程中自动把 `.runtime/mllm/bin`、`.runtime/editor/bin` 和 `.runtime/sam/bin`
+加入 `PATH`，并在开始复制权重前检查 `ninja`。修复后可直接使用下面这段 Arnold Bash
+入口续传当前 run：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
+export SAMTOK_ATTEMPT_ID="resume-001"       # 每次续传都换成新的值
+export SAMTOK_RESUME=1
+export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
+export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
+export SAMTOK_BRANCH="samtok-derived-edit-labeling"
+export SAMTOK_PIPELINE_MODE=multitype
+export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
+export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
+export SAMTOK_BOOTSTRAP_DIR="/opt/tiger/tanyue/labeling_bootstrap/$SAMTOK_RUN_ID-$SAMTOK_ATTEMPT_ID"
+
+if [[ ! -d "$SAMTOK_BOOTSTRAP_DIR/.git" ]]; then
+  mkdir -p "$(dirname "$SAMTOK_BOOTSTRAP_DIR")"
+  git clone --branch "$SAMTOK_BRANCH" --single-branch \
+    "$SAMTOK_REPO_URL" "$SAMTOK_BOOTSTRAP_DIR"
+fi
+git -C "$SAMTOK_BOOTSTRAP_DIR" fetch origin "$SAMTOK_BRANCH"
+git -C "$SAMTOK_BOOTSTRAP_DIR" checkout --detach "origin/$SAMTOK_BRANCH"
+exec bash "$SAMTOK_BOOTSTRAP_DIR/scripts/labeling/bootstrap_arnold_4node.sh"
+```
+
+Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一段入口。续传日志位于
+`$SAMTOK_RUN_ROOT/attempts/$SAMTOK_ATTEMPT_ID/logs/`；规划日志按
+`planning.node<N>.gpu<G>.log` 区分节点。续传时若某个旧 case 的 checkpoint 不完整或输出
+校验失败，该 case 会重新执行，完整且依赖一致的阶段结果会被复用。
+
 非 remove 的实验结果建议按类型单独保留（后续再合并）：
 
 ```text

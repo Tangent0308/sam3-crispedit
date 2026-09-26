@@ -85,6 +85,14 @@ for file in "$SAMTOK_QWEN38_MODEL/config.json" "$SAMTOK_QWEN21_MODEL/model_index
 done
 bash scripts/labeling/setup_env.sh
 export SAMTOK_ENV_REPORT="$SAMTOK_RUNTIME_ROOT/environment.json"
+# vLLM/FlashInfer launches JIT build tools (notably `ninja`) by name.  The
+# pipeline invokes each venv's Python by absolute path, so expose the runtime
+# tool directories explicitly for every later child process.
+export PATH="$SAMTOK_RUNTIME_ROOT/mllm/bin:$SAMTOK_RUNTIME_ROOT/editor/bin:$SAMTOK_RUNTIME_ROOT/sam/bin:$PATH"
+for tool in "$SAMTOK_RUNTIME_ROOT/mllm/bin/ninja" "$SAMTOK_RUNTIME_ROOT/editor/bin/ninja"; do
+  [[ -x "$tool" ]] || { echo "Missing runtime tool: $tool" >&2; exit 1; }
+done
+"$SAMTOK_MLLM_PYTHON" -c 'import shutil; assert shutil.which("ninja"), "ninja is not on PATH"'
 # Do not stage tens of GB or prepare data while another worker failed its imports.
 check_peers
 printf '{"ready":true}\n' > "${SAMTOK_CONTROL_ROOT:-$SAMTOK_RUN_ROOT}/control/environment.node$ARNOLD_ID.ok.json.tmp"
