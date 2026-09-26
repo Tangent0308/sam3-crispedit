@@ -266,7 +266,7 @@ def pipeline(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run-dir', type=Path, required=True)
-    parser.add_argument('--source-dir', type=Path, default=BASE / 'datasets/ScaleEdit-filtered-balanced-final-task-100k')
+    parser.add_argument('--source-dir', type=Path, default=BASE / 'datasets/ScaleEdit-filtered-source')
     parser.add_argument('--selection-file', type=Path)
     parser.add_argument('--model-path', default=str(BASE / 'models/pretrained_models/Qwen3.8-27B'))
     parser.add_argument('--checkpoint-path', default='/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt')

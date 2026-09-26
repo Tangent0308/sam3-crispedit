@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 run_dir=${1:?Usage: bash scripts/run_scaleedit_pipeline.sh OUTPUT_DIR [SELECTION_JSON]}
 python_bin=${SCALEEDIT_PYTHON:-.venv-scaleedit-current/bin/python}
-source_dir=${SCALEEDIT_SOURCE:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k}
+source_dir=${SCALEEDIT_SOURCE:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-source}
 devices=${SCALEEDIT_DEVICES:-0,1,2,3,4,5,6,7}
 filter_run=${SCALEEDIT_FILTER_RUN:-$run_dir}
 mkdir -p "$run_dir/logs"

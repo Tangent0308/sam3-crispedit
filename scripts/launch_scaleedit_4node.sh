@@ -63,7 +63,7 @@ resume=()
 if [[ ${SCALEEDIT_RESUME:-0} == 1 ]]; then resume=(--resume --attempt "$attempt"); fi
 "$python_bin" -u scripts/run_scaleedit_4node.py \
   --run-dir "$SCALEEDIT_RUN_DIR" \
-  --source-dir "${SCALEEDIT_INPUT_DIR:-$shared_base/datasets/ScaleEdit-filtered-balanced-final-task-100k}" \
+  --source-dir "${SCALEEDIT_INPUT_DIR:-$shared_base/datasets/ScaleEdit-filtered-source}" \
   --model-path "$model" \
   --checkpoint-path "${SCALEEDIT_SAM3_CHECKPOINT_PATH:-/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt}" \
   --nodes 4 --rank "$ARNOLD_ID" --devices 0,1,2,3,4,5,6,7 \
