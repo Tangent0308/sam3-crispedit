@@ -34,7 +34,7 @@
 
 | 内容 | 路径与规模 |
 | --- | --- |
-| 源数据 | `BASE/datasets/ScaleEdit-filtered-balanced-final-task-100k`：1,155 shard / 299,633 条；100k 是历史目录名 |
+| 源数据 | `BASE/datasets/ScaleEdit-filtered-balanced-final-task-100k`：1,155 shard（352 个 `part`、803 个 `expand`）/ 299,633 条，约 137GB；其中 28,414 条全局类确定性 DROP，约 271,219 条进入质量 MLLM；`100k` 是历史目录名 |
 | 下载记录 | `BASE/experiments/ScaleEdit/download_200k_20260924`：新增 803 shard / 199,633 条 |
 | Qwen | `BASE/models/pretrained_models/Qwen3.8-27B` |
 | SAM3 | `/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt` |
@@ -80,8 +80,8 @@ HF_HUB_DOWNLOAD_TIMEOUT=120 HF_HUB_ETAG_TIMEOUT=60 HF_XET_NUM_CONCURRENT_RANGE_G
 默认 8 卡：质量/scene 为 8×TP1，grounding 为 4×TP2，SAM3 每卡一个 worker，batch=4。
 
 ```bash
-tmux new-session -d -s scaleedit_labeling 'cd /opt/tiger/tanyue/sam3-crispedit-scaleedit-labeling && bash scripts/run_scaleedit_pipeline.sh /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_single_full'
-tail -F /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_single_full/logs/quality.log
+tmux new-session -d -s scaleedit_labeling 'cd /opt/tiger/tanyue/sam3-crispedit-scaleedit-labeling && bash scripts/run_scaleedit_pipeline.sh /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_single_300k'
+tail -F /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_single_300k/logs/quality.log
 ```
 
 小批量：

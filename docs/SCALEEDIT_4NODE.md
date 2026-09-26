@@ -11,7 +11,7 @@
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-export SCALEEDIT_RUN_ID="scaleedit_full_20260925_a"
+export SCALEEDIT_RUN_ID="scaleedit_300k_20260926"
 export SCALEEDIT_BRANCH="scaleedit-labeling"
 export SCALEEDIT_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SCALEEDIT_RUN_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_${SCALEEDIT_RUN_ID}"
@@ -40,7 +40,7 @@ bash "$bootstrap_dir/launch_scaleedit_4node.sh"
 
 ## 2. 数据范围、复用与输出
 
-- 源目录当前1,155 shard / 299,633行。全局类别在质量阶段直接DROP，不调用模型。
+- 源目录当前1,155 shard / 299,633行（352个`part`、803个`expand`，约137GB）。全部299,633行都会进入本次流程，其中28,414行全局类别在质量阶段确定性DROP、不调用模型，剩余约271,219行进入Qwen质量判断。
 - node0动态生成 `plan.json`，冻结源快照、选择行、代码及参数；每阶段根据上游PASS数量重新均衡shard。
 - 新RUN处理完整源范围，不自动导入先前512条开发实验的稀疏结果。同一RUN恢复时复用签名一致的完整shard，只重跑未完成shard，包括grounding/mask。
 - 质量/scene输出binary判决；后续仅双PASS进入模型。每个shard保持原始行号，阶段结果可能为空但schema完整；无待处理行时不加载模型。
@@ -70,7 +70,7 @@ RUN/
 ## 3. 进度与恢复
 
 ```bash
-RUN=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_full_20260925_a
+RUN=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926
 tail -F "$RUN/logs/quality.node0.log"
 tail -F "$RUN/logs/scene.node0.log"
 tail -F "$RUN/logs/grounding.node0.log"
