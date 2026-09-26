@@ -23,6 +23,23 @@ def test_mask_and_validator_skip_historical_background_style(tmp_path):
     assert validate(args)['shards'] == 0
 
 
+def test_validator_allows_only_row_level_recoverable_parse_errors():
+    from scripts.validate_crispedit_mask_pipeline import (
+        recoverable_ground_parse_error,
+        recoverable_observation_parse_error,
+    )
+
+    ground = {"ground_parse_ok": False, "grounding_status": "PARSE_ERROR", "qc_flag": "GROUND_FAIL"}
+    failed_mask = {"qc_flag": "GROUND_FAIL"}
+    review_mask = {"qc_flag": "MASK_REVIEW"}
+    observation = {"parse_ok": False}
+
+    assert recoverable_ground_parse_error(ground, failed_mask)
+    assert not recoverable_ground_parse_error(ground, review_mask)
+    assert recoverable_observation_parse_error(observation, failed_mask)
+    assert not recoverable_observation_parse_error(observation, review_mask)
+
+
 
 
 
