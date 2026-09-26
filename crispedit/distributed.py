@@ -19,7 +19,7 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 
 
-BASE = Path("/mnt/bn/strategy-mllm-train/user/tanyue/datasets")
+BASE = Path("/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling")
 MODEL = Path("/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B")
 REPO = Path(__file__).resolve().parent.parent
 
@@ -587,9 +587,9 @@ def run(args) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--source-dir", type=Path, default=BASE / "CrispEdit-2M")
-    parser.add_argument("--quality-dir", type=Path, default=BASE / "CrispEdit-2M-qwen38-pair-prefilter")
-    parser.add_argument("--scene-dir", type=Path, default=BASE / "CrispEdit-2M-difficult-local-edit")
+    parser.add_argument("--source-dir", type=Path, default=BASE / "source/CrispEdit-2M")
+    parser.add_argument("--quality-dir", type=Path, default=BASE / "prefilter/quality")
+    parser.add_argument("--scene-dir", type=Path, default=BASE / "prefilter/scene")
     parser.add_argument("--download-run-dir", type=Path)
     parser.add_argument("--model-path", type=Path, default=MODEL)
     parser.add_argument('--label-dir', type=Path, help='New mask output directory; default RUN_DIR/labels')

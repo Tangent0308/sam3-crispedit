@@ -1,0 +1,44 @@
+{
+  "note": "Stratified visual review: five previously inspected rows per QC state across five edit types, plus four additional OK rows per type spread across shards. This is a qualitative sample, not an unbiased accuracy estimate.",
+  "cases": [
+    {"shard":"add_00000.parquet","row_idx":6,"type":"add","qc_flag":"OK"},
+    {"shard":"add_00059.parquet","row_idx":186,"type":"add","qc_flag":"OK"},
+    {"shard":"add_00468.parquet","row_idx":123,"type":"add","qc_flag":"OK"},
+    {"shard":"add_00813.parquet","row_idx":239,"type":"add","qc_flag":"OK"},
+    {"shard":"add_01181.parquet","row_idx":70,"type":"add","qc_flag":"OK"},
+    {"shard":"add_00005.parquet","row_idx":76,"type":"add","qc_flag":"MASK_REVIEW"},
+    {"shard":"add_00011.parquet","row_idx":110,"type":"add","qc_flag":"GROUND_FAIL"},
+
+    {"shard":"color_00000.parquet","row_idx":7,"type":"color","qc_flag":"OK"},
+    {"shard":"color_00020.parquet","row_idx":65,"type":"color","qc_flag":"OK"},
+    {"shard":"color_00098.parquet","row_idx":92,"type":"color","qc_flag":"OK"},
+    {"shard":"color_00339.parquet","row_idx":210,"type":"color","qc_flag":"OK"},
+    {"shard":"color_01556.parquet","row_idx":137,"type":"color","qc_flag":"OK"},
+    {"shard":"color_00000.parquet","row_idx":17,"type":"color","qc_flag":"MASK_REVIEW"},
+    {"shard":"color_00003.parquet","row_idx":33,"type":"color","qc_flag":"GROUND_FAIL"},
+
+    {"shard":"motion change_00000.parquet","row_idx":103,"type":"motion change","qc_flag":"OK"},
+    {"shard":"motion change_00014.parquet","row_idx":116,"type":"motion change","qc_flag":"OK"},
+    {"shard":"motion change_00050.parquet","row_idx":53,"type":"motion change","qc_flag":"OK"},
+    {"shard":"motion change_00090.parquet","row_idx":193,"type":"motion change","qc_flag":"OK"},
+    {"shard":"motion change_00125.parquet","row_idx":149,"type":"motion change","qc_flag":"OK"},
+    {"shard":"motion change_00002.parquet","row_idx":156,"type":"motion change","qc_flag":"MASK_REVIEW"},
+    {"shard":"motion change_00007.parquet","row_idx":169,"type":"motion change","qc_flag":"GROUND_FAIL"},
+
+    {"shard":"remove_00000.parquet","row_idx":20,"type":"remove","qc_flag":"OK"},
+    {"shard":"remove_00254.parquet","row_idx":222,"type":"remove","qc_flag":"OK"},
+    {"shard":"remove_00537.parquet","row_idx":183,"type":"remove","qc_flag":"OK"},
+    {"shard":"remove_00953.parquet","row_idx":224,"type":"remove","qc_flag":"OK"},
+    {"shard":"remove_01362.parquet","row_idx":55,"type":"remove","qc_flag":"OK"},
+    {"shard":"remove_00001.parquet","row_idx":116,"type":"remove","qc_flag":"MASK_REVIEW"},
+    {"shard":"remove_00003.parquet","row_idx":148,"type":"remove","qc_flag":"GROUND_FAIL"},
+
+    {"shard":"replace_00000.parquet","row_idx":129,"type":"replace","qc_flag":"OK"},
+    {"shard":"replace_00247.parquet","row_idx":244,"type":"replace","qc_flag":"OK"},
+    {"shard":"replace_00454.parquet","row_idx":100,"type":"replace","qc_flag":"OK"},
+    {"shard":"replace_00619.parquet","row_idx":181,"type":"replace","qc_flag":"OK"},
+    {"shard":"replace_01456.parquet","row_idx":112,"type":"replace","qc_flag":"OK"},
+    {"shard":"replace_00013.parquet","row_idx":183,"type":"replace","qc_flag":"MASK_REVIEW"},
+    {"shard":"replace_00012.parquet","row_idx":144,"type":"replace","qc_flag":"GROUND_FAIL"}
+  ]
+}

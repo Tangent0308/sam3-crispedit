@@ -17,6 +17,8 @@ def main():
     parser.add_argument('--pairs-only', action='store_true', help='Inspect raw edits before seeing predictions')
     parser.add_argument('--selection-file', type=Path)
     parser.add_argument('--output-dir', type=Path, required=True)
+    parser.add_argument('--intro-html-file', type=Path,
+                        help='Optional trusted HTML fragment inserted before the case gallery')
     parser.add_argument('--embed-existing', action='store_true',
                         help='Inline local image references in an existing gallery index.html')
     args = parser.parse_args()
@@ -63,8 +65,10 @@ def main():
         source,target = _decode_image(record['input_img']),_decode_image(record['output_img'])
         panels = [('Source',source),('Target',target)]
         if not args.pairs_only:
-            mask = _decode_mask(result['mask_png'],source.size)
-            panels += [('Source mask',_overlay(source,mask)),('Binary mask',Image.fromarray(mask*255))]
+            mask_canvas = target if name.startswith('add_') else source
+            mask_label = 'Target mask' if name.startswith('add_') else 'Source mask'
+            mask = _decode_mask(result['mask_png'],mask_canvas.size)
+            panels += [(mask_label,_overlay(mask_canvas,mask)),('Binary mask',Image.fromarray(mask*255))]
         sheet = Image.new('RGB',(width*columns,height+header),'white')
         draw = ImageDraw.Draw(sheet)
         title = f"{n+1}. {name}:{idx} | {result['qc_flag']}"
@@ -90,13 +94,15 @@ def main():
             f'<img width="100%" src="data:image/jpeg;base64,{image_data}" '
             f'alt="{html.escape(title)}"></section>'
         )
+    intro = args.intro_html_file.read_text() if args.intro_html_file else ''
     (args.output_dir/'index.html').write_text('<!doctype html><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<title>Mask quality review</title>'
         '<style>body{font:16px system-ui,sans-serif;max-width:1200px;margin:24px auto;padding:0 16px}'
         'section{margin:28px 0}img{display:block;height:auto;border:1px solid #bbb}</style>'
-        '<h1>Raw image pairs and masks</h1>'
-        '<p>QC flags are automatic diagnostics, NOT semantic accuracy.</p>'+''.join(links))
+        '<h1>CrispEdit final labeling review</h1>'
+        '<p>QC flags are automatic diagnostics, NOT semantic accuracy.</p>'
+        + intro + ''.join(links))
     print(json.dumps({'cases':len(cases),'pages':boards,'output':str(args.output_dir)}))
 
 

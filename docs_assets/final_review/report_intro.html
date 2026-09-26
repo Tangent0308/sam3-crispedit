@@ -1,0 +1,17 @@
+<section>
+  <h2>Run and counts</h2>
+  <p>Formal four-node run <code>labeling_4node_crispedit_full_localenv_20260925</code>; latest attempt <code>retry_validate_fix_02/complete.ok</code>. The source contains 2,078 shards and 529,020 rows. The current five edit types account for 1,908 source shards and 485,964 rows.</p>
+  <table border="1" cellpadding="6" cellspacing="0">
+    <tr><th>Stage</th><th>Rows</th><th>Outcome</th></tr>
+    <tr><td>Quality prefilter</td><td>529,020</td><td>PASS 460,518; FAIL 68,501; UNSURE 1</td></tr>
+    <tr><td>Fine-grained scene prefilter</td><td>460,518</td><td>PASS 38,971; DROP 421,547</td></tr>
+    <tr><td>Mask</td><td>38,971</td><td>OK 37,728 (96.81%); MASK_REVIEW 910; GROUND_FAIL 333</td></tr>
+  </table>
+  <p>Mask validation: 1,844 output shards; 38,583 nonempty masks; 62,013 validated instances; 0 runtime errors. These are structural and automatic-QC statistics, not human mask accuracy.</p>
+</section>
+<section>
+  <h2>Qualitative review</h2>
+  <p>The 35 deliberately stratified examples below include 25 automatic OK, five MASK_REVIEW, and five GROUND_FAIL rows across all five edit types. This selection is illustrative, not an unbiased accuracy sample. For <code>add</code>, the overlay is on <b>target</b>; for other types it is on <b>source</b>. The binary panel shows the same stored mask.</p>
+  <p>Many OK cases localize the intended content convincingly: the new fork (<code>add_00000:6</code>), puppy (<code>add_00813:239</code>), recolored teacup roses (<code>color_01556:137</code>), removed seed bag (<code>remove_00953:224</code>), and replaced cake (<code>replace_01456:112</code>). However, automatic OK also admits imperfect masks: <code>color_00020:65</code> appears to include garlands and antlers beyond the edited ornaments, while <code>remove_00254:222</code> is broad and fragmented around the removed display. These need human review before downstream training.</p>
+  <p><code>remove_00001:116</code> is a real over-selection in MASK_REVIEW: unchanged balls on the table are included. The GROUND_FAIL examples have missing/empty masks despite visible edits (for example <code>color_00003:33</code>), so they must not be treated as accepted labels.</p>
+</section>
