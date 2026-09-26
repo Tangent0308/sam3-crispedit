@@ -1,5 +1,18 @@
 # CrispEdit mask 优化迭代记录
 
+## 迭代产物路径索引
+
+统一根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/`。正式源数据、两轮 prefilter 和最终打标结果不在此处，路径见 [CRISPEDIT_MASK.md](CRISPEDIT_MASK.md)。以下目录均保留原名；旧 `experiments/CrispEdit/`、`datasets/` 路径现为兼容链接，本文链接已指向新位置。
+
+| 分类 | 根目录下的目录 | 内容 |
+| --- | --- | --- |
+| 四机失败与环境验证 | `experiments/labeling_4node_crispedit_full_20260924_a/`、`experiments/labeling_4node_crispedit_full_localenv_20260924_b/`、`experiments/local_env_fix_20260924/` | 失败日志、环境修复和预检 |
+| 四机/筛选小规模测试 | `experiments/pipeline_4rank_smoke_20260924/`、`experiments/pipeline_4rank_verified_20260924/`、`experiments/prefilter_4node_plancheck_20260923/`、`experiments/prefilter_4node_setup_20260923/`、`experiments/prefilter_4node_smoke_20260923/` | 计划、端到端 smoke、画廊 |
+| 小批量 mask 实验 | `experiments/mask_fresh65_doublepass_20260923/`、`experiments/mask_newdownload64_20260923/` | 65/64 条复核、日志、可视化 |
+| 下载与开发归档 | `experiments/download_200k_20260923/`、`experiments/repo_cleanup_20260924/` | 旧下载记录、迭代图片和清理前备份 |
+| 早期筛选与标注 | `datasets/CrispEdit-2M-difficult-local-edit-labeling/`、`datasets/CrispEdit-2M-fact-prefilter/`、`datasets/CrispEdit-2M-grounding/`、`datasets/CrispEdit-2M-mask/` | 旧版迭代输出，非当前正式结果 |
+| 旧版画廊与追加批次 | `datasets/CrispEdit-2M-mask-previews/`、`datasets/CrispEdit-2M-mask-run-additional-100k-20260908/`、`datasets/CrispEdit-2M-mask-run-resumed-after-background-audit-20260831/` | 历史预览和增量实验 |
+
 ## 2026-09-24：四机环境缺库修复与节点本地安装
 
 生产尝试 `labeling_4node_crispedit_full_20260924_a` 完成 1,908 shard 规划，每节点待质量/场景各 195 shard，
@@ -13,13 +26,13 @@
 更新[四机完整入口](CRISPEDIT_4NODE.md)，删去环境打包/解包脚本。共享部署代码与旧基础 Python/venv 按用户要求清理；
 原始数据、正式筛选、打标结果和故障日志继续保留。
 
-验证根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/`。
+验证根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/local_env_fix_20260924/`。
 `install.log` 为从头安装，`preflight.log` 为已通过的实际 Qwen 双图预检查，`tests.log` 记录 198 项测试通过。
 从提交 `b045184` 克隆的干净本地副本独立安装通过（`clone_install.log`），基础 Python 和全部依赖都在 clone 内；
 `install_reuse.log` 确认重复执行可以复用完整环境。
 在干净 clone 的新装环境中，一机 8×H100、四 rank 重跑：20 质量 PASS → 19 场景 PASS / 1 DROP →
 19 非空 mask、35 实例，0 解析/运行错误，四 rank 均 exit 0；`smoke/run/control/initial/complete.ok` 已生成。
-逐阶段日志和汇总位于 `smoke/run/{logs,reports}/`；[19 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/local_env_fix_20260924/review/index.html)。
+逐阶段日志和汇总位于 `smoke/run/{logs,reports}/`；[19 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/local_env_fix_20260924/review/index.html)。
 已删除两个旧共享 workspace 和本机旧缓存环境，测试 clone 也在完成后清理；Git 代码、验证日志与结果保留。
 本轮修复部署依赖，没有更改筛选或 mask 语义策略；物理四机需用户重新提交新入口验收。
 
@@ -42,9 +55,9 @@ SAM3 本身是运行依赖，保留上游源码，不把其内部库误当其他
 - 115 + 65 + 64 条历史实验的 244 个有效观察响应回放：编辑单元解析结果全部一致。
 - 一机 8 H100、四独立 rank，各 2 卡：五类各 4 条重新过两轮筛选，质量 20 PASS，场景 19 PASS / 1 DROP。
   19 条双 PASS 全部打标，19 非空、35 实例、0 解析/运行错误；四 rank 均正常退出。恢复再次完成。
-- 路径：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/pipeline_4rank_verified_20260924/`。
+- 路径：`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/pipeline_4rank_verified_20260924/`。
   `run/logs/` 是各阶段 tqdm，`run/reports/` 是统计，`provenance.json` 记录本次重编号到原始行号的映射。
-- [19 条内嵌画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/pipeline_4rank_verified_20260924/review/index.html)。已逐页查看全部 5 页：
+- [19 条内嵌画廊](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/pipeline_4rank_verified_20260924/review/index.html)。已逐页查看全部 5 页：
   新增鸭子/孔雀、右侧衣服、酒瓶/南瓜/小盆栽、单人替换等表现基本延续原方法；
   `add_00076:27` 树冠过标、`motion change_00020:181` 眼睛/眼镜只出线状 mask、
   `replace_00186:214` 把保留人物也标进来等已知错误仍在。19 个自动 OK 不代表 19 个语义成功。
@@ -52,7 +65,7 @@ SAM3 本身是运行依赖，保留上游源码，不把其内部库误当其他
   增加环境打包与节点本地缓存（SHA256、锁、冲突保护），基础 Python/模型/数据/结果继续共享；复验目录为 `cached_run/`。
   复验四 rank 全部完成：19 非空 mask、35 实例、0 解析/运行错误。
   15 条与首轮 mask 完全一致；4 条观察清单相同、框略有变化，预测间 IoU 0.979–0.996（不是对真值的准确率）。
-  [缓存环境画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/pipeline_4rank_verified_20260924/cached_review/index.html)。
+  [缓存环境画廊](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/pipeline_4rank_verified_20260924/cached_review/index.html)。
 
 下一步：在实际四台 8 卡 worker 验证共享挂载/环境/全量吞吐；mask 质量继续按首轮漏项、局部扩大为宿主、
 稀疏候选三个方向做独立消融。本轮没有启动新的生产全量任务，也没有把单机四 rank 称为物理四机验收。
@@ -64,23 +77,23 @@ SAM3 本身是运行依赖，保留上游源码，不把其内部库误当其他
 
 2026-09-24 整理说明：本文保留迭代历史，早期命令/开关仅描述当时实验，并非当前可执行接口。
 当前代码只保留最终方法，旧实验图片移至
-`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/`，
-本文对应链接已更新。原始数据、筛选结果和各轮 mask 实验目录未删除。清理前完整工作区备份：
-`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/pre_cleanup_worktree.tar.gz`。
+`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/`，
+本文对应链接已更新。原始数据、正式筛选结果和各轮 mask 实验目录未删除；旧实验已归入上述 `iterations/`。清理前完整工作区备份：
+`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/pre_cleanup_worktree.tar.gz`。
 
 ## 2026-09-22：早期 mask 迭代索引
 
 以下是移出主文档的实验记录摘要。运行目录都位于
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit-labeling/`，
+`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/datasets/CrispEdit-2M-difficult-local-edit-labeling/`，
 以双 PASS 小样本验证为主，部分包含筛选跳过对照；未启动当前两阶段筛选后的全量 mask 打标。早期结果使用当时的代码，
 不能当作现行实现的质量结论。
 
 | 运行目录 | 改进或对照 | 当轮结果与结论 |
 | --- | --- | --- |
-| `smoke_20260922` | 双 manifest 严格对齐、跳过占位及 8 卡端到端接入 | 20 条打标、20 条跳过；结构检查通过，但衣服、手臂、彩纸 mask 有明显问题；[选择与汇总](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/two_stage_smoke/validation_summary.json) |
-| `local_mask_final_20260922`、`local_mask_qwen38_20260922` | 非 add 仅 source；修正 crop 复核、局部 SAM；Qwen3.5 与 Qwen3.8 对照 | 各 20 条打标 + 20 跳过，均 19 OK/1 REVIEW；Qwen3.8 睁眼框较好，但衣服、人物定位仍有回退；[图](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/local_region/qwen38/motion.jpg) |
-| `checklist_verified_20260922` | 改为 Qwen3.8 完整变化清单、按对象定位与身份保持 | 100 条打标 + 20 跳过；98 OK/1 REVIEW/1 GROUND_FAIL，0 最终解析错误；灯串/彩纸仍不可靠；[100 条索引](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/checklist/verified/index.json) |
-| `candidate_selection_20260922/verified` | 固定 grounding，只改 SAM 候选与碎片风险判断 | 100 条中 91 OK/8 REVIEW/1 GROUND_FAIL；改善轮胎孔洞、鸟头误分，但自动 OK 不等于语义正确；[对照图](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/candidate_selection/index.html) |
+| `smoke_20260922` | 双 manifest 严格对齐、跳过占位及 8 卡端到端接入 | 20 条打标、20 条跳过；结构检查通过，但衣服、手臂、彩纸 mask 有明显问题；[选择与汇总](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/two_stage_smoke/validation_summary.json) |
+| `local_mask_final_20260922`、`local_mask_qwen38_20260922` | 非 add 仅 source；修正 crop 复核、局部 SAM；Qwen3.5 与 Qwen3.8 对照 | 各 20 条打标 + 20 跳过，均 19 OK/1 REVIEW；Qwen3.8 睁眼框较好，但衣服、人物定位仍有回退；[图](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/local_region/qwen38/motion.jpg) |
+| `checklist_verified_20260922` | 改为 Qwen3.8 完整变化清单、按对象定位与身份保持 | 100 条打标 + 20 跳过；98 OK/1 REVIEW/1 GROUND_FAIL，0 最终解析错误；灯串/彩纸仍不可靠；[100 条索引](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/checklist/verified/index.json) |
+| `candidate_selection_20260922/verified` | 固定 grounding，只改 SAM 候选与碎片风险判断 | 100 条中 91 OK/8 REVIEW/1 GROUND_FAIL；改善轮胎孔洞、鸟头误分，但自动 OK 不等于语义正确；[对照图](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/candidate_selection/index.html) |
 
 随后按对象范围、crop 和附件漏区分步修复，同一固定 100 条 + 20 条跳过对照：
 
@@ -94,7 +107,7 @@ SAM3 本身是运行依赖，保留上游源码，不把其内部库误当其他
 
 最终 99 条非空 mask，20 条跳过正确保留，0 runtime/解析/crop 错误；坐垫一例多恢复
 76,800 px，其余 99 条 mask 逐字节一致。人头和两匹马得到改善，但骑手腿、手臂与灯串仍漏区，
-轮胎范围还出现回退，故继续扩样。[全部 100 条前后对比](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/scope_grounding/index.html)。
+轮胎范围还出现回退，故继续扩样。[全部 100 条前后对比](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/scope_grounding/index.html)。
 
 扩展到 300 条双 PASS + 20 条跳过对照、80 个 shard 后，逐轮记录如下。分母及集合可能不同，
 自动旗标不能横向解释为语义准确率；各目录均含相应 grounding/mask、日志和验证结果。
@@ -120,8 +133,8 @@ SAM3 本身是运行依赖，保留上游源码，不把其内部库误当其他
 独立观察研究目录 `observation_study_20260922` 比较完整双图、附指令与拼接图；附指令容易漏共同变化，
 拼接图产生伪变化，故保留独立双图。`difference_observation_study_20260922` 的额外差异图
 也未显示稳定收益，没有接入现行 pipeline。上述 50 条新 shard 的逐例人工判定在
-[人工复核 JSON](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/expanded/unseen/manual_review.json)，
-[全量画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/expanded/unseen/review/index.html)。
+[人工复核 JSON](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/expanded/unseen/manual_review.json)，
+[全量画廊](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/expanded/unseen/review/index.html)。
 下一优先级由此转向 observation 漏项/错项、编辑对象与局部部位范围、容器内容物，再处理 SAM
 碎孔；2026-09-23 的实验接续下文。历史细节可从这些运行目录、审计和 Git 历史追溯。
 
@@ -136,13 +149,13 @@ SAM 于是漏掉实际编辑对象；grounding 已覆盖完整对象时，SAM �
 用固定 65 条回归集：报告过的 15 条 + 此前 50 条新 shard 样本。另抽取 25 条未曾人工复核的样本，
 每类 5 条；先查看 source/target 并写下期望区域，再运行预测。它们用于发现新失败类型，但因整个
 迭代过程中的样本已被查看，不能视为最终盲测。清单、原图预览和期望标注在
-[`docs_assets/mask_pipeline/edit_units/`](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/)。
+[`docs_assets/mask_pipeline/edit_units/`](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/)。
 
 ## 每轮试验
 
 运行根目录统一为：
 
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-difficult-local-edit-labeling/`
+`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/datasets/CrispEdit-2M-difficult-local-edit-labeling/`
 
 ### 1. 在双图 observation 里直接加入 instruction（65 条）
 
@@ -236,20 +249,20 @@ scope review。失败的鸟头案例不进入该复核。scope patch 仍保留�
 这些是流程旗标，不是 mask 质量通过率。逐图看新增 25 条：13 条大体可用，8 条需修复，4 条
 属于原编辑歧义或 source-only 无法完整表示。失败包括加勺子后 mask 为空、摩托车同色组漏实例、
 肤色只标头部、容器只标表面而漏内容物、换水壶却把人偶整体框住。逐例判断在
-[`validation25_review.json`](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation25_review.json)。
+[`validation25_review.json`](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation25_review.json)。
 
 新增样本 mask 画廊：
-[HTML](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation25/index.html)；15 条报告 case 对照：
-[HTML](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation_reported15/index.html)；此前 50 条对照：
-[HTML](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation_previous50/index.html)。图片均嵌入 HTML。
+[HTML](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation25/index.html)；15 条报告 case 对照：
+[HTML](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation_reported15/index.html)；此前 50 条对照：
+[HTML](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation_previous50/index.html)。图片均嵌入 HTML。
 
 代表性碗修复对照：
 
-![Replace bowl: source/target and before/after mask](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation_details/replace_00570_203.jpg)
+![Replace bowl: source/target and before/after mask](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation_details/replace_00570_203.jpg)
 
 仍有漏内容物的失败例：
 
-![Remaining container omission](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation25/remove_01100_34.jpg)
+![Remaining container omission](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/edit_units/validation25/remove_01100_34.jpg)
 
 ## 容器范围实验后的计划（历史）
 
@@ -316,7 +329,7 @@ vLLM worker，之后 SAM 为 8 个单卡 worker；batch 4，observation 3072 tok
 
 - 90 条固定回归，与 `container_scope_validation_20260923` 对比。
 - 另取 25 条双 PASS 样本，5 类各 5 条，seed=202609231；排除此前样本的整个 shard。
-  先看原图并记录 [预期区域](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25_expected.json)，
+  先看原图并记录 [预期区域](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25_expected.json)，
   再跑预测。新样本用于小规模验证，不是有像素真值的独立测试集。
 - 第一轮结果暴露共同变化遗漏与容器镂空；随后仅修正第一轮 prompt，强调全图比较、实际整物替换
   优先于类型标签、容器与内容物明确分开。第二轮及 SAM 策略保持不变，重跑全部 115 条。
@@ -335,22 +348,22 @@ vLLM worker，之后 SAM 为 8 个单卡 worker；batch 4，observation 3072 tok
 人工看首轮旧 25 条：12 大体可用、9 需修复、4 编辑歧义/source-only 限制；基线为 13/8/4。
 勺子和肥皂漏标改善，但后墙、警察脸部、编织水果碗出现退步，不能把自动 OK 增多当成总体质量提高。
 首轮新 25 条：13 大体可用、10 需修复、2 原图变化不明确。逐条判断：
-[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/previous25_review_initial.json)、
-[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25_review_initial.json)。
+[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/previous25_review_initial.json)、
+[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25_review_initial.json)。
 
-首轮图：[90 条前后对照](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/comparison/index.html)、
-[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/previous25/index.html)、
-[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25/index.html)。HTML 均内嵌图片。
+首轮图：[90 条前后对照](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/comparison/index.html)、
+[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/previous25/index.html)、
+[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25/index.html)。HTML 均内嵌图片。
 
 强化完整范围一轮：旧 25 条为 15 大体可用/6 需修复/4 歧义；新 25 条为 14/9/2。
 找回后墙、警察脸部、编织碗内容物，但 `color_00530:105` 和 `motion change_00057:138`
 扩大成整人，`remove_01360:184` 又漏了马，`color_00469:119` 右椅靠垫再次镂空。
 这些退步未被自动 OK 识别。记录与图：
-[90 条对照](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/complete_comparison/index.html)、
-[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/complete_previous25/index.html)、
-[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/complete_fresh25/index.html)、
-[旧样本逐例评价](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/previous25_review_complete.json)、
-[新样本逐例评价](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25_review_complete.json)。
+[90 条对照](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/complete_comparison/index.html)、
+[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/complete_previous25/index.html)、
+[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/complete_fresh25/index.html)、
+[旧样本逐例评价](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/previous25_review_complete.json)、
+[新样本逐例评价](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25_review_complete.json)。
 
 这一轮实测 260 次 MLLM 请求（115 条），其中旧 90 条 208 次，对比基线至少 403 次减少至少
 48.4%。含 30 次仅为补外层 JSON 对象的 observation 重试。随后解析器兼容**完整**事件数组，
@@ -367,7 +380,7 @@ vLLM worker，之后 SAM 为 8 个单卡 worker；batch 4，observation 3072 tok
 `instruction_units_scoped_20260923` 已于 2026-09-23 10:57 UTC 完成。115 条全部使用 Qwen3.8-27B，
 0 运行/最终解析错误、0 格式重试；113 个非空 mask、187 个实例。共 228 次 MLLM 请求；
 其中固定 90 条为 178 次，比历史至少 403 次减少至少 **55.8%**。只比较调用数，不声称相同倍数的
-吞吐提升。[机器检查汇总](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_validation_summary.json)。
+吞吐提升。[机器检查汇总](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_validation_summary.json)。
 
 人工逐图检查同一旧 25 条与新增 25 条，另查看用户此前点名的重点案例。50 条成组审阅结果：
 
@@ -381,16 +394,16 @@ vLLM worker，之后 SAM 为 8 个单卡 worker；batch 4，observation 3072 tok
 这是无像素 GT 的定性审阅，不是全数据准确率。**最后一轮没有优于中间轮或历史基线**，不能
 因为 109/115 自动 OK 就验收。当前代码保留用于继续研究，不覆盖历史产物；未启动全量。
 
-当前逐例评价：[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/previous25_review_scoped.json)、
-[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25_review_scoped.json)。
-可视化：[90 条历史基线对照](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_comparison/index.html)、
-[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/index.html)、
-[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_fresh25/index.html)。均内嵌图片。
+当前逐例评价：[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/previous25_review_scoped.json)、
+[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/fresh25_review_scoped.json)。
+可视化：[90 条历史基线对照](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_comparison/index.html)、
+[旧 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/index.html)、
+[新 25 条](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_fresh25/index.html)。均内嵌图片。
 
 有改善或保住的案例：鸟头与颈部覆盖更完整；骑手和马分别列出后恢复完整覆盖；椅子靠垫不再镂空；
 两件共同变白的衬衫均保留。以下鸟头图按 Source / Target / 历史 / 当前 / 两侧二值图排列：
 
-![鸟头与颈部对照](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_details/replace_00924_214.jpg)
+![鸟头与颈部对照](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_details/replace_00924_214.jpg)
 
 仍失败的案例及定位：
 
@@ -404,7 +417,7 @@ vLLM worker，之后 SAM 为 8 个单卡 worker；batch 4，observation 3072 tok
 
 失败例（碗有框、内容物却未覆盖）：
 
-![仍失败的编织水果碗](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/remove_01000_197.jpg)
+![仍失败的编织水果碗](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/remove_01000_197.jpg)
 
 下一步不继续只堆叠通用 prompt：优先为“一个 ref 混多个独立概念”增加单元级检查与有条件的
 重拆分，尤其区分新增物与不变的承载物；再对局部部位检查 text 候选与 PVS/联合候选是否扩大到
@@ -477,15 +490,15 @@ SHA-256 未变，修改 shard 的其他行逐值未变，六个修改产物的�
 
 代表图（Source / Target / mask overlay / binary）：
 
-![局部新增被扩大到整个罐子](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/add_00005_57.jpg)
+![局部新增被扩大到整个罐子](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/add_00005_57.jpg)
 
-![局部皮肤过标与漏标并存](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/color_00530_105.jpg)
+![局部皮肤过标与漏标并存](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/color_00530_105.jpg)
 
 ### 50 条审阅中全部 21 条待修案例
 
 以下按主要现象分组，个别案例同时有多种原因；每条原图、mask 和短评见
-[旧 25 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/index.html)与
-[新 25 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_fresh25/index.html)。编号均为原 parquet 行号。
+[旧 25 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_previous25/index.html)与
+[新 25 条画廊](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/repo_cleanup_20260924/docs_assets/mask_pipeline/instruction_units/scoped_fresh25/index.html)。编号均为原 parquet 行号。
 
 | 现象 | 案例（省略 `.parquet`） |
 | --- | --- |
@@ -522,9 +535,9 @@ SHA-256 未变，修改 shard 的其他行逐值未变，六个修改产物的�
 motion-change shard，color 只有 6 条可选）。使用当前 Qwen3.8-27B 双轮定位 + 8 卡 SAM3 打标，
 64/64 完成，结构校验 OK 60、MASK_REVIEW 4、非空 mask 62，解析与运行错误均为 0。
 
-[完整源图/目标图/mask 画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/mask_newdownload64_20260923/review/index.html)、
-[逐例复核报告](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/mask_newdownload64_20260923/review_findings.md)、
-[运行日志](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/mask_newdownload64_20260923/pipeline.log)。
+[完整源图/目标图/mask 画廊](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/mask_newdownload64_20260923/review/index.html)、
+[逐例复核报告](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/mask_newdownload64_20260923/review_findings.md)、
+[运行日志](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/mask_newdownload64_20260923/pipeline.log)。
 图例中 `remove_00774:49`、`remove_00145:96` 等孤立或成组实体定位较好；但 `add_00248:46`
 奶酪与 `add_00777:174` 纸屑为空 mask，`add_01105:91` 呼啦圈定位错误，`color_01635:254`
 漏掉紫色大写 S，`color_01635:179` 漏掉右容器，`remove_00774:67` 漏掉第二棵树。
@@ -537,9 +550,9 @@ motion-change shard，color 只有 6 条可选）。使用当前 Qwen3.8-27B 双
 65 条：add、color、motion change、remove、replace 各 13 条。使用相同当前流程打标，65/65 完成；
 结构校验 OK 63、MASK_REVIEW 1、GROUND_FAIL 1，64 条非空，107 个实例 mask，解析与运行错误为 0。
 
-[65 条完整画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/mask_fresh65_doublepass_20260923/review/index.html)、
-[目视复核及逐例原因](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/mask_fresh65_doublepass_20260923/review_findings.md)、
-[运行日志](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/CrispEdit/mask_fresh65_doublepass_20260923/pipeline.log)。
+[65 条完整画廊](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/mask_fresh65_doublepass_20260923/review/index.html)、
+[目视复核及逐例原因](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/mask_fresh65_doublepass_20260923/review_findings.md)、
+[运行日志](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/iterations/experiments/mask_fresh65_doublepass_20260923/pipeline.log)。
 全部 17 页已检查。`add_00758:10` 三只小鸭、`color_00035:227` 两组义肢、`remove_00869:28`
 多人移除等基本合理；但自动 OK 中仍有 `add_00076:27` 树冠过标、`color_01425:123` 新娘裙漏标、
 `replace_00186:214` 保留人物被误标等问题。此组才是用户所指的“未做过 mask 的双 PASS 样本”；

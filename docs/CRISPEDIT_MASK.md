@@ -13,7 +13,7 @@
 
 ## 正式产物路径
 
-统一根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/`。
+统一根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/`。旧版和调试实验统一存于 `iterations/`，完整索引见 [迭代记录](CRISPEDIT_MASK_ITERATION.md#迭代产物路径索引)。
 
 | 内容 | 根目录下路径 | 说明 |
 | --- | --- | --- |
