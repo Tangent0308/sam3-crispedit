@@ -23,6 +23,9 @@ dataset mask into one `add`, one `replace`, and one `attribute` case, then uses
 the generic mask planner and the same Qwen-Image-2.1 editor. Its run root is
 `.../experiments/SAMTok_Derived_Edit_Labeling/four_node/<run-id>/` and its input
 manifest is under `data/add_replace_attribute/`; it never writes `remove/`.
+The complete Arnold clone/install/start command, including resume variables and
+log locations, is documented in section 2.3 of
+`docs/SAMTOK_LABELING_四机运行指南.md`.
 
 For the detailed Chinese design document, including the task taxonomy,
 instruction-generation safeguards, per-case manual review policy, and the
