@@ -17,7 +17,7 @@ from scaleedit.distributed import atomic_json
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run-dir', type=Path, required=True)
-    parser.add_argument('--source-dir', type=Path, default=Path('/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k'))
+    parser.add_argument('--source-dir', type=Path, default=Path('/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-source'))
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--attempt', default='initial')
     args = parser.parse_args()

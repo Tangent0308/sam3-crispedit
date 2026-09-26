@@ -34,7 +34,7 @@
 
 | 内容 | 路径与规模 |
 | --- | --- |
-| 源数据 | `BASE/datasets/ScaleEdit-filtered-balanced-final-task-100k`：1,155 shard（352 个 `part`、803 个 `expand`）/ 299,633 条，约 137GB；其中 28,414 条全局类确定性 DROP，约 271,219 条进入质量 MLLM；`100k` 是历史目录名 |
+| 源数据 | `BASE/datasets/ScaleEdit-filtered-source`：1,155 shard（352 个 `part`、803 个 `expand`）/ 299,633 条，约 137GB；其中 28,414 条全局类确定性 DROP，约 271,219 条进入质量 MLLM |
 | 下载记录 | `BASE/experiments/ScaleEdit/download_200k_20260924`：新增 803 shard / 199,633 条 |
 | Qwen | `BASE/models/pretrained_models/Qwen3.8-27B` |
 | SAM3 | `/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt` |
@@ -66,7 +66,7 @@ RUN=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/download_200k_
 mkdir -p "$RUN"
 HF_HUB_DOWNLOAD_TIMEOUT=120 HF_HUB_ETAG_TIMEOUT=60 HF_XET_NUM_CONCURRENT_RANGE_GETS=8 \
 .venv-scaleedit-current/bin/python -u scripts/download_scaleedit_filtered.py \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-source \
   --run-dir "$RUN" --cache-dir /opt/tiger/tanyue/.cache/scaleedit-expand-next \
   --run-id next --target-rows 200000 --workers 4 --image-workers 8 --index-workers 8 \
   --max-download-gb 800 --cleanup-cache --finalize-within-percent 1 \
@@ -89,7 +89,7 @@ tail -F /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_s
 ```bash
 RUN=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/validation_rerun
 .venv-scaleedit-current/bin/python scripts/select_scaleedit_validation.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-source \
   --output "$RUN/selection.json"
 bash scripts/run_scaleedit_pipeline.sh "$RUN" "$RUN/selection.json"
 ```
@@ -123,7 +123,7 @@ bash scripts/run_scaleedit_pipeline.sh "$RUN" "$RUN/selection.json"
 
 ```bash
 .venv-scaleedit-current/bin/python scripts/review_scaleedit_pipeline.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-source \
   --run-dir /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/local_edit_current_20260924 \
   --filter-run-dir /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/local_edit_validation_20260924 \
   --selection-file /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/local_edit_validation_20260924/selection.json
