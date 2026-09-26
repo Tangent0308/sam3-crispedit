@@ -21,6 +21,27 @@ from crispedit.common import supported_shard
 from crispedit.mask.selection import apply_scene, load_filters, SCENE_FIELDS
 
 
+def recoverable_ground_parse_error(ground, mask):
+    """Return whether a grounding parse error is safely reviewable row-wise."""
+
+    return (
+        not ground.get("ground_parse_ok", False)
+        and ground.get("grounding_status") == "PARSE_ERROR"
+        and ground.get("qc_flag") == "GROUND_FAIL"
+        and mask.get("qc_flag") == "GROUND_FAIL"
+    )
+
+
+def recoverable_observation_parse_error(observation, mask):
+    """An unparsed observation is recoverable only when no mask was promoted."""
+
+    return (
+        bool(observation)
+        and not observation.get("parse_ok", False)
+        and mask.get("qc_flag") == "GROUND_FAIL"
+    )
+
+
 def validate(args):
     selection = load_selection(args.selection_file)
     names = set(selection) if selection is not None else {
@@ -65,15 +86,10 @@ def validate(args):
                     raise ValueError(f"selected row was skipped: {name}:{index}")
                 ground_parse_error = not g["ground_parse_ok"]
                 counts["ground_parse_errors"] += ground_parse_error
-                recoverable_ground_parse_error = (
-                    ground_parse_error
-                    and g.get("grounding_status") == "PARSE_ERROR"
-                    and g.get("qc_flag") == "GROUND_FAIL"
-                    and m.get("qc_flag") == "GROUND_FAIL"
-                )
-                counts["recoverable_ground_parse_errors"] += recoverable_ground_parse_error
+                ground_parse_recoverable = recoverable_ground_parse_error(g, m)
+                counts["recoverable_ground_parse_errors"] += ground_parse_recoverable
                 counts["nonrecoverable_ground_parse_errors"] += (
-                    ground_parse_error and not recoverable_ground_parse_error
+                    ground_parse_error and not ground_parse_recoverable
                 )
                 payload = json.loads(g["ground_json"])
                 observation = payload.get("observation")
@@ -82,12 +98,10 @@ def validate(args):
                     raise ValueError(f'no-edit observation produced a successful mask: {name}:{index}')
                 observation_parse_error = bool(observation) and not observation.get("parse_ok", False)
                 counts["observation_parse_errors"] += observation_parse_error
-                recoverable_observation_parse_error = (
-                    observation_parse_error and m.get("qc_flag") == "GROUND_FAIL"
-                )
-                counts["recoverable_observation_parse_errors"] += recoverable_observation_parse_error
+                observation_parse_recoverable = recoverable_observation_parse_error(observation, m)
+                counts["recoverable_observation_parse_errors"] += observation_parse_recoverable
                 counts["nonrecoverable_observation_parse_errors"] += (
-                    observation_parse_error and not recoverable_observation_parse_error
+                    observation_parse_error and not observation_parse_recoverable
                 )
                 counts["observation_retries"] += max(0, len((observation or {}).get("attempts", []))-1)
                 scope = (observation or {}).get('scope_review', {})

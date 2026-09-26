@@ -137,10 +137,10 @@ bash scripts/bootstrap_crispedit_4node.sh
 `control/<token>/` 协调目录，质量、场景和 grounding 的完整 shard 会按输入签名复用，
 缺失或不完整的 shard 才会重新推理。
 
-本次 `labeling_4node_crispedit_full_localenv_20260925` 是在上述单行解析错误修复前运行的，
-失败原因是 `color_00003.parquet` 中一行触发了旧版全局校验。该 run 的 `plan.json` 固定了旧代码摘要，
-应按下面的兼容续传命令启动；质量、场景和已完成 grounding 结果会继续复用，不要删除旧的 `work/`
-或正式 prefilter 目录。其他代码变更仍应新建 RUN_ID。
+本次 `labeling_4node_crispedit_full_localenv_20260925` 已完成质量、细粒度、grounding 和 mask，
+但旧版最终校验器把可恢复的单行解析错误当成全局失败。该 run 的 `plan.json` 固定了旧代码摘要，
+应按下面的兼容续传命令启动；质量、场景、grounding 和 mask 结果会继续复用，只重新执行最终校验，
+不要删除旧的 `work/` 或正式 prefilter 目录。其他代码变更仍应新建 RUN_ID。
 
 对于本次已经完成 grounding、但在旧版汇总校验处失败的
 `labeling_4node_crispedit_full_localenv_20260925`，四台机器使用最新
@@ -152,11 +152,11 @@ set -euo pipefail
 
 export CRISPEDIT_RUN_ID="crispedit_full_localenv_20260925"
 export CRISPEDIT_BRANCH="crispedit-labeling"
-export CRISPEDIT_COMMIT="970a64add1b6814974561ec2c4c536a44443f310"
+export CRISPEDIT_COMMIT="af589c53e9b165091395f1dc0da3e1ffa034bba0"
 export CRISPEDIT_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 
 export CRISPEDIT_RESUME=1
-export CRISPEDIT_RESUME_TOKEN="retry_grounding_fix_01"  # 四台相同，每次重试更换
+export CRISPEDIT_RESUME_TOKEN="retry_validate_fix_02"  # 四台相同；不能复用已使用的 token
 export CRISPEDIT_ALLOW_CODE_CHANGE_ON_RESUME=1
 
 : "${ARNOLD_ID:?Arnold must supply node rank}"
@@ -205,9 +205,9 @@ git checkout --detach "$target_commit"
 bash scripts/bootstrap_crispedit_4node.sh
 ```
 
-这个兼容开关只允许当前修复继续旧 plan，仍会检查输入路径、过滤参数、源文件快照和四机配置；
-旧 run 的完整 grounding shard 会被复用，流程会从 grounding 汇总继续并进入 mask。不要把该开关用于
-其他未审查的代码变更。若旧 `work/` 结果不完整，调度器会自动补跑缺失 shard。
+这个兼容开关只允许当前校验兼容修复继续旧 plan，仍会检查输入路径、过滤参数、源文件快照和四机配置；
+旧 run 的完整质量、scene、grounding 和 mask shard 会被复用，流程会直接重新执行最终校验。
+不要把该开关用于其他未审查的代码变更。若旧 `work/` 结果不完整，调度器会自动补跑缺失 shard。
 
 ## 4. 故障修复与验证
 
@@ -229,9 +229,10 @@ bash scripts/bootstrap_crispedit_4node.sh
 
 旧版调度器在 `verify_label_shards` 中把任意 `ground_parse_ok=false` 都提升为全局异常。
 `color_00003.parquet` 的一个模型响应虽然已经被 grounding runner 标为
-`PARSE_ERROR/GROUND_FAIL`，仍因此触发了四个节点的 `Peer failed`。当前实现只把带有
+`PARSE_ERROR/GROUND_FAIL`，仍因此触发了四个节点的 `Peer failed`。当前调度器只把带有
 `runtime_error` 的推理运行时错误视为阶段失败；普通解析失败会继续合并，mask runner 会为该行
-写入空 mask 和 `GROUND_FAIL`，最终校验统计其失败数量。
+写入空 mask 和 `GROUND_FAIL`。最终校验器同步识别 `GROUND_FAIL/PARSE_ERROR`，只统计这些行，
+不再因此返回全局失败；若解析错误出现在 `OK` 行，或存在运行时错误，校验仍会返回非零。
 
 本地验证：`.venv-crispedit/bin/python -m pytest -q tests/test_crispedit_distributed.py`，9 项通过，
 其中包含可恢复解析失败和运行时错误仍会阻断的回归检查。
