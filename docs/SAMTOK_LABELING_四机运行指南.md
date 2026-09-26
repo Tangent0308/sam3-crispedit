@@ -125,6 +125,51 @@ export SAMTOK_LIMIT_SOURCES=0
 bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/launchers/bootstrap_arnold_4node_multitype.sh
 ```
 
+如果共享 `launchers/` 尚未同步，使用下面的完整 Arnold 入口。四个 worker 粘贴同一段；
+每台机器先把当前分支 clone 到本机 bootstrap 目录，再由 bootstrap 为本机 clone 实际运行
+repo、安装环境并启动 pipeline。日志统一写到共享的 experiments run root：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
+export SAMTOK_LIMIT_SOURCES=0
+export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
+export SAMTOK_BRANCH="samtok-derived-edit-labeling"
+export SAMTOK_PIPELINE_MODE=multitype
+export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
+export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
+export SAMTOK_BOOTSTRAP_DIR="/opt/tiger/tanyue/labeling_bootstrap/$SAMTOK_RUN_ID"
+
+if [[ ! -d "$SAMTOK_BOOTSTRAP_DIR/.git" ]]; then
+  mkdir -p "$(dirname "$SAMTOK_BOOTSTRAP_DIR")"
+  git clone --branch "$SAMTOK_BRANCH" --single-branch "$SAMTOK_REPO_URL" "$SAMTOK_BOOTSTRAP_DIR"
+fi
+git -C "$SAMTOK_BOOTSTRAP_DIR" fetch origin "$SAMTOK_BRANCH"
+git -C "$SAMTOK_BOOTSTRAP_DIR" checkout --detach "origin/$SAMTOK_BRANCH"
+exec bash "$SAMTOK_BOOTSTRAP_DIR/scripts/labeling/bootstrap_arnold_4node.sh"
+```
+
+正式全量运行时保持 `SAMTOK_LIMIT_SOURCES=0`。建议先用新的 run ID 设置为 `2` 做四机
+联调；确认四个 node 的环境、规划和编辑日志都正常后，再以新的 run ID 运行全量。三类型
+正式任务不能复用 remove 的 run ID，也不能把 `SAMTOK_DATA_ROOT` 指向 `data/source`。
+
+如果任务中断，使用相同的 `SAMTOK_RUN_ID`，并在四个 worker 同时设置：
+
+```bash
+export SAMTOK_RESUME=1
+export SAMTOK_ATTEMPT_ID="resume-001"   # 每次重启必须使用新的值
+```
+
+续跑会检查原始三类型 manifest、分片和 profile；已完成的 planning、editing、audit case
+会从 checkpoint 继续，错误或不完整的 case 会重新执行。运行日志位置为：
+
+```text
+$SAMTOK_RUN_ROOT/logs/
+$SAMTOK_RUN_ROOT/attempts/<attempt-id>/logs/
+```
+
 该入口的阶段顺序是：正例索引与三类型展开 → 按 source 分片 →
 Qwen3.8-27B 通用 mask-grounding/scope 规划 → 8 卡 Qwen-Image-2.1 编辑 →
 可选的通用二图审核 → 汇总 `results/`。三类原始输入数完全相同；规划拒绝、出图失败和审核
