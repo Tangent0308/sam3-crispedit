@@ -587,15 +587,69 @@ attempts/resume-002/control/finalize.ok.json
 
 本轮配置为 GRES-8k / VER-4k 派生数据，任务类型为`remove`，每个索引到的 source mask 形成一条单 region case，同一 source 的多个 mask 一图多用；空 mask 在规划阶段单独拦截。
 
-| 阶段 | 数量 | 说明 |
-|---|---:|---|
-| 正例 source 图像 | 7,671 | GRES 3,671，VER 4,000 |
-| 计划处理 case | 10,633 | 7,671 张 source 的全部索引 mask |
-| 规划后接受并进入出图 | 9,436 | 四节点均完成编辑 |
-| 规划阶段 no_output | 1,197 | 未进入编辑模型 |
-| 实际生成 edited PNG | 9,436 | 文件全部存在并完成解码 |
-| 审核通过 | **7,990** | 最终可用候选 |
-| 审核失败 | 1,446 | 有 edited 输出，但不进入最终通过清单 |
+| 阶段 | 总数 | GRES | VER | remove | 其他类型 |
+|---|---:|---:|---:|---:|---:|
+| 正例 source 图像 | 7,671 | 3,671 | 4,000 | — | — |
+| 计划处理 case | 10,633 | 5,017 | 5,616 | 10,633 | 0 |
+| 规划后接受并进入出图 | 9,436 | 4,458 | 4,978 | 9,436 | 0 |
+| 规划阶段 `no_output` | 1,197 | 559 | 638 | 1,197 | 0 |
+| 实际生成 edited PNG | 9,436 | 4,458 | 4,978 | 9,436 | 0 |
+| 最终审核通过 | **7,990** | **3,689** | **4,301** | **7,990** | 0 |
+| 最终审核失败 | 1,446 | 769 | 677 | 1,446 | 0 |
+
+本轮正式任务是 **remove-only**：add、replace、attribute 均为 0，不应将本轮统计
+解读为四种编辑类型的均衡实验。GRES/VER 的 source 数量来自正例索引，case 数量则是
+每个 source 的全部 mask 展开后的数量；因此一个 source 可以贡献多条 case。
+
+按来源分别计算，GRES 的规划接受率为 `4,458/5,017=88.86%`，出图后审核通过率为
+`3,689/4,458=82.75%`，相对计划最终通过率为 `3,689/5,017=73.53%`；VER 对应为
+`4,978/5,616=88.64%`、`4,301/4,978=86.40%` 和 `4,301/5,616=76.58%`。
+
+#### 规划阶段 resolution status
+
+| resolution_status | 总数 | GRES | VER |
+|---|---:|---:|---:|
+| `accepted` | 9,436 | 4,458 | 4,978 |
+| `defer_unresolved_keep` | 517 | 219 | 298 |
+| `defer_unresolved_auxiliary` | 339 | 135 | 204 |
+| `defer` | 330 | 199 | 131 |
+| `defer_support_conflict` | 6 | 4 | 2 |
+| `invalid_input_empty_mask` | 1 | 1 | 0 |
+| `invalid_relation_bbox` | 1 | 0 | 1 |
+| `invalid_decision` | 1 | 0 | 1 |
+| `invalid_reconstruction` | 1 | 1 | 0 |
+| `defer_target_point_outside_mask` | 1 | 0 | 1 |
+
+`no_output` 是规划阶段拒绝或无法确定执行关系的结果，不代表进程崩溃；本轮没有
+OOM、CUDA error 或 worker failure。
+
+#### 多实例 source 分布
+
+| 每张 source 的原始 mask 数 | 唯一 source 图像数 | GRES | VER |
+|---:|---:|---:|---:|
+| 1 | 5,244 | 2,370 | 2,874 |
+| 2 | 2,177 | 1,280 | 897 |
+| 3 个及以上 | 250 | 21 | 229 |
+| 合计 | 7,671 | 3,671 | 4,000 |
+
+这说明本轮共有 2,427 张 source 含至少两个实例，生成时会对同一 source 的每个 mask
+分别建立独立 case；`num_masks` 不会把多个区域合并成一次编辑。
+
+#### 审核阶段模型与确定性规则分布
+
+| 项目 | 总数 | GRES | VER |
+|---|---:|---:|---:|
+| 审核输入 | 9,436 | 4,458 | 4,978 |
+| 模型原始 `pass` | 8,037 | 3,693 | 4,344 |
+| 模型原始 `fail` | 1,349 | 745 | 604 |
+| 模型结果未解析 | 50 | 20 | 30 |
+| 最终 `decision=pass` | 7,990 | 3,689 | 4,301 |
+| 最终 `decision=fail` | 1,446 | 769 | 677 |
+| pixel veto 触发 | 214 | 67 | 147 |
+
+其中模型原始 `pass` 中有 47 条被最终规则拒绝（GRES 4 条、VER 43 条）；50 条未解析
+结果也不进入最终通过清单。`model_pass.jsonl` 的 7,990 条应理解为模型和确定性规则
+共同通过，不等同于人工逐图 ground truth。
 
 最终比例为：
 
@@ -604,22 +658,6 @@ attempts/resume-002/control/finalize.ok.json
 出图后审核通过率 = 7,990 /  9,436 = 84.68%
 相对计划最终通过 = 7,990 / 10,633 = 75.14%
 ```
-
-1,197 条`no_output`的规划状态分布如下。这些是规划阶段主动拒绝或无法确定依附关系的 case，不是运行崩溃：
-
-| resolution_status | 数量 |
-|---|---:|
-| `defer_unresolved_keep` | 517 |
-| `defer_unresolved_auxiliary` | 339 |
-| `defer` | 330 |
-| `defer_support_conflict` | 6 |
-| `invalid_input_empty_mask` | 1 |
-| `invalid_relation_bbox` | 1 |
-| `invalid_decision` | 1 |
-| `defer_target_point_outside_mask` | 1 |
-| `invalid_reconstruction` | 1 |
-
-审核的 9,436 条中，最终`audit.jsonl`记录为 7,990 pass / 1,446 fail。审核模型原始结构化判断为 8,037 model pass、1,349 model fail 和 50 条 unparsed；像素局部性规则对其中一部分追加了 veto，因此最终准入以`audit.jsonl`的`decision`为准。
 
 ### 8.3 运行时间与节点状态
 
@@ -697,3 +735,22 @@ canonical run 中的原始画廊仍保存在 `$RUN_ROOT/results/audit_gallery.ht
 5. 按“模型/人工通过、像素误拒、编辑失败、instruction/mask 不匹配”筛选。
 
 20 条样例中，5 条模型与人工均通过，4 条模型视觉判断通过但被像素阈值误拒，8 条存在目标残留或背景质量问题，3 条存在 instruction 与 mask 语义不匹配。HTML 图片已经内嵌，不依赖外部图片路径，适合直接在预览器中打开。
+
+### 8.6 代表性最终通过 case（10 条）
+
+下面直接嵌入 10 条 `model_pass.jsonl` 中的代表性样例，GRES 和 VER 各 5 条，覆盖四个
+节点。每张卡左侧是带原始 mask 轮廓的 BEFORE，右侧是 AFTER；红色轮廓只用于可视化，
+不是输入给编辑模型的红色覆盖。这里的“通过”表示模型审核和确定性规则通过，仍不等同于
+人工逐图 ground truth。
+
+| GRES case | GRES case |
+|---|---|
+| ![000004 GRES](assets/formal_results/formal_pass_01_000004_gres_r5_m0_remove.jpg)<br>`000004_gres_r5_m0_remove`：bottom-left dark sofa/armchair | ![000025 GRES](assets/formal_results/formal_pass_02_000025_gres_r31_m0_remove.jpg)<br>`000025_gres_r31_m0_remove`：frame-truncated white mug |
+| ![000002 GRES](assets/formal_results/formal_pass_03_000002_gres_r2_m0_remove.jpg)<br>`000002_gres_r2_m0_remove`：center standing lamb | ![000008 GRES](assets/formal_results/formal_pass_04_000008_gres_r11_m0_remove.jpg)<br>`000008_gres_r11_m0_remove`：right cat silhouette |
+| ![010631 GRES](assets/formal_results/formal_pass_05_010631_gres_r12334_m0_remove.jpg)<br>`010631_gres_r12334_m0_remove`：left bicycle | — |
+
+| VER case | VER case |
+|---|---|
+| ![000000 VER](assets/formal_results/formal_pass_06_000000_ver_r0_m0_remove.jpg)<br>`000000_ver_r0_m0_remove`：right black tripod | ![000001 VER](assets/formal_results/formal_pass_07_000001_ver_r1_m0_remove.jpg)<br>`000001_ver_r1_m0_remove`：wall-mounted light fixture |
+| ![000010 VER](assets/formal_results/formal_pass_08_000010_ver_r18_m0_remove.jpg)<br>`000010_ver_r18_m0_remove`：green striped barrier pole | ![000003 VER](assets/formal_results/formal_pass_09_000003_ver_r4_m0_remove.jpg)<br>`000003_ver_r4_m0_remove`：walking man on left walkway |
+| ![000018 VER](assets/formal_results/formal_pass_10_000018_ver_r28_m0_remove.jpg)<br>`000018_ver_r28_m0_remove`：airborne soccer player | — |
