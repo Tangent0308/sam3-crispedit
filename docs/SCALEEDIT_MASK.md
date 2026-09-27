@@ -43,7 +43,7 @@
 | 细粒度过滤 | `RUN/scene/{manifest,audit}/`：各 1,155 shard / 265,456 行 |
 | Grounding | `RUN/grounding/`：1,155 shard / 25,664 行 |
 | 最终 mask | `RUN/mask/`：1,155 shard / 25,664 行；PNG、实例 RLE、QC |
-| 合并后的完整数据 | `BASE/scaleedit/`：1,073 个非空 shard / 双 PASS 的 25,664 条 / 约 16GB；源图/目标图、原始字段、两轮过滤审计、grounding、mask 合并到每行；见下文 |
+| 合并后的完整数据 | `BASE/scaleedit_25k/`：1,073 个非空 shard / 双 PASS 的 25,664 条 / 约 16GB；源图/目标图、原始字段、两轮过滤审计、grounding、mask 合并到每行；见下文 |
 | 正式统计与日志 | `RUN/reports/run_manifest.json`、`RUN/{quality,scene,grounding,mask}/run_summary.json`、`RUN/logs/` |
 | 最终 OK 画廊 | `RUN/review_full_300k/index.html`：90 条自动 OK、17 类、450 张内嵌图片；`review_summary.json` 与 `selected_cases.json` 同目录 |
 | 文档联系图 | `docs_assets/scaleedit/full_run_300k/`：六张 JPG、共展示 48 条自动 OK |
@@ -52,9 +52,9 @@
 
 ### 合并后的完整数据
 
-`BASE/scaleedit/shards/*.parquet` 是直接可读的最终合并数据集，每行保留源数据的全部字段（包括 `source_image`、`edited_image`、原始/最终指令、类别和来源），并保留质量过滤、细粒度过滤各自的 manifest 与 audit、grounding、mask 的全部持久化字段。阶段字段以 `quality__`、`quality_audit__`、`scene__`、`scene_audit__`、`grounding__`、`mask__` 为前缀；连接键是 `source_shard` + `row_idx`，不可只依靠 `sample_id` 或过滤后的位置。常用标签为 `mask__mask_png`、`mask__instance_masks`、`mask__qc_flag`、`mask__qc_flags_json`。
+`BASE/scaleedit_25k/shards/*.parquet` 是直接可读的最终合并数据集。目录名中的 `25k` 是数量级约数，实际保留全部 25,664 条双 PASS 记录，其中自动 `OK` 25,085 条。每行保留源数据的全部字段（包括 `source_image`、`edited_image`、原始/最终指令、类别和来源），并保留质量过滤、细粒度过滤各自的 manifest 与 audit、grounding、mask 的全部持久化字段。阶段字段以 `quality__`、`quality_audit__`、`scene__`、`scene_audit__`、`grounding__`、`mask__` 为前缀；连接键是 `source_shard` + `row_idx`，不可只依靠 `sample_id` 或过滤后的位置。常用标签为 `mask__mask_png`、`mask__instance_masks`、`mask__qc_flag`、`mask__qc_flags_json`。
 
-`BASE/scaleedit/dataset_manifest.json` 列出完整 schema、逐 shard 行数、编辑类别与 QC 分布和上游路径；`_common_metadata` 提供 Parquet schema，`COMPLETE` 只在全部对齐及统计检查后写入。保留全部 25,664 条双 PASS 记录，包括 `MASK_REVIEW`、`GROUND_FAIL`；训练时应按 `mask__qc_flag` 选择，不应把自动 `OK` 等同人工验收。无结果的空 mask shard 不生成合并 shard。
+`BASE/scaleedit_25k/dataset_manifest.json` 列出完整 schema、逐 shard 行数、编辑类别与 QC 分布和上游路径；`_common_metadata` 提供 Parquet schema，`COMPLETE` 只在全部对齐及统计检查后写入。合并结果包括 `MASK_REVIEW`、`GROUND_FAIL`；训练时应按 `mask__qc_flag` 选择，不应把自动 `OK` 等同人工验收。无结果的空 mask shard 不生成合并 shard。
 
 合并结果已独立核验：1,073 个文件共 25,664 行、物理 schema 一致；`OK` 25,085、`MASK_REVIEW` 472、`GROUND_FAIL` 107，非空 mask 25,518、实例 35,028，均与四机报告相符。随机抽取 32 个 shard 的记录，源/目标图像字节、原始关键字段、mask PNG、实例 RLE 和 grounding JSON 均与上游逐字节/逐字段一致，图像和 PNG 可解码。
 
@@ -63,7 +63,7 @@
 ```bash
 cd /opt/tiger/tanyue/sam3-crispedit-scaleedit-labeling
 .venv-scaleedit-current/bin/python -u scripts/build_scaleedit_final_dataset.py \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/scaleedit \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/scaleedit_25k \
   --workers 24 --schema-workers 48
 ```
 
