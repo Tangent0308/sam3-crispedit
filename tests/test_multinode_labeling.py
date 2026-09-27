@@ -61,7 +61,14 @@ def test_multitype_audit_coverage_rejects_parse_errors(tmp_path):
     expected = ["a.png", "b.png"]
     valid = {
         "image": "a.png", "quality": "pass",
-        "audit": {"quality": "pass"},
+        "input_fingerprint": "fp-a",
+        "audit": {
+            "quality": "pass", "source_inventory": "source",
+            "edited_inventory": "edited", "reason": "looks correct",
+            "source_mismatch": None, "completion_failure": None,
+            "target_or_count_failure": None, "dependency_failure": None,
+            "preservation_or_artifact_failure": None,
+        },
     }
     invalid = {
         "image": "b.png", "quality": "parse_error", "audit": None,
@@ -72,7 +79,14 @@ def test_multitype_audit_coverage_rejects_parse_errors(tmp_path):
     assert not audit_row_complete(invalid)
     assert not audit_jsonl_cases_complete(path, expected)
     invalid["quality"] = "fail"
-    invalid["audit"] = {"quality": "fail"}
+    invalid["input_fingerprint"] = "fp-b"
+    invalid["audit"] = {
+        "quality": "fail", "source_inventory": "source",
+        "edited_inventory": "edited", "reason": "visible residue",
+        "source_mismatch": None, "completion_failure": "residue",
+        "target_or_count_failure": None, "dependency_failure": None,
+        "preservation_or_artifact_failure": None,
+    }
     write_rows(path, [valid, invalid])
     assert audit_jsonl_cases_complete(path, expected)
 
