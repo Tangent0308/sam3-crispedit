@@ -207,6 +207,11 @@ checkpoint。环境预检现在对这类明确的 transient CUDA 错误使用新
 4 次、间隔 5 秒，并设置 `CUDA_MODULE_LOADING=EAGER`）；缺包、版本错误、import 错误仍会
 立即失败。因而后续续传应使用新的 attempt ID，不能复用已经失败的 `resume-006`。
 
+`resume-007` 在 node1 上连续 4 次预检仍返回 Error 802，未进入 pipeline。当前 SAM
+环境已切换到 `torch==2.13.0+cu129`、`torchvision==0.28.0+cu129`、
+`torchaudio==2.11.0+cu129`，并要求 `torch.version.cuda` 为 `12.9`，与 Arnold 节点的
+驱动环境一致。下次需确认四个 worker 的 CUDA 设备均可用，并使用下面的 `resume-008`。
+
 修复后可直接使用下面这段 Arnold Bash 入口续传当前 run：
 
 ```bash
@@ -214,11 +219,12 @@ checkpoint。环境预检现在对这类明确的 transient CUDA 错误使用新
 set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
-export SAMTOK_ATTEMPT_ID="resume-007"       # resume-001..006 已失败或中断；每次续传都换成新的值
+export SAMTOK_ATTEMPT_ID="resume-008"       # resume-001..007 已失败或中断；每次续传都换成新的值
 export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
+export SAMTOK_EXPECTED_COMMIT="a2687c60539e703ceda69353e78933cb9e87112d"  # cu129 SAM runtime + preflight fixes
 export SAMTOK_PIPELINE_MODE=multitype
 export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
 export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
@@ -239,7 +245,7 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 `planning.node<N>.gpu<G>.log` 区分节点。续传时若某个旧 case 的 checkpoint 不完整或输出
 校验失败，该 case 会重新执行，完整且依赖一致的阶段结果会被复用。当前已有 manifest 中
 `001224_gres_r480_m0_add.png`、`001225_gres_r480_m0_replace.png` 和
-`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-007` 会保留原始 manifest
+`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-008` 会保留原始 manifest
 哈希用于一致性检查，但将这三条记录标记为 `invalid_input_empty_mask` 并从规划分片排除，
 有效规划输入为 31,896 条。
 
