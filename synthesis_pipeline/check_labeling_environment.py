@@ -39,7 +39,7 @@ import torch,cv2,numpy,PIL,pycocotools
 assert sys.version_info[:2]==(3,12),sys.version
 assert torch.cuda.is_available(), 'CUDA unavailable'
 role=sys.argv[1]
-expected={'sam':{'torch':'2.13.0+cu129','torchaudio':'2.11.0+cu129','torchvision':'0.28.0+cu129','transformers':'4.57.6'},
+expected={'sam':{'torch':'2.8.0+cu129','torchaudio':'2.8.0+cu129','torchvision':'0.23.0+cu129','transformers':'4.57.6'},
  'mllm':{'torch':'2.13.0+cu129','vllm':'0.28.0+cu129','transformers':'5.17.0'},
  'editor':{'torch':'2.13.0+cu129','vllm':'0.29.0','transformers':'5.14.1','diffusers':'0.40.0',
            'vllm-omni':'0.29.0rc2.dev265+g44ea27c80'}}
