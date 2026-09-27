@@ -74,6 +74,11 @@ cd "$SAMTOK_REPO_DIR"
 mkdir -p "$SAMTOK_CONTROL_ROOT/reports"
 git rev-parse HEAD > "$SAMTOK_CONTROL_ROOT/reports/checkout.node$ARNOLD_ID.txt"
 if [[ -n "${SAMTOK_EXPECTED_COMMIT:-}" ]]; then
+  # Pinning is useful for reproducibility, but the branch tip may contain
+  # documentation-only commits after the tested runtime.  Fetch the branch
+  # first (the requested commit is normally its ancestor), then actually
+  # checkout the requested commit before validating it.
+  git checkout --detach "$SAMTOK_EXPECTED_COMMIT"
   [[ "$(git rev-parse HEAD)" == "$SAMTOK_EXPECTED_COMMIT" ]] || { echo 'Unexpected branch revision' >&2; exit 1; }
 fi
 python3 -m pip install --user --index-url "${SAMTOK_PACKAGE_INDEX:-https://bytedpypi.byted.org/simple/}" 'uv==0.11.32'
