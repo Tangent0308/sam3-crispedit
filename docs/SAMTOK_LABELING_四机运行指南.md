@@ -211,7 +211,20 @@ checkpoint。环境预检现在对这类明确的 transient CUDA 错误使用新
 环境已切换到 `torch==2.8.0+cu129`、`torchvision==0.23.0+cu129`、
 `torchaudio==2.8.0+cu129`，并要求 `torch.version.cuda` 为 `12.9`，与 Arnold 节点的
 驱动环境一致。`resume-008` 在 clone 后校验旧的 branch tip 时提前退出，未进入环境预检；
-bootstrap 现已支持先 checkout 指定的固定 commit。下次使用下面的 `resume-009`。
+bootstrap 现已支持先 checkout 指定的固定 commit。`resume-009` 已经完成全部编辑，
+但三类型审核入口把 27B 权重传给了 `qwen8b-vllm` 别名。Qwen3.8 的默认 thinking
+没有关闭，而审核输出上限仍为 384 tokens，结果是审核回复停在分析文字中，全部被记录为
+`parse_error`；node3 在最终汇总时又因 `audit=null` 调用 `.get()` 退出。出图文件和规划
+文件没有损坏，无需重新出图。
+
+当前修复已推送到 commit `18325eae623bfeed72e500a6094fcaf8af9dcf37`：审核固定使用
+`qwen38-vllm`（官方 Qwen3.8 chat template 的 `enable_thinking=False`），默认输出上限
+提高到 1024 tokens；恢复时只有 `quality` 为 pass/fail 且 `audit.quality` 有效的记录才会
+复用，旧 `parse_error` 会重新调用模型；汇总对空 audit 安全处理。四机 MLLM 锁定环境的
+真实 H100/cu129 单 case 和 8 case 混合批次均已返回完整 JSON，8 case（add 3、replace 2、
+attribute 3）全部可解析。
+
+因此下一次使用新的 `resume-010`，让审核从头重算；规划和 20,637 张已有编辑图继续复用。
 
 修复后可直接使用下面这段 Arnold Bash 入口续传当前 run：
 
@@ -220,12 +233,12 @@ bootstrap 现已支持先 checkout 指定的固定 commit。下次使用下面�
 set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
-export SAMTOK_ATTEMPT_ID="resume-009"       # resume-001..008 已失败或中断；每次续传都换成新的值
+export SAMTOK_ATTEMPT_ID="resume-010"       # resume-009 的审核为 parse_error，必须重新审核
 export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
-export SAMTOK_EXPECTED_COMMIT="bc887d975c29702f723c4f262746579981ed60c8"  # cu129 SAM + xFormers-compatible runtime
+export SAMTOK_EXPECTED_COMMIT="18325eae623bfeed72e500a6094fcaf8af9dcf37"  # audit fix + cu129 runtime
 export SAMTOK_PIPELINE_MODE=multitype
 export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
 export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
@@ -246,7 +259,7 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 `planning.node<N>.gpu<G>.log` 区分节点。续传时若某个旧 case 的 checkpoint 不完整或输出
 校验失败，该 case 会重新执行，完整且依赖一致的阶段结果会被复用。当前已有 manifest 中
 `001224_gres_r480_m0_add.png`、`001225_gres_r480_m0_replace.png` 和
-`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-009` 会保留原始 manifest
+`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-010` 会保留原始 manifest
 哈希用于一致性检查，但将这三条记录标记为 `invalid_input_empty_mask` 并从规划分片排除，
 有效规划输入为 31,896 条。
 
