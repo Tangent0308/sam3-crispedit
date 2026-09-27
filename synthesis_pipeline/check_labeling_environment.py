@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 
 from synthesis_pipeline.run_multinode_labeling import atomic
 
@@ -67,20 +68,75 @@ print('ENV_JSON='+json.dumps(dict(python=sys.version.split()[0],packages={n:m.ve
 '''
 
 
+TRANSIENT_CUDA_MARKERS = (
+    "error 802",
+    "system not yet initialized",
+    "cuda initialization",
+    "cuda unavailable",
+)
+
+
+def _transient_cuda_failure(output: str) -> bool:
+    text = str(output).lower()
+    return any(marker in text for marker in TRANSIENT_CUDA_MARKERS)
+
+
+def run_probe_with_retry(python, role, env, *, retries=3, delay_seconds=5):
+    """Run one role probe, retrying only transient CUDA initialization failures.
+
+    Arnold can expose a worker before its CUDA driver context is ready.  A fresh
+    interpreter is intentional here: it clears the failed CUDA initialization
+    state without changing package or model configuration.  Package/import
+    errors still fail immediately, so a genuinely broken environment is never
+    hidden by retries.
+    """
+    attempts = max(1, int(retries))
+    last = None
+    for attempt in range(1, attempts + 1):
+        last = subprocess.run(
+            [python, '-c', PROBE, role],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        print(last.stdout, flush=True)
+        if last.returncode == 0:
+            return last
+        if not _transient_cuda_failure(last.stdout) or attempt == attempts:
+            break
+        print(
+            f'{role} probe saw transient CUDA initialization failure '
+            f'({attempt}/{attempts}); retrying in {delay_seconds}s',
+            flush=True,
+        )
+        time.sleep(max(0, float(delay_seconds)))
+    raise RuntimeError(
+        f'{role} environment check failed after {attempts} attempt(s):\n'
+        f'{last.stdout if last is not None else "no probe output"}'
+    )
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args(); reports={}
+    retries = int(os.environ.get('SAMTOK_ENV_PROBE_RETRIES', '3'))
+    delay = float(os.environ.get('SAMTOK_ENV_PROBE_DELAY', '5'))
     for role,key in [('sam','SAM'),('mllm','MLLM'),('editor','EDITOR')]:
         python=os.environ[f'SAMTOK_{key}_PYTHON']
         env=os.environ.copy()
+        # Force eager module loading for the preflight subprocess only.  This
+        # makes a driver readiness race visible/retryable before later workers
+        # start model processes; it does not alter the editing runtime.
+        env.setdefault('CUDA_MODULE_LOADING', 'EAGER')
         if role=='editor':
             site=Path(python).parent.parent/'lib/python3.12/site-packages/nvidia'
             env['LD_LIBRARY_PATH']=':'.join([str(site/'cu13/lib'),str(site/'cuda_runtime/lib'),env.get('LD_LIBRARY_PATH','')])
             env['DIFFUSION_ATTENTION_BACKEND']='TORCH_SDPA'
-        proc=subprocess.run([python,'-c',PROBE,role],env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-        print(proc.stdout,flush=True)
-        if proc.returncode:raise RuntimeError(f'{role} environment check failed')
+        proc = run_probe_with_retry(
+            python, role, env, retries=retries, delay_seconds=delay,
+        )
         reports[role]=json.loads(next(s.removeprefix('ENV_JSON=') for s in proc.stdout.splitlines() if s.startswith('ENV_JSON=')))
     atomic(a.out,reports)
 
