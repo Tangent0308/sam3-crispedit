@@ -30,7 +30,7 @@
 
 ## 3. 路径
 
-以下 `BASE=/mnt/bn/strategy-mllm-train/user/tanyue`。
+以下 `BASE=/mnt/bn/strategy-mllm-train/user/tanyue`，`RUN=BASE/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926`。
 
 | 内容 | 路径与规模 |
 | --- | --- |
@@ -38,12 +38,36 @@
 | 下载记录 | `BASE/experiments/ScaleEdit/download_200k_20260924`：新增 803 shard / 199,633 条 |
 | Qwen | `BASE/models/pretrained_models/Qwen3.8-27B` |
 | SAM3 | `/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt` |
-| 512 对开发集、两轮过滤 | `BASE/experiments/ScaleEdit/local_edit_validation_20260924` |
-| 当前 66 条 grounding/mask | `BASE/experiments/ScaleEdit/local_edit_current_20260924` |
-| 代表画廊 | 当前结果下 `review/index.html` 与三个 JPG 联系图 |
-| 整理后四 rank 实测 | `BASE/experiments/ScaleEdit/labeling_4node_smoke_20260925` |
+| 正式四机运行 | `RUN/`：`plan.json`、四阶段 plan、`selections/`、`work/`、`control/`、`logs/`、`reports/` |
+| 质量过滤 | `RUN/quality/{manifest,audit}/`：各 1,155 shard / 299,633 行 |
+| 细粒度过滤 | `RUN/scene/{manifest,audit}/`：各 1,155 shard / 265,456 行 |
+| Grounding | `RUN/grounding/`：1,155 shard / 25,664 行 |
+| 最终 mask | `RUN/mask/`：1,155 shard / 25,664 行；PNG、实例 RLE、QC |
+| 合并后的完整数据 | `BASE/scaleedit/`：1,073 个非空 shard / 双 PASS 的 25,664 条 / 约 16GB；源图/目标图、原始字段、两轮过滤审计、grounding、mask 合并到每行；见下文 |
+| 正式统计与日志 | `RUN/reports/run_manifest.json`、`RUN/{quality,scene,grounding,mask}/run_summary.json`、`RUN/logs/` |
+| 最终 OK 画廊 | `RUN/review_full_300k/index.html`：90 条自动 OK、17 类、450 张内嵌图片；`review_summary.json` 与 `selected_cases.json` 同目录 |
+| 文档联系图 | `docs_assets/scaleedit/full_run_300k/`：六张 JPG、共展示 48 条自动 OK |
 
-常规完整运行输出 `RUN/{quality,scene,grounding,mask}/`，各有 `run_summary.json`；日志在 `RUN/logs/`。开发集当前 mask 复用初测的两轮过滤，因此位于不同根目录。
+各阶段通过源 shard 名与 `row_idx` 连接，不按稀疏结果的行位置连接。开发集和早期试验路径见[开发记录](SCALEEDIT_DEVELOPMENT.md)。
+
+### 合并后的完整数据
+
+`BASE/scaleedit/shards/*.parquet` 是直接可读的最终合并数据集，每行保留源数据的全部字段（包括 `source_image`、`edited_image`、原始/最终指令、类别和来源），并保留质量过滤、细粒度过滤各自的 manifest 与 audit、grounding、mask 的全部持久化字段。阶段字段以 `quality__`、`quality_audit__`、`scene__`、`scene_audit__`、`grounding__`、`mask__` 为前缀；连接键是 `source_shard` + `row_idx`，不可只依靠 `sample_id` 或过滤后的位置。常用标签为 `mask__mask_png`、`mask__instance_masks`、`mask__qc_flag`、`mask__qc_flags_json`。
+
+`BASE/scaleedit/dataset_manifest.json` 列出完整 schema、逐 shard 行数、编辑类别与 QC 分布和上游路径；`_common_metadata` 提供 Parquet schema，`COMPLETE` 只在全部对齐及统计检查后写入。保留全部 25,664 条双 PASS 记录，包括 `MASK_REVIEW`、`GROUND_FAIL`；训练时应按 `mask__qc_flag` 选择，不应把自动 `OK` 等同人工验收。无结果的空 mask shard 不生成合并 shard。
+
+合并结果已独立核验：1,073 个文件共 25,664 行、物理 schema 一致；`OK` 25,085、`MASK_REVIEW` 472、`GROUND_FAIL` 107，非空 mask 25,518、实例 35,028，均与四机报告相符。随机抽取 32 个 shard 的记录，源/目标图像字节、原始关键字段、mask PNG、实例 RLE 和 grounding JSON 均与上游逐字节/逐字段一致，图像和 PNG 可解码。
+
+重建命令（输出目录必须不存在；默认 24 个 shard 并行 worker、48 个 schema 检查 worker）：
+
+```bash
+cd /opt/tiger/tanyue/sam3-crispedit-scaleedit-labeling
+.venv-scaleedit-current/bin/python -u scripts/build_scaleedit_final_dataset.py \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/scaleedit \
+  --workers 24 --schema-workers 48
+```
+
+脚本写到同级临时目录，核对最终行数和 QC 统计后再原子发布；已有正式目录不会被覆盖。
 
 ## 4. 安装与下载
 
@@ -97,36 +121,51 @@ bash scripts/run_scaleedit_pipeline.sh "$RUN" "$RUN/selection.json"
 独立阶段：`.venv-scaleedit-current/bin/python scripts/run_scaleedit_pipeline.py --help`。
 `SCALEEDIT_SOURCE`、`SCALEEDIT_DEVICES`、`SCALEEDIT_GROUND_TP` 可覆盖路径/卡数；`SCALEEDIT_FILTER_RUN=/path/to/completed/filter/run` 可复用两轮结果，仅重做 grounding/mask。
 
-## 6. 当前结果与可视化
+## 6. 正式四机结果与可视化
 
-固定开发集 512 对、32 shard，旧/新各半且富集指代词，不是总体留存率估计。
+四台机器各 8 卡，已于 2026-09-27 09:05 UTC 完成。四节点都记录 `complete`，`control/initial/complete.ok` 已写入，没有 `.failed` 标记；每阶段 1,155 个 shard。完整统计见[运行报告](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926/reports/run_manifest.json)。
 
-| 阶段 | 实际输入 | 当前结果 |
-| --- | ---: | --- |
-| 质量 | 512 | 380 PASS / 132 DROP；含116全局类、15质量问题、1不可解码旧图 |
-| 细粒度 | 380 | 66 PASS / 314 DROP |
-| 观察与定位 | 66 | 66技术OK；93单元（source对象67、target对象15、source文字11） |
-| Mask | 66 | 66技术OK；PNG/RLE/双PASS对齐校验 `errors=[]` |
+| 阶段 | 输入 | 结果 | 逐条错误记录 |
+| --- | ---: | --- | ---: |
+| 质量过滤 | 299,633 | PASS 265,456；DROP 34,177 | 19 |
+| 细粒度过滤 | 265,456 | PASS 25,664；DROP 239,792 | 2 |
+| Grounding | 25,664 | OK 25,553；MASK_REVIEW 4；GROUND_FAIL 107 | 107 |
+| Mask | 25,664 | OK 25,085；MASK_REVIEW 472；GROUND_FAIL 107 | 107 |
 
-2026-09-25 整理后真实四rank/8卡完整回归：20→15→10，10非空mask/26实例，0执行错误；恢复时84个Parquet完全复用。92项CPU测试通过。新实跑[画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_smoke_20260925/review/index.html)与[运行报告](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_smoke_20260925/reports/run_manifest.json)；四台物理机验证边界见四机指南。
+最终 mask 中 25,518 条非空，共 35,028 个实例。自动 `OK` 最多的类别是 `object_addition` 6,023、`object_removal` 5,695、`object_replacement` 2,951、`color_change` 2,517、`action_editing` 2,251 和 `material_change` 2,172。107 条 `GROUND_FAIL` 中，84 条属于四种文字编辑类别。`OK` 是自动 QC（占最终行的 97.74%），不等于人工语义准确率；错误行与待复核行保留在结果中，不能直接作为已验收训练标签。
 
-质量/scene 初测耗时 12m30s/3m36s，当前 SAM3 实跑1m48s；包含启动，不代表全量稳态速度。当前mask从保存的MLLM回答修复解析后得到，开发记录保留来源。
-人工复核15条语义质量DROP、20条质量PASS、全部66条scene PASS和mask、32条scene DROP：质量轮总体可靠；scene存在补写指代和简单锚点新增误保留；mask有灯笼漏分、寺庙碎裂/外溢两例明确失败，另有树冠/衣物等边界案例。
+[正式结果 HTML 画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926/review_full_300k/index.html)分层抽取 90 条最终自动 `OK`（17 类，包含多实例），展示 source、target、grounding、source 尺寸上的 mask overlay 和 binary mask；450 张图片都内嵌在单个 HTML 中，可直接 preview。抽样键与类别分布见同目录的 `selected_cases.json` 和 `review_summary.json`。以下先展示四条单独案例，再用六张联系图展示其中 48 条：
 
-[代表画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/local_edit_current_20260924/review/index.html)：质量5 KEEP+5 DROP；scene 5典型PASS+2可疑PASS+5 DROP；mask 8正常+2失败。
+![在多个陶器中新增蓝色花瓶](../docs_assets/scaleedit/full_run_300k/highlight_added_vase.jpg)
 
-![质量筛选代表案例](../docs_assets/scaleedit/local_edit/quality_prefilter.jpg)
-![细粒度筛选代表案例](../docs_assets/scaleedit/local_edit/fine_grained_prefilter.jpg)
-![Mask代表案例](../docs_assets/scaleedit/local_edit/mask_examples.jpg)
+![从街上多人中移除指定人物](../docs_assets/scaleedit/full_run_300k/highlight_removed_person.jpg)
 
-重新验证并生成画廊（不调用模型）：
+![选择试管前排瓶盖并改色](../docs_assets/scaleedit/full_run_300k/highlight_selected_caps.jpg)
+
+![在多个文字区域中定位并替换TOKYO](../docs_assets/scaleedit/full_run_300k/highlight_localized_text.jpg)
+
+![新增与移除：8条自动OK](../docs_assets/scaleedit/full_run_300k/add_remove.jpg)
+
+![替换与颜色：8条自动OK](../docs_assets/scaleedit/full_run_300k/replace_color.jpg)
+
+![动作与材质：8条自动OK](../docs_assets/scaleedit/full_run_300k/action_material.jpg)
+
+![局部文字：8条自动OK](../docs_assets/scaleedit/full_run_300k/text.jpg)
+
+![组合编辑与推理：8条自动OK](../docs_assets/scaleedit/full_run_300k/composition_reasoning.jpg)
+
+![其他局部编辑：8条自动OK](../docs_assets/scaleedit/full_run_300k/other_local.jpg)
+
+目视检查这些联系图时，新增花瓶 `expand-20260924-00511.parquet:144`、移除人 `expand-20260924-00427.parquet:215`、多实例颜色修改 `part-00307.parquet:435` 等定位符合指令；也发现自动 `OK` 的语义漏检：`part-00169.parquet:41` 的洞扩大却 mask 了整个圆盘，`part-00006.parquet:133` 的底座裂纹却 mask 了整个花瓶，`part-00010.parquet:208` 的火山口编辑覆盖了大半座山。画廊是定向覆盖不同类别的检查样本，不能用来估计总体准确率。
+
+重新生成画廊（不调用模型，只读取抽中的源 shard 和最终结果）：
 
 ```bash
-.venv-scaleedit-current/bin/python scripts/review_scaleedit_pipeline.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-source \
-  --run-dir /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/local_edit_current_20260924 \
-  --filter-run-dir /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/local_edit_validation_20260924 \
-  --selection-file /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/local_edit_validation_20260924/selection.json
+cd /opt/tiger/tanyue/sam3-crispedit-scaleedit-labeling
+.venv-scaleedit-current/bin/python -u scripts/review_scaleedit_full_run.py \
+  --run-dir /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926 \
+  --source-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-source \
+  --docs-assets-dir docs_assets/scaleedit/full_run_300k --workers 12
 ```
 
-`scripts/scaleedit_review_cases.json` 是固定回归清单，其他样本通过 `--gallery-file` 提供清单。HTML 内嵌图片，可直接 preview。
+早期 512 条开发实验及其过滤/打标画廊保留在[开发记录](SCALEEDIT_DEVELOPMENT.md)，本节只记录正式四机运行。
