@@ -62,6 +62,7 @@ def main() -> None:
     source_dir.mkdir(parents=True, exist_ok=True)
     records: list[dict] = []
     source_rows = 0
+    empty_masks: list[dict] = []
     offset = 0
     with tqdm(total=len(positive), desc="materialize multitype source images") as bar:
         for batch in pq.ParquetFile(args.parquet).iter_batches(
@@ -82,6 +83,16 @@ def main() -> None:
                 )
                 for mask_index, raw_mask in enumerate(indexed["masks"]):
                     resized = resize_mask(decode_rle(raw_mask), canvas_size)
+                    if not resized.any():
+                        empty_masks.append(
+                            {
+                                "parquet_row_index": row_index,
+                                "source_image": source_name,
+                                "mask_index": mask_index,
+                                "source_subset": indexed["source_subset"],
+                            }
+                        )
+                        continue
                     rle = encode_rle(resized)
                     for task_type in TASK_TYPES:
                         case_id = len(records)
@@ -126,6 +137,9 @@ def main() -> None:
         "task_type_counts": {task: sum(r["task_type"] == task for r in records) for task in TASK_TYPES},
         "regions_per_source": "every dataset mask x three task types",
         "limit_sources": args.limit_sources,
+        "empty_mask_regions": len(empty_masks),
+        "empty_mask_cases_excluded": len(empty_masks) * len(TASK_TYPES),
+        "empty_mask_details": empty_masks,
         "index_summary": index_summary,
     }
     (args.out_root / "summary.json").write_text(

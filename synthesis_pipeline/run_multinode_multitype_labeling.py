@@ -25,6 +25,7 @@ import time
 import traceback
 
 from synthesis_pipeline.labeling_checkpoint import ensure_sources
+from synthesis_pipeline.prepare_samtok_data import decode_rle
 
 REPO = Path(__file__).resolve().parents[1]
 TASK_TYPES = ("add", "replace", "attribute")
@@ -67,6 +68,44 @@ def ensure_symlink(link: Path, target: Path):
     if link.exists():
         raise FileExistsError(f"expected symlink path is occupied by a non-symlink: {link}")
     link.symlink_to(target, target_is_directory=target.is_dir())
+
+
+def valid_mask_row(row):
+    """Return whether a multitype manifest row contains foreground pixels."""
+    values = row.get("mask", row.get("masks"))
+    if not isinstance(values, list):
+        values = [values]
+    found = False
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        try:
+            decoded = decode_rle(value)
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            continue
+        found = True
+        if decoded.any():
+            return True
+    return False if found or values else False
+
+
+def sanitize_rows(rows):
+    """Drop legacy empty-mask cases before any planner process is started."""
+    valid, dropped = [], []
+    for row in rows:
+        if valid_mask_row(row):
+            valid.append(row)
+        else:
+            dropped.append(
+                {
+                    "image": row.get("image"),
+                    "source_image": row.get("source_image"),
+                    "mask_index": row.get("mask_index"),
+                    "task_type": row.get("task_type"),
+                    "reason": "invalid_input_empty_mask",
+                }
+            )
+    return valid, dropped
 
 
 def read_rows(path: Path):
@@ -263,7 +302,8 @@ def run_planning_pool(data_root: Path, planning_root: Path, rows, gpu_ids, coord
 
 
 def prepare_shards(data_root: Path, run_root: Path, nodes: int, resume: bool):
-    rows = read_rows(data_root / "annotations.jsonl")
+    original_rows = read_rows(data_root / "annotations.jsonl")
+    rows, dropped = sanitize_rows(original_rows)
     if not rows:
         raise ValueError("empty multitype input manifest")
     shards = split_sources(rows, nodes)
@@ -282,6 +322,9 @@ def prepare_shards(data_root: Path, run_root: Path, nodes: int, resume: bool):
         partition,
         {
             "cases": len(rows),
+            "input_cases_original": len(original_rows),
+            "invalid_mask_cases": len(dropped),
+            "invalid_mask_images": [item["image"] for item in dropped],
             "source_images": len({row["source_image"] for row in rows}),
             "counts": [len(shard) for shard in shards],
             "task_type_counts": dict(Counter(row["task_type"] for row in rows)),
