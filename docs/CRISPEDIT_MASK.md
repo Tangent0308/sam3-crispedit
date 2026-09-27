@@ -23,6 +23,7 @@
 | 四机运行 | `runs/labeling_4node_crispedit_full_localenv_20260925/` | `plan.json`、`selection.json`、`work/`、`logs/`、`control/`、`reports/` |
 | Grounding | `runs/labeling_4node_crispedit_full_localenv_20260925/labels/grounding/` | 双 PASS 稀疏行 |
 | 最终 mask | `runs/labeling_4node_crispedit_full_localenv_20260925/labels/mask/` | 1,844 shard / 38,971 行 |
+| 合并后完整数据集 | `/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/final_dataset_39k/` | 38,971 行；按类型分目录的 shard parquet，含源图/target/instruction/type 与质量、场景、grounding、mask 及两轮 audit 字段 |
 
 原 `datasets/CrispEdit-2M*` 三个正式目录和原 `experiments/CrispEdit/labeling_4node_crispedit_full_localenv_20260925` 现在是指向以上位置的兼容符号链接。历史 `plan.json`、日志和审计中仍记录当时路径，链接使这些记录可读。`work/` 和失败尝试的控制标记保留，不能仅凭旧 `.failed` 判断最新运行失败；最新 `control/retry_validate_fix_02/complete.ok` 表示全链路结构校验完成。
 
@@ -37,6 +38,8 @@
 | Mask | 38,971 行：OK 37,728（96.81%）；MASK_REVIEW 910；GROUND_FAIL 333 |
 
 Mask 中非空 38,583（99.00%），验证实例 62,013，运行时错误 0。Grounding 解析失败 7 行、观察解析失败 4 行，均留在可恢复的 `GROUND_FAIL` 行中；不可恢复解析错误 0。存在 361 条 source canvas 诊断和 21 条 unresolved change，详见 [validation_summary.json](/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/runs/labeling_4node_crispedit_full_localenv_20260925/labels/validation_summary.json)。
+
+`/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling/final_dataset_39k/` 是按最终 mask parquet 的 38,971 个双 PASS 行生成的可直接训练/分析数据。每个 parquet 行保留源图像 `{bytes,path}`、指令和类型；`quality__`、`quality_audit__`、`scene__`、`scene_audit__`、`grounding__`、`mask__` 前缀下保留各阶段全部已落盘字段，包括原始模型响应、重试/耗时、grounding、union PNG、实例 RLE 和候选审计。使用 `source_shard + row_idx` 作为稳定主键。目录内 `dataset_manifest.json` 列出完整 schema、分类型/QC 统计和 shard 索引，`README.md` 说明布局，`COMPLETE` 表示构建及 join 检查完成。复建入口：`.venv-crispedit/bin/python scripts/build_crispedit_final_dataset.py --workers 16`。
 
 | 类型 | 双 PASS | OK | MASK_REVIEW | GROUND_FAIL |
 | --- | ---: | ---: | ---: | ---: |
