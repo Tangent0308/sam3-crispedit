@@ -39,13 +39,14 @@ import torch,cv2,numpy,PIL,pycocotools
 assert sys.version_info[:2]==(3,12),sys.version
 assert torch.cuda.is_available(), 'CUDA unavailable'
 role=sys.argv[1]
-expected={'sam':{'torch':'2.8.0','torchvision':'0.23.0','transformers':'4.57.6'},
+expected={'sam':{'torch':'2.13.0+cu129','torchaudio':'2.11.0+cu129','torchvision':'0.28.0+cu129','transformers':'4.57.6'},
  'mllm':{'torch':'2.13.0+cu129','vllm':'0.28.0+cu129','transformers':'5.17.0'},
  'editor':{'torch':'2.13.0+cu129','vllm':'0.29.0','transformers':'5.14.1','diffusers':'0.40.0',
            'vllm-omni':'0.29.0rc2.dev265+g44ea27c80'}}
+assert str(torch.version.cuda).startswith('12.9'), (role, torch.version.cuda)
 for package,version in expected[role].items():
  assert m.version(package)==version,(role,package,m.version(package),version)
-names=['torch','torchvision','numpy','pillow','opencv-python-headless','transformers']
+names=['torch','torchvision','torchaudio','numpy','pillow','opencv-python-headless','transformers']
 if role=='sam':
  import os
  sys.path.insert(0,os.environ['SAMTOK_SAM3_SOURCE'])

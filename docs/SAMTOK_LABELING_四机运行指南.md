@@ -553,7 +553,7 @@ bash scripts/labeling/setup_env.sh
 
 | 环境 | 核心版本 | 用途 |
 |---|---|---|
-| `.runtime/sam` | Python3.12.13、torch2.8.0/CUDA12.8、transformers4.57.6 | 源数据准备、SAM区域解析、CPU调度 |
+| `.runtime/sam` | Python3.12.13、torch2.13.0+cu129/CUDA12.9、transformers4.57.6 | 源数据准备、SAM区域解析、CPU调度 |
 | `.runtime/mllm` | torch2.13.0+cu129、vLLM0.28.0+cu129、transformers5.17.0 | 27B规划和审核 |
 | `.runtime/editor` | torch2.13.0+cu129、vLLM0.29.0、diffusers0.40.0、transformers5.14.1 | Qwen-Image-2.1编辑 |
 
@@ -563,8 +563,9 @@ SAM源代码固定 `fff5ca124cf2551dd73c0de2af9c64bdadeea0b3`；Omni固定
 
 `requirements/labeling-*.lock.txt` 保存已验证环境的完整版本快照，安装时使用 `--no-deps` 防止解析器
 改写CUDA组合；不运行根目录历史 `pip install -r requirements.txt`。两个指定源均可信且所有包版本固定，
-安装用 `unsafe-best-match` 解决PyTorch索引遮蔽普通包问题。SAM的无CUDA后缀版本使用严格 `===`，避免
-`==2.8.0` 误选另一CUDA构建。环境会占用较多本地磁盘，预留至少100GB用于环境、依赖源码和缓存。
+安装用 `unsafe-best-match` 解决PyTorch索引遮蔽普通包问题。三套环境现在统一使用
+PyTorch `2.13.0+cu129` 及对应的 CUDA 12.9 依赖，避免 SAM 环境落到 CUDA 12.8 构建。
+环境会占用较多本地磁盘，预留至少100GB用于环境、依赖源码和缓存。
 安装结束逐环境检查版本、CUDA、SAM/Omni API import，写 `.runtime/environment.json`；失败不进入生成。
 
 OpenCV只允许安装`opencv-python-headless`（SAM 4.11.0.86；MLLM/editor 5.0.0.93）。
