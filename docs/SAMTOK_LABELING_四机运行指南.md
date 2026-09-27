@@ -189,15 +189,25 @@ Qwen3.8-27B 通用 mask-grounding/scope 规划 → 8 卡 Qwen-Image-2.1 编辑 �
 符号链接可安全复用；每次重新进入规划池时，只清理对应 shard 的不完整
 `out*/{plan,scope,regions}` 和 `summary.json` 后重建，不触碰 source、生成或审核结果；三类型
 物化和续传分片都会过滤解码后没有前景像素的 mask，并记录 `invalid_input_empty_mask`，不会
-再把空区域交给 MLLM；面积过滤器会展开单元素 mask 列表。修复后可直接使用下面这段 Arnold
-Bash 入口续传当前 run：
+再把空区域交给 MLLM；面积过滤器会展开单元素 mask 列表。
+
+`resume-005` 还暴露了另一类独立问题：Qwen-Image-2.1 的 vLLM-Omni decode CUDA graph
+按动态 prompt/image shape 反复 capture，长时间运行后个别 GPU 出现
+`CUDA error: unspecified launch failure`，随后该 editor worker 被 vLLM-Omni 判定为 dead。
+这不是显存不足，也不是输入数据错误。当前版本已在 `utils/qwen21_omni.py` 对官方 Omni
+初始化固定 `enforce_eager=True` 与 `enable_cuda_graph_decode=False`；权重、采样步数、seed、
+regional pipeline 和 torch.compile 主路径不变，只关闭不稳定的动态 decode graph。续传时
+编辑子进程始终带 `--resume`，由逐 case `CaseCheckpoints` 复用完整结果、重算缺失/损坏结果，
+不会因 manifest 已存在而错误跳过未完成的编辑。
+
+修复后可直接使用下面这段 Arnold Bash 入口续传当前 run：
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
-export SAMTOK_ATTEMPT_ID="resume-005"       # resume-001/002/003/004 已失败；每次续传都换成新的值
+export SAMTOK_ATTEMPT_ID="resume-006"       # resume-001..005 已失败或中断；每次续传都换成新的值
 export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
@@ -222,7 +232,7 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 `planning.node<N>.gpu<G>.log` 区分节点。续传时若某个旧 case 的 checkpoint 不完整或输出
 校验失败，该 case 会重新执行，完整且依赖一致的阶段结果会被复用。当前已有 manifest 中
 `001224_gres_r480_m0_add.png`、`001225_gres_r480_m0_replace.png` 和
-`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-005` 会保留原始 manifest
+`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-006` 会保留原始 manifest
 哈希用于一致性检查，但将这三条记录标记为 `invalid_input_empty_mask` 并从规划分片排除，
 有效规划输入为 31,896 条。
 

@@ -46,6 +46,14 @@ class QwenImage21OmniPipeline:
         omni_kwargs = {
             "model": model_id,
             "diffusion_load_format": "dummy",
+            # Qwen-Image-2.1's decode CUDA graph is keyed by dynamic prompt and
+            # image shapes.  Regional editing intentionally varies both across
+            # cases; long runs can otherwise hit an unrecoverable
+            # cudaErrorLaunchFailure after repeated graph captures.  Eager
+            # decode keeps the official Omni execution and model weights while
+            # avoiding that unstable graph cache.
+            "enforce_eager": True,
+            "enable_cuda_graph_decode": False,
             "custom_pipeline_args": {
                 "pipeline_class": "utils.qwen21_omni_regional.RegionalQwenImage21Pipeline"
             },

@@ -132,6 +132,29 @@ def read_rows(path: Path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
+def generation_artifacts_complete(generation_root: Path, rows) -> bool:
+    """Check whether every planned case has a nonempty edited artifact."""
+    edited = Path(generation_root) / "context_grounded_v4_qwen21" / "edited"
+    return all(
+        (edited / str(row["image"])).is_file()
+        and (edited / str(row["image"])).stat().st_size > 0
+        for row in rows
+    )
+
+
+def jsonl_cases_complete(path: Path, expected_images) -> bool:
+    """Check a stage manifest by case identity, tolerating record ordering."""
+    if not Path(path).is_file():
+        return False
+    try:
+        rows = read_rows(path)
+    except (OSError, ValueError, TypeError):
+        return False
+    expected = {str(name) for name in expected_images}
+    actual = {str(row.get("image")) for row in rows}
+    return actual == expected and len(rows) == len(expected)
+
+
 def write_rows(path: Path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
@@ -491,7 +514,19 @@ def main():
         planned_rows = read_rows(regions) if regions.exists() else []
         generation = node_root / "generation"
         generated_manifest = generation / "context_grounded_v4_qwen21/annotations.jsonl"
-        if planned_rows and not (args.resume and generated_manifest.exists()):
+        planned_images = [row["image"] for row in planned_rows]
+        # A resume attempt must enter the editor even when the manifest exists.
+        # ``experiment_edit_quality --resume`` validates each CaseCheckpoints
+        # record and only regenerates missing, truncated, or stale cases.  The
+        # previous ``manifest.exists()`` shortcut skipped the editor after a
+        # failed pool, leaving a partial manifest/output silently accepted.
+        generation_complete = (
+            not args.resume
+            and bool(planned_rows)
+            and jsonl_cases_complete(generated_manifest, planned_images)
+            and generation_artifacts_complete(generation, planned_rows)
+        )
+        if planned_rows and not generation_complete:
             progress("editing_qwen21_8gpu")
             editor_python = os.environ.get("SAMTOK_EDITOR_PYTHON", sys.executable)
             manifest_cmd = [editor_python, "-m", "synthesis_pipeline.experiment_edit_quality",
@@ -510,6 +545,8 @@ def main():
                            os.environ.get("SAMTOK_QWEN21_MODEL", "/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1"),
                            "--steps", str(PROFILE["steps"]), "--qwen21-prompt-policy", PROFILE["editor_prompt_policy"],
                            "--qwen21-backend", PROFILE["editor_backend"], "--shard", str(shard), "--shards", str(len(gpu_ids))]
+                if args.resume:
+                    command.append("--resume")
                 process_env = runtime_env(command, {
                     **env,
                     "CUDA_VISIBLE_DEVICES": gpu,
@@ -528,16 +565,29 @@ def main():
             # disabled for a generation smoke run without changing the editor.
             if generated_manifest.exists():
                 audit_root = node_root / "audit"
-                if not (args.resume and (audit_root / "edit_audit.jsonl").exists()):
+                generated_rows = read_rows(generated_manifest)
+                audit_complete = jsonl_cases_complete(
+                    audit_root / "edit_audit.jsonl",
+                    [row["image"] for row in generated_rows],
+                )
+                if not audit_complete:
                     audit_python = os.environ.get("SAMTOK_MLLM_PYTHON", sys.executable)
+                    audit_command = [
+                        audit_python, "-m", "synthesis_pipeline.audit_edit_pairs",
+                        "--annotations-jsonl", str(generated_manifest),
+                        "--source-dir", str(planning / "regions/sources"),
+                        "--edited-dir", str(generation / "context_grounded_v4_qwen21/edited"),
+                        "--out-dir", str(audit_root), "--vlm", "qwen8b-vllm",
+                        "--vlm-model-id", os.environ.get(
+                            "SAMTOK_QWEN38_MODEL",
+                            "/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B",
+                        ),
+                        "--batch-size", "8",
+                    ]
+                    if args.resume:
+                        audit_command.append("--resume")
                     stage_times["audit"] = run_stage(
-                        [audit_python, "-m", "synthesis_pipeline.audit_edit_pairs",
-                         "--annotations-jsonl", str(generated_manifest),
-                         "--source-dir", str(planning / "regions/sources"),
-                         "--edited-dir", str(generation / "context_grounded_v4_qwen21/edited"),
-                         "--out-dir", str(audit_root), "--vlm", "qwen8b-vllm",
-                         "--vlm-model-id", os.environ.get("SAMTOK_QWEN38_MODEL", "/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B"),
-                         "--batch-size", "8"],
+                        audit_command,
                         coordination / "logs" / f"audit.node{args.rank}.log", coordination, args.timeout,
                     )
         progress("node_done")
