@@ -155,14 +155,25 @@ def jsonl_cases_complete(path: Path, expected_images) -> bool:
     return actual == expected and len(rows) == len(expected)
 
 
+def audit_payload_complete(audit) -> bool:
+    """Validate the parsed model payload independently of its wrapper row."""
+    if not isinstance(audit, dict) or str(audit.get("quality", "")).strip().lower() not in {"pass", "fail"}:
+        return False
+    if any(not str(audit.get(key, "")).strip() for key in ("source_inventory", "edited_inventory", "reason")):
+        return False
+    return all(key in audit for key in (
+        "source_mismatch", "completion_failure", "target_or_count_failure",
+        "dependency_failure", "preservation_or_artifact_failure",
+    ))
+
+
 def audit_row_complete(row) -> bool:
     """A case is audit-complete only when the model response parsed cleanly."""
     if not isinstance(row, dict):
         return False
     if str(row.get("quality", "")).strip().lower() not in {"pass", "fail"}:
         return False
-    audit = row.get("audit")
-    return isinstance(audit, dict) and str(audit.get("quality", "")).strip().lower() in {"pass", "fail"}
+    return bool(row.get("input_fingerprint")) and audit_payload_complete(row.get("audit"))
 
 
 def audit_jsonl_cases_complete(path: Path, expected_images) -> bool:
@@ -446,7 +457,7 @@ def merge_results(run_root: Path, nodes: int):
                 planned.append(plan)
             if name in gen_by:
                 generated.append({**gen_by[name], **item})
-            if audit:
+            if audit and audit_payload_complete(audit):
                 audited.append({**audit, "task_type": row["task_type"], "node": rank})
                 if str(audit.get("quality", audit.get("decision", ""))).lower() == "pass":
                     passed.append({**gen_by.get(name, {}), **item, "quality_label": "model_pass_not_human_verified"})
@@ -616,6 +627,14 @@ def main():
                     stage_times["audit"] = run_stage(
                         audit_command,
                         coordination / "logs" / f"audit.node{args.rank}.log", coordination, args.timeout,
+                    )
+                if not audit_jsonl_cases_complete(
+                    audit_root / "edit_audit.jsonl",
+                    [row["image"] for row in generated_rows],
+                ):
+                    raise RuntimeError(
+                        "audit exited successfully but did not produce complete parsed records; "
+                        "rerun the audit stage"
                     )
         progress("node_done")
         atomic(control / f"node{args.rank}.done.json", {"timings": stage_times})
