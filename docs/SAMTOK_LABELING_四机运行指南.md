@@ -200,6 +200,13 @@ regional pipeline 和 torch.compile 主路径不变，只关闭不稳定的动�
 编辑子进程始终带 `--resume`，由逐 case `CaseCheckpoints` 复用完整结果、重算缺失/损坏结果，
 不会因 manifest 已存在而错误跳过未完成的编辑。
 
+`resume-006` 在进入 pipeline 前又遇到 node2 的一次性 CUDA driver 初始化错误：
+`cudaGetDeviceCount()` 返回 Error 802 (`system not yet initialized`)。这是 Arnold worker
+刚启动时驱动上下文尚未就绪，发生在 SAM 环境预检，未进入规划或编辑，也没有改变已有
+checkpoint。环境预检现在对这类明确的 transient CUDA 错误使用新 Python 进程重试（默认
+4 次、间隔 5 秒，并设置 `CUDA_MODULE_LOADING=EAGER`）；缺包、版本错误、import 错误仍会
+立即失败。因而后续续传应使用新的 attempt ID，不能复用已经失败的 `resume-006`。
+
 修复后可直接使用下面这段 Arnold Bash 入口续传当前 run：
 
 ```bash
@@ -207,7 +214,7 @@ regional pipeline 和 torch.compile 主路径不变，只关闭不稳定的动�
 set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
-export SAMTOK_ATTEMPT_ID="resume-006"       # resume-001..005 已失败或中断；每次续传都换成新的值
+export SAMTOK_ATTEMPT_ID="resume-007"       # resume-001..006 已失败或中断；每次续传都换成新的值
 export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
@@ -232,7 +239,7 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 `planning.node<N>.gpu<G>.log` 区分节点。续传时若某个旧 case 的 checkpoint 不完整或输出
 校验失败，该 case 会重新执行，完整且依赖一致的阶段结果会被复用。当前已有 manifest 中
 `001224_gres_r480_m0_add.png`、`001225_gres_r480_m0_replace.png` 和
-`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-006` 会保留原始 manifest
+`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-007` 会保留原始 manifest
 哈希用于一致性检查，但将这三条记录标记为 `invalid_input_empty_mask` 并从规划分片排除，
 有效规划输入为 31,896 条。
 

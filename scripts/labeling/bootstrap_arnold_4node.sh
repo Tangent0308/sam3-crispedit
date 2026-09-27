@@ -13,6 +13,11 @@ export SAMTOK_PIPELINE_MODE="${SAMTOK_PIPELINE_MODE:-remove}"
 [[ "$SAMTOK_PIPELINE_MODE" == remove || "$SAMTOK_PIPELINE_MODE" == multitype ]] || { echo 'SAMTOK_PIPELINE_MODE must be remove or multitype' >&2; exit 2; }
 export SAMTOK_RESUME="${SAMTOK_RESUME:-0}"
 [[ "$SAMTOK_RESUME" == 0 || "$SAMTOK_RESUME" == 1 ]] || { echo 'SAMTOK_RESUME must be 0 or 1' >&2; exit 2; }
+# Arnold may publish a worker a few seconds before its CUDA driver context is
+# ready.  The environment checker retries transient Error 802 failures in
+# fresh interpreters; package/import failures remain fatal.
+export SAMTOK_ENV_PROBE_RETRIES="${SAMTOK_ENV_PROBE_RETRIES:-4}"
+export SAMTOK_ENV_PROBE_DELAY="${SAMTOK_ENV_PROBE_DELAY:-5}"
 resume_args=()
 attempt_suffix=""
 export SAMTOK_CONTROL_ROOT="$SAMTOK_RUN_ROOT"
@@ -57,6 +62,7 @@ check_peers() {
   fi
 }
 export PYTHONUNBUFFERED=1
+export CUDA_MODULE_LOADING="${CUDA_MODULE_LOADING:-EAGER}"
 # No credentials are printed; retain standard git credential helpers.
 if [[ "${SAMTOK_KEEP_PROXY:-0}" != 1 ]]; then
   unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
