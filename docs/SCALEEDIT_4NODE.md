@@ -112,4 +112,16 @@ cd /opt/tiger/tanyue/sam3-crispedit-scaleedit-labeling
 92项CPU测试通过，覆盖身份/二值判决、分配、同伴失败终止、恢复发布冲突、稀疏join、PNG/RLE一致性、四机环境报告。安装脚本在当前本地clone运行成功，8卡CUDA与spawn导入预检通过；完整smoke另实际执行了Qwen和SAM3。
 
 [实跑画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_smoke_20260925/review/index.html)展示两轮各3 KEEP/3 DROP及全部10个mask；`review/validation.json`为 `errors=[]`。已目视检查全部10个mask，人物、文字、多实例和新增花瓶等结果大体符合当前策略；scene原有chef/长椅边界误保留仍在，未把工程验证当作语义问题已修复。
-未启动全量299,633条推理；四台物理机32卡运行与吞吐仍需在正式集群确认。
+
+## 5. 正式四机运行（299,633条）
+
+`RUN=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926`。四台物理机各8卡均通过真实Qwen预检；初始attempt于2026-09-27 09:05 UTC完成。四节点日志结尾都是`nodeN: complete`，`RUN/control/initial/complete.ok`存在且无`.failed`。每阶段均合并1,155个shard，完整信息见[`run_manifest.json`](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926/reports/run_manifest.json)。
+
+| 阶段 | 输入行 | 结果 | 逐条错误 |
+| --- | ---: | --- | ---: |
+| 质量 | 299,633 | 265,456 PASS；34,177 DROP | 19 |
+| 细粒度 | 265,456 | 25,664 PASS；239,792 DROP | 2 |
+| Grounding | 25,664 | 25,553 OK；4 MASK_REVIEW；107 GROUND_FAIL | 107 |
+| Mask | 25,664 | 25,085 OK；472 MASK_REVIEW；107 GROUND_FAIL | 107 |
+
+Mask中25,518条非空，35,028个实例。完成标记只表示流程和结构校验通过；自动QC与逐条错误仍需结合可视化检查。正式结果的[90条自动OK画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926/review_full_300k/index.html)及联系图见[当前结果文档](SCALEEDIT_MASK.md#6-正式四机结果与可视化)。
