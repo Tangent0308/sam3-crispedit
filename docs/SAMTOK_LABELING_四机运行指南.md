@@ -184,19 +184,20 @@ Qwen3.8-27B 通用 mask-grounding/scope 规划 → 8 卡 Qwen-Image-2.1 编辑 �
 续传不会重新读取 parquet，也不会重新物化 7671 张 source 图像。
 
 当前 run 先后遇到过 FlashInfer 找不到 `ninja`、旧规划分片符号链接重复创建、规划输出目录
-残留，以及一个历史 manifest 中的空 mask。新版入口会在环境门禁和每个 Python 子进程中自动把
+残留、三类型 mask 外层列表未被面积过滤器展开，以及一个历史 manifest 中的空 mask。新版入口会在环境门禁和每个 Python 子进程中自动把
 `.runtime/mllm/bin`、`.runtime/editor/bin` 和 `.runtime/sam/bin` 加入 `PATH`，规划分片的
 符号链接可安全复用；每次重新进入规划池时，只清理对应 shard 的不完整
 `out*/{plan,scope,regions}` 和 `summary.json` 后重建，不触碰 source、生成或审核结果；三类型
 物化和续传分片都会过滤解码后没有前景像素的 mask，并记录 `invalid_input_empty_mask`，不会
-再把空区域交给 MLLM。修复后可直接使用下面这段 Arnold Bash 入口续传当前 run：
+再把空区域交给 MLLM；面积过滤器会展开单元素 mask 列表。修复后可直接使用下面这段 Arnold
+Bash 入口续传当前 run：
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
-export SAMTOK_ATTEMPT_ID="resume-004"       # resume-001/002/003 已失败；每次续传都换成新的值
+export SAMTOK_ATTEMPT_ID="resume-005"       # resume-001/002/003/004 已失败；每次续传都换成新的值
 export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
@@ -221,7 +222,7 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 `planning.node<N>.gpu<G>.log` 区分节点。续传时若某个旧 case 的 checkpoint 不完整或输出
 校验失败，该 case 会重新执行，完整且依赖一致的阶段结果会被复用。当前已有 manifest 中
 `001224_gres_r480_m0_add.png`、`001225_gres_r480_m0_replace.png` 和
-`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-004` 会保留原始 manifest
+`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-005` 会保留原始 manifest
 哈希用于一致性检查，但将这三条记录标记为 `invalid_input_empty_mask` 并从规划分片排除，
 有效规划输入为 31,896 条。
 

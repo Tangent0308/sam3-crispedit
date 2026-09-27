@@ -207,7 +207,20 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     os.replace(temporary, path)
 
 
-def normalized_area(rle: dict[str, Any]) -> float:
+def normalized_area(rle: dict[str, Any] | list[dict[str, Any]]) -> float:
+    """Return the foreground fraction for one COCO RLE.
+
+    Derived SAMTok manifests wrap each per-case mask in a one-element list so
+    the same schema can represent multiple source regions.  The planner's
+    single-region guards also call this helper, so unwrap that representation
+    before handing the RLE to pycocotools.  Passing the list directly to
+    ``dict`` silently produces ``{'size': 'counts'}`` and later raises a
+    misleading ``KeyError: 'counts'``.
+    """
+    if isinstance(rle, list):
+        if len(rle) != 1:
+            raise ValueError(f"normalized_area expects one RLE, got {len(rle)}")
+        rle = rle[0]
     value = dict(rle)
     if isinstance(value["counts"], str):
         value["counts"] = value["counts"].encode("ascii")
