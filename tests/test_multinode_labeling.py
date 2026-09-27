@@ -10,6 +10,10 @@ from synthesis_pipeline.run_multinode_labeling import (
     PROFILE, atomic, merge, pipeline_command, prepare, read_rows, split_sources,
     wait_for, write_rows, run_stage,
 )
+from synthesis_pipeline.run_multinode_multitype_labeling import (
+    audit_jsonl_cases_complete,
+    audit_row_complete,
+)
 
 
 def row(i, source=None):
@@ -51,6 +55,26 @@ def test_failure_marker_wins_over_success(tmp_path):
     atomic(tmp_path/'control/node2.failed.json',{'error':'test'})
     atomic(tmp_path/'ready.json',{'ready':True})
     with pytest.raises(RuntimeError,match='Peer failed'):wait_for([tmp_path/'ready.json'],tmp_path,1)
+
+
+def test_multitype_audit_coverage_rejects_parse_errors(tmp_path):
+    expected = ["a.png", "b.png"]
+    valid = {
+        "image": "a.png", "quality": "pass",
+        "audit": {"quality": "pass"},
+    }
+    invalid = {
+        "image": "b.png", "quality": "parse_error", "audit": None,
+    }
+    path = tmp_path / "edit_audit.jsonl"
+    write_rows(path, [valid, invalid])
+    assert audit_row_complete(valid)
+    assert not audit_row_complete(invalid)
+    assert not audit_jsonl_cases_complete(path, expected)
+    invalid["quality"] = "fail"
+    invalid["audit"] = {"quality": "fail"}
+    write_rows(path, [valid, invalid])
+    assert audit_jsonl_cases_complete(path, expected)
 
 
 def test_merge_keeps_no_output_and_fails_missing_audit(tmp_path):

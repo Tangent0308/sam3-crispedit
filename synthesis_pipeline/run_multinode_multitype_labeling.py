@@ -155,6 +155,32 @@ def jsonl_cases_complete(path: Path, expected_images) -> bool:
     return actual == expected and len(rows) == len(expected)
 
 
+def audit_row_complete(row) -> bool:
+    """A case is audit-complete only when the model response parsed cleanly."""
+    if not isinstance(row, dict):
+        return False
+    if str(row.get("quality", "")).strip().lower() not in {"pass", "fail"}:
+        return False
+    audit = row.get("audit")
+    return isinstance(audit, dict) and str(audit.get("quality", "")).strip().lower() in {"pass", "fail"}
+
+
+def audit_jsonl_cases_complete(path: Path, expected_images) -> bool:
+    """Validate audit coverage and reject old parse_error/null rows."""
+    if not Path(path).is_file():
+        return False
+    try:
+        rows = read_rows(path)
+    except (OSError, ValueError, TypeError):
+        return False
+    expected = {str(name) for name in expected_images}
+    return (
+        len(rows) == len(expected)
+        and {str(row.get("image")) for row in rows} == expected
+        and all(audit_row_complete(row) for row in rows)
+    )
+
+
 def write_rows(path: Path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
@@ -566,7 +592,7 @@ def main():
             if generated_manifest.exists():
                 audit_root = node_root / "audit"
                 generated_rows = read_rows(generated_manifest)
-                audit_complete = jsonl_cases_complete(
+                audit_complete = audit_jsonl_cases_complete(
                     audit_root / "edit_audit.jsonl",
                     [row["image"] for row in generated_rows],
                 )
@@ -577,12 +603,13 @@ def main():
                         "--annotations-jsonl", str(generated_manifest),
                         "--source-dir", str(planning / "regions/sources"),
                         "--edited-dir", str(generation / "context_grounded_v4_qwen21/edited"),
-                        "--out-dir", str(audit_root), "--vlm", "qwen8b-vllm",
+                        "--out-dir", str(audit_root), "--vlm", "qwen38-vllm",
                         "--vlm-model-id", os.environ.get(
                             "SAMTOK_QWEN38_MODEL",
                             "/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B",
                         ),
-                        "--batch-size", "8",
+                        "--batch-size", "8", "--max-new-tokens",
+                        os.environ.get("SAMTOK_AUDIT_MAX_NEW_TOKENS", "1024"),
                     ]
                     if args.resume:
                         audit_command.append("--resume")
