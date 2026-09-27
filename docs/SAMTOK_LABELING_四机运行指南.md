@@ -217,7 +217,8 @@ bootstrap 现已支持先 checkout 指定的固定 commit。`resume-009` 已经�
 `parse_error`；node3 在最终汇总时又因 `audit=null` 调用 `.get()` 退出。出图文件和规划
 文件没有损坏，无需重新出图。
 
-当前修复已推送到 commit `18325eae623bfeed72e500a6094fcaf8af9dcf37`：审核固定使用
+当前修复已推送到 commit `5bbb37f66cd169b1cebd1c1bd75fa12304135823`（包含前一提交的
+后端修复）：审核固定使用
 `qwen38-vllm`（官方 Qwen3.8 chat template 的 `enable_thinking=False`），默认输出上限
 提高到 1024 tokens；恢复时只有 `quality` 为 pass/fail 且 `audit.quality` 有效的记录才会
 复用，旧 `parse_error` 会重新调用模型；汇总对空 audit 安全处理。四机 MLLM 锁定环境的
@@ -238,7 +239,7 @@ export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
-export SAMTOK_EXPECTED_COMMIT="18325eae623bfeed72e500a6094fcaf8af9dcf37"  # audit fix + cu129 runtime
+export SAMTOK_EXPECTED_COMMIT="5bbb37f66cd169b1cebd1c1bd75fa12304135823"  # audit fix + cu129 runtime
 export SAMTOK_PIPELINE_MODE=multitype
 export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
 export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
