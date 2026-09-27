@@ -154,6 +154,7 @@ def parse_args() -> argparse.Namespace:
             "qwen4b",
             "qwen8b-vllm",
             "qwen4b-vllm",
+            "qwen38-vllm",
             "qwen35",
         ],
         default="qwen8b-vllm",
@@ -161,7 +162,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vlm-model-id", default=None)
     parser.add_argument("--vlm-device", default="cuda:0")
     parser.add_argument("--vlm-dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
-    parser.add_argument("--max-new-tokens", type=int, default=384)
+    # The vLLM Qwen3.8 production path is non-thinking, but the structured
+    # audit still has nine fields and five evidence slots. 384 tokens can cut
+    # off a valid answer; keep enough room for a compact JSON response.
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument(
         "--resume",
         action=argparse.BooleanOptionalAction,
@@ -427,6 +431,23 @@ def normalize_audit_result(value: Optional[dict[str, Any]]) -> Optional[dict[str
     return normalized
 
 
+def reusable_audit_record(value: Any) -> bool:
+    """Return whether a saved row contains a complete, parsed audit result.
+
+    Older interrupted runs can contain a row with ``quality=parse_error`` and
+    ``audit=null``.  Such a row is evidence for debugging, never a checkpoint:
+    allowing it to satisfy resume coverage silently skips the model call.
+    """
+    if not isinstance(value, dict):
+        return False
+    if str(value.get("quality", "")).strip().lower() not in {"pass", "fail"}:
+        return False
+    audit = value.get("audit")
+    if not isinstance(audit, dict):
+        return False
+    return str(audit.get("quality", "")).strip().lower() in {"pass", "fail"}
+
+
 def deterministic_diagnostic_warnings(
     row: dict[str, Any], metrics: dict[str, float], audit: Optional[dict[str, Any]]
 ) -> list[str]:
@@ -503,7 +524,11 @@ def main() -> None:
     existing_by_image = {
         str(row.get("image")): row
         for row in existing_rows
-        if isinstance(row.get("image"), str) and row.get("input_fingerprint")
+        if (
+            isinstance(row.get("image"), str)
+            and row.get("input_fingerprint")
+            and reusable_audit_record(row)
+        )
     }
     tasks = []
     output_by_image: dict[str, dict[str, Any]] = {}
@@ -677,9 +702,9 @@ def main() -> None:
         "verdict_override_counts": dict(
             sorted(
                 Counter(
-                    str(row.get("audit", {}).get("verdict_override"))
+                    str((row.get("audit") or {}).get("verdict_override"))
                     for row in output_rows
-                    if row.get("audit", {}).get("verdict_override")
+                    if (row.get("audit") or {}).get("verdict_override")
                 ).items()
             )
         ),
