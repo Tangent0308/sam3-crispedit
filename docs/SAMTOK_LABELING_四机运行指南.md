@@ -553,7 +553,7 @@ bash scripts/labeling/setup_env.sh
 
 | 环境 | 核心版本 | 用途 |
 |---|---|---|
-| `.runtime/sam` | Python3.12.13、torch2.13.0+cu129/CUDA12.9、transformers4.57.6 | 源数据准备、SAM区域解析、CPU调度 |
+| `.runtime/sam` | Python3.12.13、torch2.13.0+cu129/CUDA12.9、transformers4.57.6 | 源数据准备、SAM区域解析、调度 |
 | `.runtime/mllm` | torch2.13.0+cu129、vLLM0.28.0+cu129、transformers5.17.0 | 27B规划和审核 |
 | `.runtime/editor` | torch2.13.0+cu129、vLLM0.29.0、diffusers0.40.0、transformers5.14.1 | Qwen-Image-2.1编辑 |
 
