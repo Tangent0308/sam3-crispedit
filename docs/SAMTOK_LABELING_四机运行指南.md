@@ -210,7 +210,8 @@ checkpoint。环境预检现在对这类明确的 transient CUDA 错误使用新
 `resume-007` 在 node1 上连续 4 次预检仍返回 Error 802，未进入 pipeline。当前 SAM
 环境已切换到 `torch==2.13.0+cu129`、`torchvision==0.28.0+cu129`、
 `torchaudio==2.11.0+cu129`，并要求 `torch.version.cuda` 为 `12.9`，与 Arnold 节点的
-驱动环境一致。下次需确认四个 worker 的 CUDA 设备均可用，并使用下面的 `resume-008`。
+驱动环境一致。`resume-008` 在 clone 后校验旧的 branch tip 时提前退出，未进入环境预检；
+bootstrap 现已支持先 checkout 指定的固定 commit。下次使用下面的 `resume-009`。
 
 修复后可直接使用下面这段 Arnold Bash 入口续传当前 run：
 
@@ -219,7 +220,7 @@ checkpoint。环境预检现在对这类明确的 transient CUDA 错误使用新
 set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
-export SAMTOK_ATTEMPT_ID="resume-008"       # resume-001..007 已失败或中断；每次续传都换成新的值
+export SAMTOK_ATTEMPT_ID="resume-009"       # resume-001..008 已失败或中断；每次续传都换成新的值
 export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
@@ -245,7 +246,7 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 `planning.node<N>.gpu<G>.log` 区分节点。续传时若某个旧 case 的 checkpoint 不完整或输出
 校验失败，该 case 会重新执行，完整且依赖一致的阶段结果会被复用。当前已有 manifest 中
 `001224_gres_r480_m0_add.png`、`001225_gres_r480_m0_replace.png` 和
-`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-008` 会保留原始 manifest
+`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-009` 会保留原始 manifest
 哈希用于一致性检查，但将这三条记录标记为 `invalid_input_empty_mask` 并从规划分片排除，
 有效规划输入为 31,896 条。
 
@@ -375,6 +376,7 @@ cd "$SAMTOK_REPO_DIR"
 mkdir -p "$SAMTOK_CONTROL_ROOT/reports"
 git rev-parse HEAD > "$SAMTOK_CONTROL_ROOT/reports/checkout.node$ARNOLD_ID.txt"
 if [[ -n "${SAMTOK_EXPECTED_COMMIT:-}" ]]; then
+  git checkout --detach "$SAMTOK_EXPECTED_COMMIT"
   [[ "$(git rev-parse HEAD)" == "$SAMTOK_EXPECTED_COMMIT" ]] || { echo 'Unexpected branch revision' >&2; exit 1; }
 fi
 python3 -m pip install --user --index-url "${SAMTOK_PACKAGE_INDEX:-https://bytedpypi.byted.org/simple/}" 'uv==0.11.32'
