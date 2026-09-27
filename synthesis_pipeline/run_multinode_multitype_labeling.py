@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -68,6 +69,25 @@ def ensure_symlink(link: Path, target: Path):
     if link.exists():
         raise FileExistsError(f"expected symlink path is occupied by a non-symlink: {link}")
     link.symlink_to(target, target_is_directory=target.is_dir())
+
+
+def reset_planner_outputs(shard_out: Path):
+    """Remove only incomplete planner outputs before a full planner rerun.
+
+    ``plan_dataset_regions`` intentionally creates its stage directories with
+    ``exist_ok=False``.  A killed Arnold attempt can therefore leave
+    ``outN/{plan,scope,regions}`` behind, making the next attempt fail before
+    it evaluates any input.  The merged planning checkpoint is written only
+    after all shard jobs finish, so when this pool is entered it is safe to
+    rebuild these per-shard outputs.  Inputs, sources, and downstream
+    generation/audit directories are deliberately untouched.
+    """
+    for name in ("plan", "scope", "regions", "summary.json"):
+        path = Path(shard_out) / name
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
 
 
 def valid_mask_row(row):
@@ -235,6 +255,11 @@ def run_planning_pool(data_root: Path, planning_root: Path, rows, gpu_ids, coord
         shard_data = shard_root / f"data{index}"
         shard_out = shard_root / f"out{index}"
         shard_data.mkdir(parents=True, exist_ok=True)
+        # Planning has no per-shard checkpoint.  If the merged planning
+        # manifest is missing, rebuild stale/partial output directories from
+        # the previous attempt rather than letting mkdir(exist_ok=False) in
+        # plan_dataset_regions.py abort the resumed run.
+        reset_planner_outputs(shard_out)
         ensure_symlink(shard_data / "sources", data_root / "sources")
         write_rows(shard_data / "annotations.jsonl", subset)
         write_rows(shard_data / "input_annotations.jsonl", rows)
