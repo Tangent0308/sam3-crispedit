@@ -1,7 +1,10 @@
+import io
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from PIL import Image
 
 from refedit import GROUND_PROMPT_VERSION, MASK_POLICY_VERSION
 from refedit.finalize import build_final_dataset
@@ -46,19 +49,35 @@ def _ground_row(row_idx: int, img_id: int, instruction: str) -> dict:
     }
 
 
+def _png_mask(mask_sum: int = 6, size: tuple[int, int] = (8, 6)) -> bytes:
+    array = np.zeros((size[1], size[0]), dtype=np.uint8)
+    flat = array.reshape(-1)
+    flat[:mask_sum] = 255
+    stream = io.BytesIO()
+    Image.fromarray(array, mode="L").save(stream, format="PNG")
+    return stream.getvalue()
+
+
 def _mask_row(
     row_idx: int, img_id: int, instruction: str, qc_flag: str
 ) -> dict:
+    mask_sum = 6 if qc_flag == "OK" else 3
     return {
         "row_idx": row_idx,
         "sample_id": f"refedit:{img_id}",
         "source_relative_path": "data/train-00000-of-00001.parquet",
         "final_instruction": instruction,
         "final_task": "object_removal" if row_idx == 0 else "color_change",
-        "mask_png": b"png" if qc_flag == "OK" else b"candidate",
+        "ground_json": '{"mask_mode":"regions"}',
+        "mask_png": _png_mask(mask_sum=mask_sum),
         "mask_source": "pcs",
-        "area_frac": 0.1,
+        "area_frac": mask_sum / 48.0,
         "qc_flag": qc_flag,
+        "qc_flags_json": f'["{qc_flag}"]',
+        "mask_height": 6,
+        "mask_width": 8,
+        "mask_sum": mask_sum,
+        "ar_delta": 0.0,
         "grounding_status": "OK",
         "prompt_version": GROUND_PROMPT_VERSION,
         "mask_policy_version": MASK_POLICY_VERSION,

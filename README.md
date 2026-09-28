@@ -5,7 +5,7 @@
 - **CrispEdit-2M**：fact prefilter → Qwen3.5/vLLM grounding → SAM3 mask。
 - **ScaleEdit**：Qwen3.5/vLLM planner → bbox locator → SAM3 mask。
 - **RefEdit**：Qwen3.8 编辑对质量预筛 → PASS-only Qwen3.5/vLLM grounding → SAM3 mask
-  → strict final dataset。
+  → strict final → 自包含训练数据集。
 
 详细方法、代码入口、安装、完整运行命令、生产路径和可视化样例分别见：
 
@@ -16,7 +16,7 @@
 ## 环境安装
 
 ```bash
-cd /opt/tiger/tanyue/sam3-crispedit
+cd /opt/tiger/tanyue/sam3-crispedit-refedit-labeling
 
 # CrispEdit：一次创建 prefilter/SAM3 环境和 Qwen3.5/vLLM grounding 环境
 bash scripts/setup_crispedit_envs.sh
@@ -48,6 +48,8 @@ RefEdit
   refedit_mllm_grounding.py
   refedit_grounded_mask_runner.py
   scripts/build_refedit_final_mask_dataset.py
+  scripts/build_refedit_self_contained_dataset.py
+  scripts/validate_refedit_self_contained_dataset.py
 ```
 
 这些入口的参数和 pipeline 代码保持各自版本。请勿跨数据集混用 source、grounding
@@ -56,16 +58,19 @@ RefEdit
 RefEdit 推荐直接运行完整的 8 卡、可续跑流程：
 
 ```bash
-cd /opt/tiger/tanyue/sam3-crispedit
+cd /opt/tiger/tanyue/sam3-crispedit-refedit-labeling
 bash scripts/run_refedit_full.sh
 ```
 
 也可以先运行 `scripts/run_refedit_quality_prefilter_full.sh`，检查 PASS manifest 后再运行
-`scripts/run_refedit_filtered_mask_full.sh`。最终 7,804 条严格通过样本位于：
+`scripts/run_refedit_filtered_mask_full.sh`。正式的自包含训练集包含 7,804 条严格通过样本，位于：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/final
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38-self-contained
 ```
+
+`run_refedit_full.sh` 生成用于追溯的轻量版 final；将双图嵌入正式数据集的命令、结果统计和
+可视化案例见 [RefEdit 打标文档](docs/REFEDIT_MASK.md)。
 
 ## 验证
 
