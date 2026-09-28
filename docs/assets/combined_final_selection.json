@@ -1,0 +1,18 @@
+[
+  {"case_id": "000000_ver_r0_m0_remove", "note": "同类三脚架中的指定实例"},
+  {"case_id": "000002_gres_r2_m0_remove", "note": "羊群中的指定小羊"},
+  {"case_id": "000025_gres_r31_m0_remove", "note": "边缘截断的小物体"},
+  {"case_id": "000018_ver_r28_m0_remove", "note": "运动场景中的人物"},
+  {"case_id": "000039_gres_r21_m0_add", "note": "左侧椅垫上的局部新增"},
+  {"case_id": "000093_ver_r40_m0_add", "note": "墙边细长布饰上的小徽章"},
+  {"case_id": "000123_gres_r55_m0_add", "note": "左碗食物上的小细节"},
+  {"case_id": "000147_ver_r59_m1_add", "note": "指定孩子衣服上的小贴纸"},
+  {"case_id": "000007_gres_r2_m0_replace", "note": "羊群中的指定实例替换"},
+  {"case_id": "000040_gres_r21_m0_replace", "note": "两把椅子中的左侧目标"},
+  {"case_id": "000004_ver_r1_m0_replace", "note": "拱门上的极小灯具"},
+  {"case_id": "000184_ver_r71_m0_replace", "note": "街景中的细长物体"},
+  {"case_id": "000002_ver_r0_m0_attribute", "note": "背景三脚架的局部改色"},
+  {"case_id": "000095_ver_r40_m0_attribute", "note": "墙边细长布饰的局部改色"},
+  {"case_id": "000053_gres_r27_m0_attribute", "note": "多人场景中的指定上衣"},
+  {"case_id": "017582_ver_r6850_m0_attribute", "note": "跑鞋等小区域的改色"}
+]

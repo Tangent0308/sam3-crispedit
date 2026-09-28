@@ -1,11 +1,20 @@
 # SAMTok 派生细粒度编辑数据流水线
 
-## Current retained run
+## Current formal dataset
+
+The completed four-type result, exact source/run paths, production code map,
+statistics, package command and embedded visual examples are in
+[SAMTok 四类细粒度编辑数据：正式交付](SAMTOK_FINAL_FOUR_TYPE_DATASET.md).
+The pilot narrative below records earlier Qwen-Image-Edit-2511 and Qwen3-VL
+iterations; use the formal dataset page and the four-node guide for the
+Qwen-Image-2.1 / Qwen3.8 production method.
+
+## Historical retained remove run
 
 The historical pilot directories previously referenced in this document have
-been intentionally removed. The retained formal four-node result is organized
-at `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/`;
-use `final/` for the delivered manifests/reports and `intermediate/` for the
+been intentionally removed. The retained remove-only four-node result is organized
+at `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/`;
+use `final/` for its delivered manifests/reports and `intermediate/` for the
 full run evidence. The canonical execution root is
 `/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/`.
 
