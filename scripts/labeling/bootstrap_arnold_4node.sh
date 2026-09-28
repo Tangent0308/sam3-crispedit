@@ -62,7 +62,9 @@ check_peers() {
   fi
 }
 export PYTHONUNBUFFERED=1
-export CUDA_MODULE_LOADING="${CUDA_MODULE_LOADING:-EAGER}"
+# EAGER stalls CUDA initialization during a cold Qwen registry inspection on
+# the production H100/cu129 runtime. Override inherited values on every node.
+export CUDA_MODULE_LOADING=LAZY
 # No credentials are printed; retain standard git credential helpers.
 if [[ "${SAMTOK_KEEP_PROXY:-0}" != 1 ]]; then
   unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY

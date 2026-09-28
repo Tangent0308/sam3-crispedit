@@ -49,7 +49,8 @@ def runtime_env(command, overrides=None):
     does not put that venv's ``bin`` directory on PATH, so make this explicit
     for every subprocess stage.
     """
-    env = {**os.environ, **(overrides or {}), "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, **(overrides or {}), "PYTHONUNBUFFERED": "1",
+           "CUDA_MODULE_LOADING": "LAZY"}
     if command:
         executable = Path(command[0])
         if executable.is_absolute() and executable.name.startswith("python"):

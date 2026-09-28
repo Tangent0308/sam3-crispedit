@@ -137,6 +137,33 @@ def test_peer_failure_terminates_local_stage(tmp_path):
     assert time.monotonic()-start<10
 
 
+def test_multitype_child_does_not_inherit_eager_cuda(monkeypatch):
+    from synthesis_pipeline.run_multinode_multitype_labeling import runtime_env
+    monkeypatch.setenv('CUDA_MODULE_LOADING', 'EAGER')
+    env = runtime_env([sys.executable], {'CUDA_MODULE_LOADING': 'EAGER'})
+    assert env['CUDA_MODULE_LOADING'] == 'LAZY'
+
+
+def test_environment_probe_timeout_reaps_process(monkeypatch):
+    import os
+    from synthesis_pipeline import check_labeling_environment as module
+    monkeypatch.setattr(module, 'PROBE', 'import time; print("probe-start", flush=True); time.sleep(30)')
+    launched = []
+    popen = subprocess.Popen
+
+    def tracked_popen(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        launched.append(process)
+        assert kwargs['start_new_session'] is True
+        return process
+
+    monkeypatch.setattr(module.subprocess, 'Popen', tracked_popen)
+    with pytest.raises(TimeoutError, match='environment probe exceeded'):
+        module.run_probe_with_retry(sys.executable, 'mllm', os.environ.copy(),
+                                    timeout_seconds=0.2)
+    assert len(launched) == 1 and launched[0].poll() is not None
+
+
 def test_model_staging_byte_identity_and_no_overwrite(tmp_path):
     from synthesis_pipeline.stage_labeling_model import stage
     source=tmp_path/'source';source.mkdir()
