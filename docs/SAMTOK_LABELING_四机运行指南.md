@@ -941,6 +941,79 @@ canonical run 中的原始画廊仍保存在 `$RUN_ROOT/results/audit_gallery.ht
 
 20 条样例中，5 条模型与人工均通过，4 条模型视觉判断通过但被像素阈值误拒，8 条存在目标残留或背景质量问题，3 条存在 instruction 与 mask 语义不匹配。HTML 图片已经内嵌，不依赖外部图片路径，适合直接在预览器中打开。
 
+### 8.7 `resume-010` 审核初始化故障与修复后的续传入口
+
+`resume-010` 已完成规划和出图，但四个节点的审核日志都停在 vLLM 的参数初始化行，
+没有生成 `audit/edit_audit.jsonl`、`summary.json` 或 `node*.done.json`。20,637 张编辑图
+和规划结果完整，不需要重做。原因是四个独立的 vLLM 进程同时从共享 `virtio_pfs`
+读取约 52GB 的 Qwen3.8-27B 权重；原入口也没有把审核 GPU 显式限制为单卡，且审核进程
+把所有待审图片面板长期保留在内存中。
+
+修复提交为 `535adf4b8a8e627ab20cb0c20ff1c5b6bfab90af`，包括：
+
+- 每个节点将 Qwen3.8-27B 按文件校验、可恢复地缓存到节点本地模型目录；Qwen3.8 是
+  Hugging Face `config.json` 模型，不要求 `model_index.json`；
+- 审核子进程固定使用本机 GPU 0，并保留原来的 Qwen3.8-27B、非 thinking、prompt、
+  batch size、采样设置和审核规则；
+- 审核只按 batch 解码图片和构造三张 panel，每个 batch 完成后原子写入
+  `audit/edit_audit.jsonl`，中断时最多丢失当前 batch；
+- 写入 `audit/progress.json`，模型初始化期间每 120 秒输出 Python stack；父进程超过
+  30 分钟没有阶段或 batch 进度时主动失败并生成失败 marker，不再无限等待。
+
+先停止仍可能存活的 `resume-010` 四个 Arnold worker，然后四个 worker 使用完全相同的
+下面入口；必须使用新的 attempt ID，不要复用 `resume-010`：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
+export SAMTOK_RESUME=1
+export SAMTOK_ATTEMPT_ID="resume-011"
+export SAMTOK_PIPELINE_MODE=multitype
+export SAMTOK_LIMIT_SOURCES=0
+export SAMTOK_STAGE_MLLM_MODEL=1
+export SAMTOK_STAGE_EDITOR_MODEL=1
+export SAMTOK_AUDIT_PROGRESS_TIMEOUT=1800
+export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
+export SAMTOK_BRANCH="samtok-derived-edit-labeling"
+export SAMTOK_EXPECTED_COMMIT="535adf4b8a8e627ab20cb0c20ff1c5b6bfab90af"
+export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
+export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
+export SAMTOK_MODEL_CACHE_ROOT="/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID"
+export SAMTOK_BOOTSTRAP_DIR="/opt/tiger/tanyue/labeling_bootstrap/$SAMTOK_RUN_ID-$SAMTOK_ATTEMPT_ID"
+
+if [[ ! -d "$SAMTOK_BOOTSTRAP_DIR/.git" ]]; then
+  mkdir -p "$(dirname "$SAMTOK_BOOTSTRAP_DIR")"
+  git clone --branch "$SAMTOK_BRANCH" --single-branch \
+    "$SAMTOK_REPO_URL" "$SAMTOK_BOOTSTRAP_DIR"
+fi
+git -C "$SAMTOK_BOOTSTRAP_DIR" fetch origin "$SAMTOK_BRANCH"
+git -C "$SAMTOK_BOOTSTRAP_DIR" checkout --detach "$SAMTOK_EXPECTED_COMMIT"
+exec bash "$SAMTOK_BOOTSTRAP_DIR/scripts/labeling/bootstrap_arnold_4node_multitype.sh"
+```
+
+本轮续传会复用已有的 `data/add_replace_attribute/annotations.jsonl`、
+`reports/partition.json`、四节点 planning 和 Qwen-Image-2.1 编辑 checkpoint；审核从
+未完成状态重新开始。新的日志位于：
+
+```text
+$SAMTOK_RUN_ROOT/attempts/resume-011/logs/
+```
+
+审核运行时可查看每个节点的实时进度：
+
+```text
+$SAMTOK_RUN_ROOT/nodes/node0/audit/progress.json
+$SAMTOK_RUN_ROOT/nodes/node1/audit/progress.json
+$SAMTOK_RUN_ROOT/nodes/node2/audit/progress.json
+$SAMTOK_RUN_ROOT/nodes/node3/audit/progress.json
+```
+
+其中 `stage=model_initializing` 表示正在加载本地 27B 权重，`stage=model_ready` 表示
+模型已可推理，`stage=auditing` 的 `completed` 是已经落盘的审核 case 数。四个节点均出现
+`model_ready` 后，才开始持续增长审核数量。
+
 ### 8.6 代表性最终通过 case（10 条）
 
 下面直接嵌入 10 条 `model_pass.jsonl` 中的代表性样例，GRES 和 VER 各 5 条，覆盖四个
