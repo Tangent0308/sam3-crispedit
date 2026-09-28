@@ -10,13 +10,15 @@ from synthesis_pipeline.run_multinode_labeling import atomic, check_peer_failure
 
 def stage(source, destination, run_root=None, resume=False):
     check_peer_failure(run_root)
-    source=Path(source).resolve();destination=Path(destination).absolute()
-    if not (source/'model_index.json').is_file():raise FileNotFoundError(source/'model_index.json')
-    if destination==source or source in destination.parents:
+    source=Path(source).resolve();destination=Path(destination).resolve()
+    if not any((source/name).is_file() for name in ('model_index.json', 'config.json')):
+        raise FileNotFoundError(f'Missing model_index.json or config.json: {source}')
+    if destination==source or source in destination.parents or destination in source.parents:
         raise ValueError('Model cache must be separate from source')
     destination.mkdir(parents=True,exist_ok=resume)
     records=[]
-    files=sorted(p for p in source.rglob('*') if p.is_file() and not any(x.startswith('.') for x in p.relative_to(source).parts))
+    files=sorted(p for p in source.rglob('*') if p.is_file() and p.name != 'staging_manifest.json' and not any(x.startswith('.') for x in p.relative_to(source).parts))
+    print(f'staging model: {source} -> {destination}; files={len(files)}', flush=True)
     for i,file in enumerate(files):
         check_peer_failure(run_root)
         rel=file.relative_to(source);out=destination/rel;out.parent.mkdir(parents=True,exist_ok=True)

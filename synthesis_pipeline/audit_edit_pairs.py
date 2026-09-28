@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import hashlib
 import json
 import os
 import re
+import resource
 import sys
 import time
 from collections import Counter
@@ -160,6 +162,8 @@ def parse_args() -> argparse.Namespace:
         default="qwen8b-vllm",
     )
     parser.add_argument("--vlm-model-id", default=None)
+    parser.add_argument("--vlm-model-identity", default=None,
+                        help="Original model path for byte-verified local copies; keeps resume fingerprints stable")
     parser.add_argument("--vlm-device", default="cuda:0")
     parser.add_argument("--vlm-dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
     # The vLLM Qwen3.8 production path is non-thinking, but the structured
@@ -227,7 +231,7 @@ def input_fingerprint(
             MAXIMUM_REMOVE_OVERRIDE_OUTSIDE_FRACTION
         ),
         "vlm": args.vlm,
-        "vlm_model_id": args.vlm_model_id,
+        "vlm_model_id": getattr(args, "vlm_model_identity", None) or args.vlm_model_id,
         "vlm_dtype": args.vlm_dtype,
         "max_new_tokens": args.max_new_tokens,
     }
@@ -445,7 +449,8 @@ def reusable_audit_record(value: Any) -> bool:
     audit = value.get("audit")
     if not isinstance(audit, dict):
         return False
-    return str(audit.get("quality", "")).strip().lower() in {"pass", "fail"}
+    normalized = normalize_audit_result(audit)
+    return normalized is not None and normalized["quality"] == value["quality"]
 
 
 def deterministic_diagnostic_warnings(
@@ -513,12 +518,56 @@ def quantiles(values: list[float]) -> dict[str, float]:
     }
 
 
+def prepare_audit_task(task, args):
+    """Decode only the current batch; never retain a node's entire image set."""
+    row = task["row"]
+    fingerprint = task["input_fingerprint"] or input_fingerprint(
+        row, task["source_path"], task["edited_path"], args
+    )
+    with Image.open(task["source_path"]) as handle:
+        source = handle.convert("RGB")
+    with Image.open(task["edited_path"]) as handle:
+        edited = handle.convert("RGB")
+    try:
+        mask = mask_array(source.size, row.get("mask", []))
+        panels = audit_visual_inputs(source, edited, mask)
+        metrics = locality_metrics(source, edited, mask, args.guard_pixels)
+    finally:
+        source.close()
+        edited.close()
+    return {
+        "row": row, "input_fingerprint": fingerprint, "metrics": metrics,
+        "source_localization": panels[0], "detail_comparison": panels[1],
+        "full_comparison": panels[2],
+    }
+
+
+def close_audit_batch(batch):
+    for task in batch:
+        for key in ("source_localization", "detail_comparison", "full_comparison"):
+            task[key].close()
+
+
+def report_progress(out_dir, stage, **details):
+    """Real stage/batch progress, not a liveness heartbeat that masks hangs."""
+    value = dict(stage=stage, timestamp=time.time(), pid=os.getpid(),
+                 peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1),
+                 **details)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "progress.json"
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False) + "\n")
+    os.replace(temporary, path)
+    print("AUDIT_PROGRESS " + json.dumps(value, ensure_ascii=False), flush=True)
+
+
 def main() -> None:
     audit_started = time.perf_counter()
     args = parse_args()
     rows = load_jsonl(args.annotations_jsonl)
     if args.max_items is not None:
         rows = rows[: args.max_items]
+    report_progress(args.out_dir, "scan_checkpoints", total=len(rows))
     existing_path = args.out_dir / "edit_audit.jsonl"
     existing_rows = load_jsonl(existing_path) if args.resume and existing_path.exists() else []
     existing_by_image = {
@@ -535,33 +584,23 @@ def main() -> None:
     reused_cases = 0
     backend_load_seconds = 0.0
     inference_seconds = 0.0
-    for row in rows:
+    for index, row in enumerate(tqdm(rows, desc="audit checkpoint scan")):
         image_name = str(row.get("image", ""))
         source_path = args.source_dir / str(row.get("source_image") or image_name)
         edited_path = args.edited_dir / image_name
-        fingerprint = input_fingerprint(row, source_path, edited_path, args)
         existing = existing_by_image.get(image_name)
+        fingerprint = input_fingerprint(row, source_path, edited_path, args) if existing else None
+        if index % 100 == 0:
+            report_progress(args.out_dir, "scan_checkpoints", scanned=index, total=len(rows))
         if existing and existing.get("input_fingerprint") == fingerprint:
             output_by_image[image_name] = existing
             reused_cases += 1
             continue
-        with Image.open(source_path) as handle:
-            source = handle.convert("RGB")
-        with Image.open(edited_path) as handle:
-            edited = handle.convert("RGB")
-        mask = mask_array(source.size, row.get("mask", []))
-        source_localization, detail_comparison, full_comparison = audit_visual_inputs(
-            source, edited, mask
-        )
         tasks.append(
             {
                 "row": row,
-                "source": source,
-                "edited": edited,
-                "source_localization": source_localization,
-                "detail_comparison": detail_comparison,
-                "full_comparison": full_comparison,
-                "metrics": locality_metrics(source, edited, mask, args.guard_pixels),
+                "source_path": source_path,
+                "edited_path": edited_path,
                 "input_fingerprint": fingerprint,
             }
         )
@@ -574,11 +613,20 @@ def main() -> None:
             dtype=args.vlm_dtype,
         )
         backend_started = time.perf_counter()
-        backend = vlm.get_backend()
+        report_progress(args.out_dir, "model_initializing", pending=len(tasks), reused=reused_cases,
+                        model=args.vlm_model_id, cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
+        # Stack evidence identifies whether a remote worker is stuck in imports,
+        # registry inspection, I/O or CUDA. The parent enforces a hard timeout.
+        faulthandler.dump_traceback_later(120, repeat=True)
+        try:
+            backend = vlm.get_backend()
+        finally:
+            faulthandler.cancel_dump_traceback_later()
         backend_load_seconds = time.perf_counter() - backend_started
+        report_progress(args.out_dir, "model_ready", backend_load_seconds=round(backend_load_seconds, 3))
         batch_size = max(1, args.batch_size)
         for start in tqdm(range(0, len(tasks), batch_size), desc="edit-pair audit"):
-            batch = tasks[start : start + batch_size]
+            batch = [prepare_audit_task(task, args) for task in tasks[start : start + batch_size]]
             inference_started = time.perf_counter()
             outputs = backend.chat_batch(
                 [
@@ -593,6 +641,9 @@ def main() -> None:
                 max_new_tokens=args.max_new_tokens,
             )
             inference_seconds += time.perf_counter() - inference_started
+            close_audit_batch(batch)
+            if len(outputs) != len(batch):
+                raise RuntimeError(f"Audit returned {len(outputs)} responses for {len(batch)} cases")
             for task, raw in zip(batch, outputs):
                 parsed = normalize_audit_result(parse_json_object(raw))
                 quality = (
@@ -664,6 +715,13 @@ def main() -> None:
                     "raw_response": raw,
                     "input_fingerprint": task["input_fingerprint"],
                 }
+            # Atomic snapshot after every batch: an interrupted audit loses at
+            # most its in-flight batch, not all ~5,000 cases on this worker.
+            write_jsonl(existing_path, [output_by_image[str(row["image"])] for row in rows
+                                       if str(row["image"]) in output_by_image])
+            report_progress(args.out_dir, "auditing", completed=len(output_by_image), total=len(rows),
+                            inferred=start + len(batch), reused=reused_cases)
+            del batch
         vlm.shutdown_backend()
 
     output_rows = [output_by_image[str(row.get("image", ""))] for row in rows]
@@ -727,6 +785,7 @@ def main() -> None:
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    report_progress(args.out_dir, "complete", completed=len(output_rows), total=len(rows))
 
 
 if __name__ == "__main__":
