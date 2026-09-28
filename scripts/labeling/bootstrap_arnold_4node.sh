@@ -72,7 +72,6 @@ mkdir -p "$(dirname "$SAMTOK_REPO_DIR")"
 git clone --branch "$SAMTOK_BRANCH" --single-branch "$SAMTOK_REPO_URL" "$SAMTOK_REPO_DIR"
 cd "$SAMTOK_REPO_DIR"
 mkdir -p "$SAMTOK_CONTROL_ROOT/reports"
-git rev-parse HEAD > "$SAMTOK_CONTROL_ROOT/reports/checkout.node$ARNOLD_ID.txt"
 if [[ -n "${SAMTOK_EXPECTED_COMMIT:-}" ]]; then
   # Pinning is useful for reproducibility, but the branch tip may contain
   # documentation-only commits after the tested runtime.  Fetch the branch
@@ -81,6 +80,7 @@ if [[ -n "${SAMTOK_EXPECTED_COMMIT:-}" ]]; then
   git checkout --detach "$SAMTOK_EXPECTED_COMMIT"
   [[ "$(git rev-parse HEAD)" == "$SAMTOK_EXPECTED_COMMIT" ]] || { echo 'Unexpected branch revision' >&2; exit 1; }
 fi
+git rev-parse HEAD > "$SAMTOK_CONTROL_ROOT/reports/checkout.node$ARNOLD_ID.txt"
 python3 -m pip install --user --index-url "${SAMTOK_PACKAGE_INDEX:-https://bytedpypi.byted.org/simple/}" 'uv==0.11.32'
 export UV_BIN="$(python3 -c 'import site; print(site.getuserbase())')/bin/uv"
 export SAMTOK_RUNTIME_ROOT="$SAMTOK_REPO_DIR/.runtime"
@@ -121,6 +121,14 @@ while true; do
 done
 export DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+# Keep checkpoint identity stable when byte-identical weights move to local disk.
+export SAMTOK_QWEN38_MODEL_IDENTITY="$SAMTOK_QWEN38_MODEL"
+if [[ "${SAMTOK_STAGE_MLLM_MODEL:-1}" == 1 ]]; then
+  mllm_cache="${SAMTOK_MODEL_CACHE_ROOT:-/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID}/qwen38"
+  "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.stage_labeling_model \
+    --source "$SAMTOK_QWEN38_MODEL" --destination "$mllm_cache" --run-root "$SAMTOK_CONTROL_ROOT" "${resume_args[@]}"
+  export SAMTOK_QWEN38_MODEL="$mllm_cache"
+fi
 if [[ "${SAMTOK_STAGE_EDITOR_MODEL:-1}" == 1 ]]; then
   editor_cache="${SAMTOK_MODEL_CACHE_ROOT:-/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID}/qwen21"
   "$SAMTOK_SAM_PYTHON" -m synthesis_pipeline.stage_labeling_model \

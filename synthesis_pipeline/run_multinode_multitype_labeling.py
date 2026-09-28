@@ -257,7 +257,8 @@ def split_sources(rows, nodes):
     return shards
 
 
-def run_stage(command, log_path: Path, root: Path, timeout: int, env=None):
+def run_stage(command, log_path: Path, root: Path, timeout: int, env=None,
+              progress_path: Path | None = None, progress_timeout: int = 1800):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     print("RUN", json.dumps(command), "LOG", log_path, flush=True)
     with log_path.open("x", encoding="utf-8") as log:
@@ -270,6 +271,9 @@ def run_stage(command, log_path: Path, root: Path, timeout: int, env=None):
             start_new_session=True,
         )
         started = time.monotonic()
+        last_progress = started
+        last_heartbeat = started
+        progress_stamp = progress_path.stat().st_mtime_ns if progress_path and progress_path.exists() else None
         try:
             while process.poll() is None:
                 problem = failed(root)
@@ -277,6 +281,21 @@ def run_stage(command, log_path: Path, root: Path, timeout: int, env=None):
                     raise RuntimeError(f"peer failed: {problem}")
                 if time.monotonic() - started > timeout:
                     raise TimeoutError(f"stage timeout: {log_path}")
+                if progress_path is not None:
+                    if progress_path.exists():
+                        stamp = progress_path.stat().st_mtime_ns
+                        if stamp != progress_stamp:
+                            progress_stamp = stamp
+                            last_progress = time.monotonic()
+                    if time.monotonic() - last_progress > progress_timeout:
+                        raise TimeoutError(
+                            f"No audit stage/batch progress for {progress_timeout}s; "
+                            f"see {progress_path} and initialization stacks in {log_path}"
+                        )
+                    if time.monotonic() - last_heartbeat >= 60:
+                        print(f"AUDIT_WAIT pid={process.pid} elapsed={time.monotonic()-started:.0f}s "
+                              f"no_progress={time.monotonic()-last_progress:.0f}s log={log_path}", flush=True)
+                        last_heartbeat = time.monotonic()
                 time.sleep(2)
             if process.returncode:
                 raise RuntimeError(f"stage exited {process.returncode}: {log_path}")
@@ -457,7 +476,7 @@ def merge_results(run_root: Path, nodes: int):
                 planned.append(plan)
             if name in gen_by:
                 generated.append({**gen_by[name], **item})
-            if audit and audit_payload_complete(audit):
+            if audit and audit_row_complete(audit):
                 audited.append({**audit, "task_type": row["task_type"], "node": rank})
                 if str(audit.get("quality", audit.get("decision", ""))).lower() == "pass":
                     passed.append({**gen_by.get(name, {}), **item, "quality_label": "model_pass_not_human_verified"})
@@ -624,9 +643,14 @@ def main():
                     ]
                     if args.resume:
                         audit_command.append("--resume")
+                    if os.environ.get("SAMTOK_QWEN38_MODEL_IDENTITY"):
+                        audit_command.extend(["--vlm-model-identity", os.environ["SAMTOK_QWEN38_MODEL_IDENTITY"]])
                     stage_times["audit"] = run_stage(
                         audit_command,
                         coordination / "logs" / f"audit.node{args.rank}.log", coordination, args.timeout,
+                        env={"CUDA_VISIBLE_DEVICES": gpu_ids[0], "OMP_NUM_THREADS": "8"},
+                        progress_path=audit_root / "progress.json",
+                        progress_timeout=int(os.environ.get("SAMTOK_AUDIT_PROGRESS_TIMEOUT", "1800")),
                     )
                 if not audit_jsonl_cases_complete(
                     audit_root / "edit_audit.jsonl",
