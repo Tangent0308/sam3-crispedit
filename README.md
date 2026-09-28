@@ -1,9 +1,9 @@
 # SAMTok-derived fine-grained edit labeling
 
 This branch derives localized image-editing pairs from the existing SAMTok
-GRES-8k and VER-4k training data. It reuses MIRAGE's regional Qwen-Image-Edit
-implementation and its Git history, while removing MIRAGE benchmark-generation
-and evaluation code that is unrelated to SAMTok labeling.
+GRES-8k and VER-4k training data. It reuses MIRAGE's regional composition
+implementation and its Git history. The completed formal four-type dataset is
+documented in [SAMTOK_FINAL_FOUR_TYPE_DATASET.md](docs/SAMTOK_FINAL_FOUR_TYPE_DATASET.md).
 
 The data flow is:
 
@@ -13,30 +13,28 @@ The data flow is:
    original COCO RLE instance masks.
 3. Reuse each source image for every annotated mask and generate one independent
    regional edit case per mask.
-4. Run Qwen-Image-Edit-2511 with MIRAGE regional latent composition.
-5. Audit localization/background preservation with batched Qwen3-VL vLLM and
-   export a comparison gallery.
+4. Plan remove versus add/replace/attribute with task-specific Qwen3.8-27B
+   prompts, then edit with Qwen-Image-2.1 through vLLM-Omni (40 steps).
+5. Audit source/edited pairs with Qwen3.8-27B through vLLM and deliver the
+   model-pass cases with their masks and images.
 
-The completed four-node run is retained outside Git under the organized result
-root
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/`.
-The `final/` directory contains the copied manifests and HTML reports; the
-`intermediate/` directory is a stable view of the full source, planning,
-editing, audit, checkpoint, and log artifacts from the completed run. The
-canonical immutable run root remains under
+The final combined dataset is at
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/combined/`.
+It contains all four types in one manifest, regular hard-linked source/edited
+PNGs, COCO RLE masks, model audit fields, and a standalone HTML gallery.
+The two canonical run roots remain under
 `/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/`.
 
 ## Environment
 
-The existing environments used for MIRAGE are supported:
-
-- data preparation: `/usr/bin/python3`
-- instruction VLM: `/opt/tiger/tanyue/.venvs/vllm_mirage/bin/python`
-- Qwen image editing: `/opt/tiger/tanyue/.venvs/mirage_official/bin/python`
+The formal Arnold entry installs its pinned cu129 SAM, Qwen3.8 vLLM, and
+Qwen-Image-2.1 vLLM-Omni environments on each worker. See the
+[four-node guide](docs/SAMTOK_LABELING_四机运行指南.md) for the exact launch and
+resume commands. The combined-data materializer needs Python 3.12; its gallery
+builder also uses Pillow and pycocotools.
 
 See [`synthesis_pipeline/README_SAMTOK.md`](synthesis_pipeline/README_SAMTOK.md)
-for the implemented pilot, exact reproduction commands, output schema, and
-measured runtime.
+for historical pilot reproduction.
 
 The full design rationale, task taxonomy, quality rubric, 100-case pilot
 commands, and measured results are documented in

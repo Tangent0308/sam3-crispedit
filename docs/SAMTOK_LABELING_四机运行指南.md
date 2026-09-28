@@ -1,5 +1,12 @@
 # SAMTok 派生编辑数据：四机 32 卡运行指南
 
+**正式运行已完成。** remove `resume-002` 与 add/replace/attribute `resume-012` 的
+model-pass 样本现已合并到
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/combined/`。
+源数据、当前生产流程、精确数量、整理命令和四类可视化见
+[四类正式数据交付说明](SAMTOK_FINAL_FOUR_TYPE_DATASET.md)。下文的固定 attempt 入口保留为
+本次运行记录；如再次运行，应使用新的 run/attempt ID。
+
 本入口只扩展并行调度，不重新设计打标方法。对应远端为
 `https://github.com/Tangent0308/sam3-crispedit.git`，分支为
 `samtok-derived-edit-labeling`，不是 MIRAGE 的 origin/main，也不是 SAMTokEdit 的 dev。
@@ -226,8 +233,9 @@ bootstrap 现已支持先 checkout 指定的固定 commit。`resume-009` 已经�
 真实 H100/cu129 单 case 和 8 case 混合批次均已返回完整 JSON，8 case（add 3、replace 2、
 attribute 3）全部可解析。
 
-`resume-011` 已定位到冷启动架构检查中的 CUDA 初始化阻塞。当前续传使用 **`resume-012`**，修复说明见
-第 8.6 节；规划和 20,637 张已有编辑图继续按 checkpoint 检查复用。
+`resume-011` 已定位到冷启动架构检查中的 CUDA 初始化阻塞。最终 **`resume-012`**
+已于 2026-09-28 完成并写出 `finalize.ok.json`；规划和 20,637 张已有编辑图在该次
+续传中按 checkpoint 检查复用，27B 审核重新完整执行。修复说明见第 8.6 节。
 
 修复后可直接使用下面这段 Arnold Bash 入口续传当前 run：
 
@@ -272,7 +280,7 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 哈希用于一致性检查，但将这三条记录标记为 `invalid_input_empty_mask` 并从规划分片排除，
 有效规划输入为 31,896 条。
 
-非 remove 的实验结果建议按类型单独保留（后续再合并）：
+三类型正式 run 保留如下按类型的原始结果；四类交付已在 `combined/` 合并：
 
 ```text
 /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/<run-id>/
@@ -291,8 +299,8 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/intermediate/
 ```
 
-根目录下的 `final`、`intermediate` 目前只是兼容旧路径的符号链接；后续合并四类时另建
-`merged/`，不直接覆盖 `remove/`。
+根目录下的 `final`、`intermediate` 是兼容旧路径的符号链接；四类合并交付在独立的
+`combined/`，没有覆盖 `remove/`。
 
 #### 三类型 smoke 验证记录
 
