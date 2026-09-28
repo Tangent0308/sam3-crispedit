@@ -204,7 +204,8 @@ regional pipeline 和 torch.compile 主路径不变，只关闭不稳定的动�
 `cudaGetDeviceCount()` 返回 Error 802 (`system not yet initialized`)。这是 Arnold worker
 刚启动时驱动上下文尚未就绪，发生在 SAM 环境预检，未进入规划或编辑，也没有改变已有
 checkpoint。环境预检现在对这类明确的 transient CUDA 错误使用新 Python 进程重试（默认
-4 次、间隔 5 秒，并设置 `CUDA_MODULE_LOADING=EAGER`）；缺包、版本错误、import 错误仍会
+4 次、间隔 5 秒）；当时加入的 `CUDA_MODULE_LOADING=EAGER` 已在本次修复中撤销，
+当前统一使用 `LAZY`（原因见 8.6 节）。缺包、版本错误、import 错误仍会
 立即失败。因而后续续传应使用新的 attempt ID，不能复用已经失败的 `resume-006`。
 
 `resume-007` 在 node1 上连续 4 次预检仍返回 Error 802，未进入 pipeline。当前 SAM
@@ -225,7 +226,7 @@ bootstrap 现已支持先 checkout 指定的固定 commit。`resume-009` 已经�
 真实 H100/cu129 单 case 和 8 case 混合批次均已返回完整 JSON，8 case（add 3、replace 2、
 attribute 3）全部可解析。
 
-`resume-010` 后续停在审核初始化阶段。当前续传使用 **`resume-011`**，修复说明见
+`resume-011` 已定位到冷启动架构检查中的 CUDA 初始化阻塞。当前续传使用 **`resume-012`**，修复说明见
 第 8.6 节；规划和 20,637 张已有编辑图继续按 checkpoint 检查复用。
 
 修复后可直接使用下面这段 Arnold Bash 入口续传当前 run：
@@ -235,12 +236,14 @@ attribute 3）全部可解析。
 set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
-export SAMTOK_ATTEMPT_ID="resume-011"       # 先停止 resume-010 的全部 worker
+export SAMTOK_ATTEMPT_ID="resume-012"       # 先确认 resume-011 的全部 worker 已退出
 export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
-export SAMTOK_EXPECTED_COMMIT="535adf4b8a8e627ab20cb0c20ff1c5b6bfab90af"
+export SAMTOK_EXPECTED_COMMIT="33bfefeb69d15c3890ceebeac4a49a646287c068"
+export CUDA_MODULE_LOADING=LAZY
+export SAMTOK_ENV_PROBE_TIMEOUT=300
 export SAMTOK_STAGE_MLLM_MODEL=1
 export SAMTOK_STAGE_EDITOR_MODEL=1
 export SAMTOK_AUDIT_PROGRESS_TIMEOUT=1800
@@ -946,7 +949,7 @@ canonical run 中的原始画廊仍保存在 `$RUN_ROOT/results/audit_gallery.ht
 
 20 条样例中，5 条模型与人工均通过，4 条模型视觉判断通过但被像素阈值误拒，8 条存在目标残留或背景质量问题，3 条存在 instruction 与 mask 语义不匹配。HTML 图片已经内嵌，不依赖外部图片路径，适合直接在预览器中打开。
 
-### 8.6 `resume-010` 审核初始化故障与修复后的续传入口
+### 8.6 审核冷启动故障与当前完整续传入口（`resume-012`）
 
 `resume-010` 已完成规划和出图，但四个节点的审核日志都停在 vLLM 的参数初始化行，
 没有生成 `audit/edit_audit.jsonl`、`summary.json` 或 `node*.done.json`。20,637 张编辑图
@@ -956,7 +959,7 @@ canonical run 中的原始画廊仍保存在 `$RUN_ROOT/results/audit_gallery.ht
 现有日志没有进程堆栈或远端内存数据，尚不能将停滞直接归因于存储阻塞或 OOM。
 显式绑定 GPU 是运行隔离改进，现有日志也没有证明发生过 GPU 冲突。
 
-修复提交为 `535adf4b8a8e627ab20cb0c20ff1c5b6bfab90af`，包括：
+前一轮修复提交为 `535adf4b8a8e627ab20cb0c20ff1c5b6bfab90af`，包括：
 
 - 每个节点将 Qwen3.8-27B 按文件校验、可恢复地缓存到节点本地模型目录；Qwen3.8 是
   Hugging Face `config.json` 模型，不要求 `model_index.json`；
@@ -967,8 +970,22 @@ canonical run 中的原始画廊仍保存在 `$RUN_ROOT/results/audit_gallery.ht
 - 写入 `audit/progress.json`，模型初始化期间每 120 秒输出 Python stack；父进程超过
   30 分钟没有阶段或 batch 进度时主动失败并生成失败 marker，不再无限等待。
 
-先停止仍可能存活的 `resume-010` 四个 Arnold worker，然后四个 worker 使用完全相同的
-下面入口；必须使用新的 attempt ID，不要复用 `resume-010`：
+`resume-011` 的堆栈进一步定位到 vLLM 的 `registry._run_in_subprocess()`。
+本地复现显示，模型类导入会经线性注意力模块和 Triton 触发 `torch._C._cuda_init()`；
+`CUDA_MODULE_LOADING=EAGER` 时阻塞并在 90 秒测试期限结束后终止，改为 `LAZY` 后
+同一 GPU 上模型类导入 7.38 秒完成，全新空缓存的架构检查子进程 17.03 秒完成。
+本机原先有效的 `modelinfos` 缓存会跳过架构检查，因此此前的暖缓存测试未覆盖故障路径。
+这次已有证据指向初始化路径，不能继续将共享存储读取作为故障根因。
+
+当前修复提交为 **`33bfefeb69d15c3890ceebeac4a49a646287c068`**：bootstrap、
+三类型子进程环境和预检都固定使用 `CUDA_MODULE_LOADING=LAZY`，覆盖继承的 `EAGER`；
+MLLM 预检使用独立空缓存执行真实架构检查，再执行 CUDA 张量操作及同步。
+每个环境预检默认最多 300 秒，超时会清理整个探测进程组（含 registry 子进程），
+在复制模型和运行数据阶段之前明确失败。`enforce_eager=True` 与 CUDA 模块加载变量
+含义不同，本次保留 vLLM/Omni 的原有 CUDA Graph 策略以及所有审核输入和判定规则。
+
+先确认 `resume-011` 四个 Arnold worker 和子进程均已退出，然后提交 **4 workers × 8 GPUs**，
+四个 worker 使用完全相同的下面入口。每次重启使用新 attempt ID，不重复使用旧 ID：
 
 ```bash
 #!/usr/bin/env bash
@@ -976,15 +993,17 @@ set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
 export SAMTOK_RESUME=1
-export SAMTOK_ATTEMPT_ID="resume-011"
+export SAMTOK_ATTEMPT_ID="resume-012"
 export SAMTOK_PIPELINE_MODE=multitype
 export SAMTOK_LIMIT_SOURCES=0
 export SAMTOK_STAGE_MLLM_MODEL=1
 export SAMTOK_STAGE_EDITOR_MODEL=1
 export SAMTOK_AUDIT_PROGRESS_TIMEOUT=1800
+export CUDA_MODULE_LOADING=LAZY
+export SAMTOK_ENV_PROBE_TIMEOUT=300
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
-export SAMTOK_EXPECTED_COMMIT="535adf4b8a8e627ab20cb0c20ff1c5b6bfab90af"
+export SAMTOK_EXPECTED_COMMIT="33bfefeb69d15c3890ceebeac4a49a646287c068"
 export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
 export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
 export SAMTOK_MODEL_CACHE_ROOT="/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID"
@@ -1005,7 +1024,7 @@ exec bash "$SAMTOK_BOOTSTRAP_DIR/scripts/labeling/bootstrap_arnold_4node_multity
 未完成状态重新开始。新的日志位于：
 
 ```text
-$SAMTOK_RUN_ROOT/attempts/resume-011/logs/
+$SAMTOK_RUN_ROOT/attempts/resume-012/logs/
 ```
 
 审核运行时可查看每个节点的实时进度：
@@ -1021,10 +1040,27 @@ $SAMTOK_RUN_ROOT/nodes/node3/audit/progress.json
 模型已可推理，`stage=auditing` 的 `completed` 是已经落盘的审核 case 数。每个节点出现
 `model_ready` 后即可开始审核；节点之间独立推进。
 
-本轮验证包括 Python 编译、Shell 语法、现有回归测试，以及新增的批次中断恢复、
-完整 checkpoint 跳过模型、嵌套审核结果汇总、本地缓存损坏修复和无进度超时测试。
-本次补丁尚未完成四台 Arnold 机器上的全量实测；前文的真实 GPU 8-case 测试是
-前一轮后端修复的验证，不能替代 `resume-011` 的运行验收。
+本轮 28 项回归测试通过，覆盖继承 EAGER 时的环境纠正、预检超时清理、批次中断续传、
+完整 checkpoint 跳过模型、审核汇总和模型缓存损坏修复。新增 MLLM 真实预检在
+本地 H100/cu129 锁定环境通过，冷架构检查耗时 9.955 秒，报告记录
+`cuda_module_loading=LAZY`、`cold_registry_checked=true`。
+此外从当前 node0 正式产物抽取 8 条，使用独立空 `VLLM_CACHE_ROOT` 完成真实
+Qwen3.8-27B 审核：模型初始化 **90.908 秒**，批次推理 **22.844 秒**，总计
+**122.267 秒**；8/8 返回完整可解析 JSON，模型判为 8 pass，生产审核完整性校验通过。
+这验证启动和结果格式，不代表对 8 条图片另做了人工质量审查。测试读取共享原图和
+编辑图，输出独立保存在本地仓库 `.artifacts/resume012_validation/audit/`；
+预检及审核日志分别为 `.artifacts/resume012_validation/environment.log` 和
+`.artifacts/resume012_validation/audit.log`，未写入正式节点的审核进度。
+四台新 Arnold 机器上的全量完成状态仍需以 `resume-012/control/finalize.ok.json` 为准。
+
+查看日志（任一挂载共享盘的机器上运行）：
+
+```bash
+RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-add-replace-attribute-4n-20260926"
+tail -F "$RUN_ROOT/attempts/resume-012/logs/bootstrap.node0.log"
+# 进入审核后，另一个终端查看模型加载与 tqdm：
+tail -F "$RUN_ROOT/attempts/resume-012/logs/audit.node0.log"
+```
 
 ### 8.7 代表性最终通过 case（10 条）
 
