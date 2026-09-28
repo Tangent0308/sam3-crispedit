@@ -217,7 +217,7 @@ bootstrap 现已支持先 checkout 指定的固定 commit。`resume-009` 已经�
 `parse_error`；node3 在最终汇总时又因 `audit=null` 调用 `.get()` 退出。出图文件和规划
 文件没有损坏，无需重新出图。
 
-当前修复已推送到 commit `5bbb37f66cd169b1cebd1c1bd75fa12304135823`（包含前一提交的
+前一轮修复提交为 `5bbb37f66cd169b1cebd1c1bd75fa12304135823`（包含前一提交的
 后端修复）：审核固定使用
 `qwen38-vllm`（官方 Qwen3.8 chat template 的 `enable_thinking=False`），默认输出上限
 提高到 1024 tokens；恢复时只有 `quality` 为 pass/fail 且 `audit.quality` 有效的记录才会
@@ -225,7 +225,8 @@ bootstrap 现已支持先 checkout 指定的固定 commit。`resume-009` 已经�
 真实 H100/cu129 单 case 和 8 case 混合批次均已返回完整 JSON，8 case（add 3、replace 2、
 attribute 3）全部可解析。
 
-因此下一次使用新的 `resume-010`，让审核从头重算；规划和 20,637 张已有编辑图继续复用。
+`resume-010` 后续停在审核初始化阶段。当前续传使用 **`resume-011`**，修复说明见
+第 8.6 节；规划和 20,637 张已有编辑图继续按 checkpoint 检查复用。
 
 修复后可直接使用下面这段 Arnold Bash 入口续传当前 run：
 
@@ -234,12 +235,16 @@ attribute 3）全部可解析。
 set -euo pipefail
 
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
-export SAMTOK_ATTEMPT_ID="resume-010"       # resume-009 的审核为 parse_error，必须重新审核
+export SAMTOK_ATTEMPT_ID="resume-011"       # 先停止 resume-010 的全部 worker
 export SAMTOK_RESUME=1
 export SAMTOK_LIMIT_SOURCES=0                # 续传时保留为0，不重新采样
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
-export SAMTOK_EXPECTED_COMMIT="5bbb37f66cd169b1cebd1c1bd75fa12304135823"  # audit fix + cu129 runtime
+export SAMTOK_EXPECTED_COMMIT="535adf4b8a8e627ab20cb0c20ff1c5b6bfab90af"
+export SAMTOK_STAGE_MLLM_MODEL=1
+export SAMTOK_STAGE_EDITOR_MODEL=1
+export SAMTOK_AUDIT_PROGRESS_TIMEOUT=1800
+export SAMTOK_MODEL_CACHE_ROOT="/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID"
 export SAMTOK_PIPELINE_MODE=multitype
 export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
 export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
@@ -251,7 +256,7 @@ if [[ ! -d "$SAMTOK_BOOTSTRAP_DIR/.git" ]]; then
     "$SAMTOK_REPO_URL" "$SAMTOK_BOOTSTRAP_DIR"
 fi
 git -C "$SAMTOK_BOOTSTRAP_DIR" fetch origin "$SAMTOK_BRANCH"
-git -C "$SAMTOK_BOOTSTRAP_DIR" checkout --detach "origin/$SAMTOK_BRANCH"
+git -C "$SAMTOK_BOOTSTRAP_DIR" checkout --detach "$SAMTOK_EXPECTED_COMMIT"
 exec bash "$SAMTOK_BOOTSTRAP_DIR/scripts/labeling/bootstrap_arnold_4node.sh"
 ```
 
@@ -260,7 +265,7 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 `planning.node<N>.gpu<G>.log` 区分节点。续传时若某个旧 case 的 checkpoint 不完整或输出
 校验失败，该 case 会重新执行，完整且依赖一致的阶段结果会被复用。当前已有 manifest 中
 `001224_gres_r480_m0_add.png`、`001225_gres_r480_m0_replace.png` 和
-`001226_gres_r480_m0_attribute.png` 使用空 mask；`resume-010` 会保留原始 manifest
+`001226_gres_r480_m0_attribute.png` 使用空 mask；续传会保留原始 manifest
 哈希用于一致性检查，但将这三条记录标记为 `invalid_input_empty_mask` 并从规划分片排除，
 有效规划输入为 31,896 条。
 
@@ -941,13 +946,15 @@ canonical run 中的原始画廊仍保存在 `$RUN_ROOT/results/audit_gallery.ht
 
 20 条样例中，5 条模型与人工均通过，4 条模型视觉判断通过但被像素阈值误拒，8 条存在目标残留或背景质量问题，3 条存在 instruction 与 mask 语义不匹配。HTML 图片已经内嵌，不依赖外部图片路径，适合直接在预览器中打开。
 
-### 8.7 `resume-010` 审核初始化故障与修复后的续传入口
+### 8.6 `resume-010` 审核初始化故障与修复后的续传入口
 
 `resume-010` 已完成规划和出图，但四个节点的审核日志都停在 vLLM 的参数初始化行，
 没有生成 `audit/edit_audit.jsonl`、`summary.json` 或 `node*.done.json`。20,637 张编辑图
-和规划结果完整，不需要重做。原因是四个独立的 vLLM 进程同时从共享 `virtio_pfs`
-读取约 52GB 的 Qwen3.8-27B 权重；原入口也没有把审核 GPU 显式限制为单卡，且审核进程
-把所有待审图片面板长期保留在内存中。
+和规划结果可以继续按 checkpoint 检查复用。代码确认：每节点约 5,000 条 case 的
+原图、编辑图和三张审核面板都在模型加载前常驻内存，且所有审核结束才保存结果。
+同时四节点直接使用共享 `virtio_pfs` 上约 52GB 的 Qwen3.8-27B，存在共享 I/O 风险。
+现有日志没有进程堆栈或远端内存数据，尚不能将停滞直接归因于存储阻塞或 OOM。
+显式绑定 GPU 是运行隔离改进，现有日志也没有证明发生过 GPU 冲突。
 
 修复提交为 `535adf4b8a8e627ab20cb0c20ff1c5b6bfab90af`，包括：
 
@@ -1011,10 +1018,15 @@ $SAMTOK_RUN_ROOT/nodes/node3/audit/progress.json
 ```
 
 其中 `stage=model_initializing` 表示正在加载本地 27B 权重，`stage=model_ready` 表示
-模型已可推理，`stage=auditing` 的 `completed` 是已经落盘的审核 case 数。四个节点均出现
-`model_ready` 后，才开始持续增长审核数量。
+模型已可推理，`stage=auditing` 的 `completed` 是已经落盘的审核 case 数。每个节点出现
+`model_ready` 后即可开始审核；节点之间独立推进。
 
-### 8.6 代表性最终通过 case（10 条）
+本轮验证包括 Python 编译、Shell 语法、现有回归测试，以及新增的批次中断恢复、
+完整 checkpoint 跳过模型、嵌套审核结果汇总、本地缓存损坏修复和无进度超时测试。
+本次补丁尚未完成四台 Arnold 机器上的全量实测；前文的真实 GPU 8-case 测试是
+前一轮后端修复的验证，不能替代 `resume-011` 的运行验收。
+
+### 8.7 代表性最终通过 case（10 条）
 
 下面直接嵌入 10 条 `model_pass.jsonl` 中的代表性样例，GRES 和 VER 各 5 条，覆盖四个
 节点。每张卡左侧是带原始 mask 轮廓的 BEFORE，右侧是 AFTER；红色轮廓只用于可视化，
