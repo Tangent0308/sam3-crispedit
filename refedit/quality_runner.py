@@ -36,7 +36,7 @@ from scaleedit.io import decode_image
 
 
 DEFAULT_INPUT = Path(
-    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit"
+    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/source/RefEdit"
 )
 DEFAULT_MODEL = Path(
     "/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B"

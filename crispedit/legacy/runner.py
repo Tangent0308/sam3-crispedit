@@ -26,7 +26,7 @@ This module is retained only for regression comparison.  Run it explicitly as
 
 小规模验证建议:
     python -m crispedit.legacy.runner \
-      --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
+      --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M \
       --output-dir /tmp/crispedit_mask_parallel_test \
       --devices 0,1 \
       --max-shards-per-type 1 \

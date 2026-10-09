@@ -16,14 +16,14 @@ ScaleEdit v18 依赖的后续实现已原样隔离在 `scaleedit/sam3_backend.py
 
 | 内容 | 路径 |
 | --- | --- |
-| 原始数据 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M` |
+| 原始数据 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M` |
 | 新增 100k 输入视图 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-additional-100k-input` |
-| prefilter audit / manifest | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit` / `manifest` |
-| Qwen3.5 grounding | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding` |
-| 最终 mask | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask` |
-| runtime previews | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-previews` |
-| 新增 100k 运行记录 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-run-additional-100k-20260908` |
-| 首批恢复运行记录 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-run-resumed-after-background-audit-20260831` |
+| prefilter audit / manifest | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-fact-prefilter/audit` / `manifest` |
+| Qwen3.5 grounding | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-grounding` |
+| 最终 mask | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask` |
+| runtime previews | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask-previews` |
+| 新增 100k 运行记录 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask-run-additional-100k-20260908` |
+| 首批恢复运行记录 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask-run-resumed-after-background-audit-20260831` |
 
 ## 2. 方法
 
@@ -208,8 +208,8 @@ CRISPEDIT_SAM3_CHECKPOINT_PATH=/mnt/bn/strategy-mllm-train/common/models/sam3/sa
 ### 5.1 运行 prefilter
 
 ```bash
-CRISPEDIT_DATASET=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
-CRISPEDIT_PREFILTER=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter
+CRISPEDIT_DATASET=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M
+CRISPEDIT_PREFILTER=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-fact-prefilter
 CRISPEDIT_QWEN_VL=/mnt/bn/strategy-mllm-train/common/models/Qwen3-VL-8B-Instruct
 
 mkdir -p "$CRISPEDIT_PREFILTER/audit" "$CRISPEDIT_PREFILTER/manifest"
@@ -238,9 +238,9 @@ Qwen3.5-35B-A3B 使用 vLLM 启动四个 TP=2 replica：
 
 ```bash
 .venv-crispedit-vllm/bin/python -u crispedit_mllm_grounding.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
-  --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M \
+  --keep-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-fact-prefilter/manifest \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-grounding \
   --model-path /mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B \
   --devices 0,1,2,3,4,5,6,7 \
   --tensor-parallel-size 2 \
@@ -279,11 +279,11 @@ bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine
 
 ```bash
 .venv-crispedit-runtime/bin/python -u crispedit_grounded_mask_runner.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
-  --grounding-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M \
+  --grounding-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-grounding \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask \
   --devices 0,1,2,3,4,5,6,7 \
-  --preview-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-previews \
+  --preview-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask-previews \
   --fail-fast
 ```
 
@@ -298,7 +298,7 @@ bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine
   --write-json-array
 
 .venv-crispedit-runtime/bin/python scripts/build_category_previews.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M \
   --mask-dir /path/to/masks \
   --selection-file docs_assets/mask_pipeline/full_run_selection.json \
   --output-dir /path/to/previews_by_category \
@@ -326,13 +326,13 @@ bbox。阈值和 crop 范围可通过 `--bbox-refine-threshold`、`--bbox-refine
 2026-09-01 完成了首批 prefilter keep 数据的全量 grounding 与 SAM3 mask 生成。路径如下：
 
 ```text
-原始数据       /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
-prefilter      /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter
-keep manifest  /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest
-grounding      /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding
-mask           /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask
-runtime preview /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-previews
-run log         /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-run-resumed-after-background-audit-20260831/full_mask_labeling.log
+原始数据       /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M
+prefilter      /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-fact-prefilter
+keep manifest  /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-fact-prefilter/manifest
+grounding      /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-grounding
+mask           /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask
+runtime preview /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask-previews
+run log         /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask-run-resumed-after-background-audit-20260831/full_mask_labeling.log
 ```
 
 完整性检查为 591/591 个同名 shard、150,421 行、0 runtime error、0 临时文件。prefilter
@@ -367,11 +367,11 @@ grounding 和 SAM3 mask。新增数据只包含 `add/remove/replace/motion chang
 
 ```text
 新增输入视图    /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-additional-100k-input
-prefilter audit /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/audit
-keep manifest   /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-fact-prefilter/manifest
-grounding       /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-grounding
-mask            /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask
-run directory   /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask-run-additional-100k-20260908
+prefilter audit /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-fact-prefilter/audit
+keep manifest   /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-fact-prefilter/manifest
+grounding       /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-grounding
+mask            /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask
+run directory   /mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask-run-additional-100k-20260908
 ```
 
 394/394 个新增 input、audit、manifest、grounding 和 mask shard 均存在且逐行对齐，共

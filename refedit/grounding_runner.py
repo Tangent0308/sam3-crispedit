@@ -42,7 +42,7 @@ from scaleedit.policy import build_observation_prompt
 
 
 DEFAULT_DATASET_ROOT = Path(
-    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit"
+    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/source/RefEdit"
 )
 DEFAULT_MODEL_PATH = Path(
     "/mnt/bn/strategy-mllm-train/common/models/Qwen3.5-35B-A3B"

@@ -66,7 +66,7 @@ bash scripts/run_refedit_full.sh
 `scripts/run_refedit_filtered_mask_full.sh`。正式的自包含训练集包含 7,804 条严格通过样本，位于：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38-self-contained
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/final/RefEdit-mask-prefiltered-qwen38-self-contained
 ```
 
 `run_refedit_full.sh` 生成用于追溯的轻量版 final；将双图嵌入正式数据集的命令、结果统计和

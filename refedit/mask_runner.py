@@ -32,7 +32,7 @@ from scaleedit.mask_runner import (
 
 
 DEFAULT_DATASET_ROOT = Path(
-    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit"
+    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/source/RefEdit"
 )
 
 

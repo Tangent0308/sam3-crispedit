@@ -10,10 +10,10 @@
 
 ```text
 CrispEdit 原始图像对
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M
 
 CrispEdit mask sidecar（首批和新增 100k 的统一结果，985 shards）
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask
 
 ScaleEdit 原始图像对（100,000 rows）
 /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-balanced-final-task-100k
