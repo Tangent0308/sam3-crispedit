@@ -1,5 +1,7 @@
 # ScaleEdit 完整 mask 打标流程
 
+> **2026-10-09：本文记录的旧版产物已删除。** `datasets/ScaleEdit-filtered-balanced-final-task-100k-vllm-labeled`（100k 版本的 grounding 与 mask 结果）属于旧版统一流程，不在当前四个子集的最终数据产出链上，确认没有被在用的数据集引用后已删除。当前数据见 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/` 下的 `RefEdit_Labeling`、`CrispEdit_Labeling`、`ScaleEdit_Labeling`、`SAMTok_Derived_Edit_Labeling`；下文路径仅作历史记录，重新运行本流程会重新生成这些目录。
+
 本文只描述仓库中当前使用的 ScaleEdit 实现。它从已经清洗并带有 `final_task` 的
 source/edited image pair 出发，先用 Qwen3.5-35B-A3B 生成编辑区域合同，再用 SAM3 生成
 source 坐标系下的二值 mask。Qwen 调用由 vLLM 批处理执行，正常路径仍为 planner + locator

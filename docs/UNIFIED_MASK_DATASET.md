@@ -1,5 +1,7 @@
 # ScaleEdit + CrispEdit 统一 mask 训练集
 
+> **2026-10-09：本文记录的旧版产物已删除。** `datasets/ScaleEdit-CrispEdit-mask-train`（统一 mask 训练集）和作为输入的 `datasets/ScaleEdit-filtered-balanced-final-task-100k-vllm-labeled`属于旧版统一流程，不在当前四个子集的最终数据产出链上，确认没有被在用的数据集引用后已删除。当前数据见 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/` 下的 `RefEdit_Labeling`、`CrispEdit_Labeling`、`ScaleEdit_Labeling`、`SAMTok_Derived_Edit_Labeling`；下文路径仅作历史记录，重新运行本流程会重新生成这些目录。
+
 ## 1. 目标与路径
 
 本数据整理步骤将 ScaleEdit 和 CrispEdit 的最终图像编辑 mask 标签做严格筛选，并导出为
