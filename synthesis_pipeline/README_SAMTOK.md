@@ -10,7 +10,7 @@ Its delivered manifests and gallery are at
 the complete source/planning/editing/audit evidence is exposed through
 `.../SAMTok_Derived_Edit_Labeling/remove/intermediate/`, with the canonical immutable
 run root under
-`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/`.
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-derived-4n-20260925/`.
 
 The pilot commands below are historical development templates. Their old
 external pilot directories were intentionally removed after the formal run and
@@ -21,7 +21,7 @@ The non-remove four-node runner is independent of that frozen result:
 `scripts/labeling/bootstrap_arnold_4node_multitype.sh` expands every positive
 dataset mask into one `add`, one `replace`, and one `attribute` case, then uses
 the generic mask planner and the same Qwen-Image-2.1 editor. Its run root is
-`.../experiments/SAMTok_Derived_Edit_Labeling/four_node/<run-id>/` and its input
+`.../datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/<run-id>/` and its input
 manifest is under `data/add_replace_attribute/`; it never writes `remove/`.
 The complete Arnold clone/install/start command, including resume variables and
 log locations, is documented in section 2.3 of

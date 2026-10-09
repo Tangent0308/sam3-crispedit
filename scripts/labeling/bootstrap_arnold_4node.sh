@@ -8,7 +8,7 @@ set -euo pipefail
 : "${ARNOLD_ID:?Arnold topology missing}"
 [[ "$SAMTOK_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
 [[ "$ARNOLD_WORKER_NUM" == 4 && "$ARNOLD_WORKER_GPU" == 8 && "$ARNOLD_ID" =~ ^[0-3]$ ]] || { echo 'Requires 4 nodes x 8 GPUs' >&2; exit 2; }
-export SAMTOK_RUN_ROOT="${SAMTOK_RUN_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID}"
+export SAMTOK_RUN_ROOT="${SAMTOK_RUN_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/$SAMTOK_RUN_ID}"
 export SAMTOK_PIPELINE_MODE="${SAMTOK_PIPELINE_MODE:-remove}"
 [[ "$SAMTOK_PIPELINE_MODE" == remove || "$SAMTOK_PIPELINE_MODE" == multitype ]] || { echo 'SAMTOK_PIPELINE_MODE must be remove or multitype' >&2; exit 2; }
 export SAMTOK_RESUME="${SAMTOK_RESUME:-0}"
