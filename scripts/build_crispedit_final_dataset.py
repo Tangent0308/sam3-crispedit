@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 
 
-DATA_ROOT = Path("/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling")
+DATA_ROOT = Path("/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling")
 RUN_NAME = "labeling_4node_crispedit_full_localenv_20260925"
 STAGES = (
     ("quality", "prefilter/quality/manifest"),

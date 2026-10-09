@@ -19,7 +19,7 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 
 
-BASE = Path("/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling")
+BASE = Path("/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling")
 MODEL = Path("/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B")
 REPO = Path(__file__).resolve().parent.parent
 

@@ -18,7 +18,7 @@ export CRISPEDIT_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 [[ $ARNOLD_WORKER_NUM == 4 && $ARNOLD_WORKER_GPU == 8 && $ARNOLD_ID =~ ^[0-3]$ ]]
 [[ $CRISPEDIT_RUN_ID =~ ^[A-Za-z0-9._-]+$ ]]
 
-export CRISPEDIT_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/CrispEdit-labeling"
+export CRISPEDIT_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling"
 export CRISPEDIT_RUN_DIR="$CRISPEDIT_DATA_ROOT/runs/labeling_4node_${CRISPEDIT_RUN_ID}"
 export CRISPEDIT_INPUT_DIR="$CRISPEDIT_DATA_ROOT/source/CrispEdit-2M"
 export CRISPEDIT_QUALITY_DIR="$CRISPEDIT_DATA_ROOT/prefilter/quality"
