@@ -14,8 +14,8 @@ set -euo pipefail
 export SCALEEDIT_RUN_ID="scaleedit_300k_20260926"
 export SCALEEDIT_BRANCH="scaleedit-labeling"
 export SCALEEDIT_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
-export SCALEEDIT_RUN_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_${SCALEEDIT_RUN_ID}"
-export SCALEEDIT_INPUT_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-source"
+export SCALEEDIT_RUN_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/labeling_4node_${SCALEEDIT_RUN_ID}"
+export SCALEEDIT_INPUT_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/source/ScaleEdit-filtered-source"
 export SCALEEDIT_MODEL_DIR="/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B"
 export SCALEEDIT_SAM3_CHECKPOINT_PATH="/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt"
 export SCALEEDIT_FILTER_BATCH_SIZE=4
@@ -70,7 +70,7 @@ RUN/
 ## 3. 进度与恢复
 
 ```bash
-RUN=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926
+RUN=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/labeling_4node_scaleedit_300k_20260926
 tail -F "$RUN/logs/quality.node0.log"
 tail -F "$RUN/logs/scene.node0.log"
 tail -F "$RUN/logs/grounding.node0.log"
@@ -99,10 +99,10 @@ export SCALEEDIT_COMMIT="原运行的完整40位commit"
 ```bash
 cd /opt/tiger/tanyue/sam3-crispedit-scaleedit-labeling
 .venv-scaleedit-current/bin/python -u scripts/smoke_scaleedit_4node.py \
-  --run-dir /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_smoke_20260925
+  --run-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/labeling_4node_smoke_20260925
 # 原运行完成或退出后，验证完整shard复用：
 .venv-scaleedit-current/bin/python -u scripts/smoke_scaleedit_4node.py \
-  --run-dir /mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_smoke_20260925 \
+  --run-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/labeling_4node_smoke_20260925 \
   --resume --attempt retry1
 ```
 
@@ -111,11 +111,11 @@ cd /opt/tiger/tanyue/sam3-crispedit-scaleedit-labeling
 同RUN以 `retry1` 恢复成功：84个结果Parquet的SHA256和mtime均不变，追加日志无模型加载/推理；`control/retry1/complete.ok`已生成。报告为 `reports/resume_verification.json`。
 92项CPU测试通过，覆盖身份/二值判决、分配、同伴失败终止、恢复发布冲突、稀疏join、PNG/RLE一致性、四机环境报告。安装脚本在当前本地clone运行成功，8卡CUDA与spawn导入预检通过；完整smoke另实际执行了Qwen和SAM3。
 
-[实跑画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_smoke_20260925/review/index.html)展示两轮各3 KEEP/3 DROP及全部10个mask；`review/validation.json`为 `errors=[]`。已目视检查全部10个mask，人物、文字、多实例和新增花瓶等结果大体符合当前策略；scene原有chef/长椅边界误保留仍在，未把工程验证当作语义问题已修复。
+[实跑画廊](/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/labeling_4node_smoke_20260925/review/index.html)展示两轮各3 KEEP/3 DROP及全部10个mask；`review/validation.json`为 `errors=[]`。已目视检查全部10个mask，人物、文字、多实例和新增花瓶等结果大体符合当前策略；scene原有chef/长椅边界误保留仍在，未把工程验证当作语义问题已修复。
 
 ## 5. 正式四机运行（299,633条）
 
-`RUN=/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926`。四台物理机各8卡均通过真实Qwen预检；初始attempt于2026-09-27 09:05 UTC完成。四节点日志结尾都是`nodeN: complete`，`RUN/control/initial/complete.ok`存在且无`.failed`。每阶段均合并1,155个shard，完整信息见[`run_manifest.json`](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926/reports/run_manifest.json)。
+`RUN=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/labeling_4node_scaleedit_300k_20260926`。四台物理机各8卡均通过真实Qwen预检；初始attempt于2026-09-27 09:05 UTC完成。四节点日志结尾都是`nodeN: complete`，`RUN/control/initial/complete.ok`存在且无`.failed`。每阶段均合并1,155个shard，完整信息见[`run_manifest.json`](/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/labeling_4node_scaleedit_300k_20260926/reports/run_manifest.json)。
 
 | 阶段 | 输入行 | 结果 | 逐条错误 |
 | --- | ---: | --- | ---: |
@@ -124,4 +124,4 @@ cd /opt/tiger/tanyue/sam3-crispedit-scaleedit-labeling
 | Grounding | 25,664 | 25,553 OK；4 MASK_REVIEW；107 GROUND_FAIL | 107 |
 | Mask | 25,664 | 25,085 OK；472 MASK_REVIEW；107 GROUND_FAIL | 107 |
 
-Mask中25,518条非空，35,028个实例。完成标记只表示流程和结构校验通过；自动QC与逐条错误仍需结合可视化检查。正式结果的[90条自动OK画廊](/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926/review_full_300k/index.html)及联系图见[当前结果文档](SCALEEDIT_MASK.md#6-正式四机结果与可视化)。
+Mask中25,518条非空，35,028个实例。完成标记只表示流程和结构校验通过；自动QC与逐条错误仍需结合可视化检查。正式结果的[90条自动OK画廊](/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/labeling_4node_scaleedit_300k_20260926/review_full_300k/index.html)及联系图见[当前结果文档](SCALEEDIT_MASK.md#6-正式四机结果与可视化)。

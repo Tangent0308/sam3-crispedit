@@ -25,8 +25,8 @@ from tqdm import tqdm
 from scaleedit.runner import decode
 
 
-RUN = Path('/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/labeling_4node_scaleedit_300k_20260926')
-SOURCE = Path('/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-filtered-source')
+RUN = Path('/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/labeling_4node_scaleedit_300k_20260926')
+SOURCE = Path('/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/source/ScaleEdit-filtered-source')
 QUOTAS = {
     'object_addition': 10,
     'object_removal': 10,

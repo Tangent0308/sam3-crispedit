@@ -1,7 +1,7 @@
 # ScaleEdit 开发与验证记录
 
 当前方法见 [SCALEEDIT_MASK.md](SCALEEDIT_MASK.md)，四机入口见 [SCALEEDIT_4NODE.md](SCALEEDIT_4NODE.md)。只保留通向当前方法的开发证据，不维护旧实现入口。
-下表实验路径前缀：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/ScaleEdit/`。
+下表实验路径前缀：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit_Labeling/runs/`。
 
 | 日期/实验 | 改动与验证 | 结果与路径 |
 | --- | --- | --- |

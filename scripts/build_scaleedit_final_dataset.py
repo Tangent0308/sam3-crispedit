@@ -148,9 +148,9 @@ def inspect_existing(path: Path, name: str, schema: pa.Schema, expected_rows: in
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-dir", type=Path, default=BASE / "datasets/ScaleEdit-filtered-source")
-    parser.add_argument("--run-dir", type=Path, default=BASE / "experiments/ScaleEdit" / RUN_ID)
-    parser.add_argument("--output-dir", type=Path, default=BASE / "scaleedit_25k")
+    parser.add_argument("--source-dir", type=Path, default=BASE / "datasets/ScaleEdit_Labeling/source/ScaleEdit-filtered-source")
+    parser.add_argument("--run-dir", type=Path, default=BASE / "datasets/ScaleEdit_Labeling/runs" / RUN_ID)
+    parser.add_argument("--output-dir", type=Path, default=BASE / "datasets/ScaleEdit_Labeling/final/scaleedit_25k")
     parser.add_argument("--workers", type=int, default=24)
     parser.add_argument("--schema-workers", type=int, default=48)
     parser.add_argument("--resume-build-dir", type=Path)

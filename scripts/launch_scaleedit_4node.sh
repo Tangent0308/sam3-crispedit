@@ -8,7 +8,7 @@ set -Eeuo pipefail
 [[ $ARNOLD_WORKER_NUM == 4 && $ARNOLD_WORKER_GPU == 8 && $ARNOLD_ID =~ ^[0-3]$ ]] || exit 2
 [[ $SCALEEDIT_RUN_ID =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || exit 2
 shared_base=/mnt/bn/strategy-mllm-train/user/tanyue
-export SCALEEDIT_RUN_DIR=${SCALEEDIT_RUN_DIR:-$shared_base/experiments/ScaleEdit/labeling_4node_${SCALEEDIT_RUN_ID}}
+export SCALEEDIT_RUN_DIR=${SCALEEDIT_RUN_DIR:-$shared_base/datasets/ScaleEdit_Labeling/runs/labeling_4node_${SCALEEDIT_RUN_ID}}
 branch=${SCALEEDIT_BRANCH:-scaleedit-labeling}
 url=${SCALEEDIT_REPO_URL:-https://github.com/Tangent0308/sam3-crispedit.git}
 repo_dir=${SCALEEDIT_REPO_DIR:-/opt/tiger/tanyue/workspaces/sam3-crispedit-scaleedit-labeling-${SCALEEDIT_RUN_ID}-node${ARNOLD_ID}}
@@ -63,7 +63,7 @@ resume=()
 if [[ ${SCALEEDIT_RESUME:-0} == 1 ]]; then resume=(--resume --attempt "$attempt"); fi
 "$python_bin" -u scripts/run_scaleedit_4node.py \
   --run-dir "$SCALEEDIT_RUN_DIR" \
-  --source-dir "${SCALEEDIT_INPUT_DIR:-$shared_base/datasets/ScaleEdit-filtered-source}" \
+  --source-dir "${SCALEEDIT_INPUT_DIR:-$shared_base/datasets/ScaleEdit_Labeling/source/ScaleEdit-filtered-source}" \
   --model-path "$model" \
   --checkpoint-path "${SCALEEDIT_SAM3_CHECKPOINT_PATH:-/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt}" \
   --nodes 4 --rank "$ARNOLD_ID" --devices 0,1,2,3,4,5,6,7 \
