@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 
 
 DEFAULT_INPUT_DIR = Path(
-    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M"
+    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M"
 )
 
 REGRESSION_ROWS: List[Tuple[str, int, str]] = [

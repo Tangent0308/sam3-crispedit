@@ -5,7 +5,7 @@
 训练读取的正式结果是以下**自包含数据集**，已生成并完成全量验证：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38-self-contained
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/final/RefEdit-mask-prefiltered-qwen38-self-contained
 ```
 
 其中 `data/train-*.parquet` 共 105 个 shard、7,804 行。每行同时保存 `source_img.bytes`、
@@ -32,7 +32,7 @@ native RefEdit
 `794df41659bb52e3fb1375bbbdf73143a3ea1732`。本机只读路径为：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/source/RefEdit
 ```
 
 数据包含 105 个 `data/train-*.parquet` shard、18,249 条样本。原生字段为：
@@ -194,14 +194,14 @@ transformers、Pillow、PyArrow、SAM3 等依赖，不修改模型权重和数�
 第一步，在 tmux 中运行 prefilter：
 
 ```bash
-mkdir -p /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-quality-prefilter-qwen38/logs
+mkdir -p /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-quality-prefilter-qwen38/logs
 
 tmux new-session -d -s refedit_quality_prefilter \
   "cd /opt/tiger/tanyue/sam3-crispedit-refedit-labeling && \
    bash scripts/run_refedit_quality_prefilter_full.sh \
-   2>&1 | tee -a /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-quality-prefilter-qwen38/logs/full_prefilter.log"
+   2>&1 | tee -a /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-quality-prefilter-qwen38/logs/full_prefilter.log"
 
-tail -f /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-quality-prefilter-qwen38/logs/full_prefilter.log
+tail -f /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-quality-prefilter-qwen38/logs/full_prefilter.log
 ```
 
 确认 `run_summary.json` 后，第二步只对 PASS 样本运行 grounding 与 SAM3：
@@ -211,7 +211,7 @@ tmux new-session -d -s refedit_filtered_mask \
   "cd /opt/tiger/tanyue/sam3-crispedit-refedit-labeling && \
    bash scripts/run_refedit_filtered_mask_full.sh"
 
-tail -f /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/logs/full_labeling.log
+tail -f /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/logs/full_labeling.log
 ```
 
 第二个脚本会依次运行 prefilter 完整性验证、PASS-only grounding、SAM3、selected-run
@@ -221,12 +221,12 @@ validation、finalization 和 final validation。已有且版本、行数、iden
 ### 5.2 一条命令运行全部阶段
 
 ```bash
-mkdir -p /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/logs
+mkdir -p /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/logs
 
 tmux new-session -d -s refedit_full_pipeline \
   "cd /opt/tiger/tanyue/sam3-crispedit-refedit-labeling && \
    bash scripts/run_refedit_full.sh \
-   2>&1 | tee -a /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/logs/pipeline.log"
+   2>&1 | tee -a /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/logs/pipeline.log"
 ```
 
 环境变量可覆盖默认路径：
@@ -246,9 +246,9 @@ REFEDIT_QUALITY_MODEL_PATH
 
 ```bash
 .venv-refedit-vllm/bin/python -u refedit_mllm_grounding.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit \
-  --prefilter-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-quality-prefilter-qwen38/manifest \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/grounding \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/source/RefEdit \
+  --prefilter-manifest-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-quality-prefilter-qwen38/manifest \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/grounding \
   --devices 0,1,2,3,4,5,6,7 \
   --tensor-parallel-size 2 \
   --batch-size 8 \
@@ -259,9 +259,9 @@ REFEDIT_QUALITY_MODEL_PATH
 
 ```bash
 .venv-refedit-vllm/bin/python scripts/validate_refedit_final_mask_dataset.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit \
-  --final-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/final \
-  --report-json /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/final/audit/validation_report.json
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/source/RefEdit \
+  --final-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/final \
+  --report-json /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/final/audit/validation_report.json
 ```
 
 ### 5.5 构建并验证正式自包含结果
@@ -270,14 +270,14 @@ REFEDIT_QUALITY_MODEL_PATH
 
 ```bash
 .venv-refedit-vllm/bin/python scripts/build_refedit_self_contained_dataset.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit \
-  --final-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/final \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38-self-contained \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/source/RefEdit \
+  --final-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/final \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/final/RefEdit-mask-prefiltered-qwen38-self-contained \
   --workers 8 --resume
 
 .venv-refedit-vllm/bin/python scripts/validate_refedit_self_contained_dataset.py \
-  --dataset-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38-self-contained \
-  --report-json /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38-self-contained/audit/validation_report.json
+  --dataset-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/final/RefEdit-mask-prefiltered-qwen38-self-contained \
+  --report-json /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/final/RefEdit-mask-prefiltered-qwen38-self-contained/audit/validation_report.json
 ```
 
 `--resume` 复用同时存在完成报告与输出文件的 shard；如需重建已有 shard，应使用新的
@@ -291,7 +291,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 from PIL import Image
 
-root = Path("/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38-self-contained")
+root = Path("/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/final/RefEdit-mask-prefiltered-qwen38-self-contained")
 shard = next((root / "data").glob("train-*.parquet"))
 batch = next(pq.ParquetFile(shard).iter_batches(
     batch_size=1, columns=["sample_id", "instruction", "source_img", "target_img", "mask_png"]
@@ -308,7 +308,7 @@ assert mask.size == source.size
 ### 6.1 Prefilter
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-quality-prefilter-qwen38/
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-quality-prefilter-qwen38/
   audit/          105 个全量审计 shard
   manifest/       105 个 PASS-only shard
   logs/
@@ -319,7 +319,7 @@ assert mask.size == source.size
 ### 6.2 Mask 与轻量版 final
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/
   grounding/      从头运行时生成，只含 prefilter PASS
   masks/          从头运行时生成，只含 prefilter PASS
   logs/
@@ -335,7 +335,7 @@ assert mask.size == source.size
     run_summary.json
 ```
 
-这批已物化结果直接复用了 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask`
+这批已物化结果直接复用了 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask`
 的 `grounding/` 与 `masks/`，上面两个新目录尚未生成；从头执行第 5 节脚本时才会写入。
 
 最终 `data/train-*.parquet` 的主要字段：
@@ -355,7 +355,7 @@ sam_version, mask_policy_version
 ### 6.3 正式自包含数据集
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38-self-contained/
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/final/RefEdit-mask-prefiltered-qwen38-self-contained/
   data/train-*.parquet              105 个可直接训练的 shard
   audit/final_manifest.parquet      筛选及来源审计
   audit/rejected_mask_qc.parquet    32 条拒绝样本
@@ -420,7 +420,7 @@ instruction、尺寸、二值像素、面积及版本：`validation_error_count 
 全部为 PNG。`run_summary.json` 中 `rows = source_final_rows = 7804`；`_SUCCESS` 已写入。
 
 这批正式数据的轻量版 final 由先前相同 grounding/mask 版本的完整 RefEdit 打标结果
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask` 通过严格 identity 与版本连接
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask` 通过严格 identity 与版本连接
 物化，mask payload 未重新推理；再经自包含构建脚本嵌入原始双图。新的标准生产入口则在 grounding 前直接读取 PASS manifest，
 因此从头运行不会再为 10,413 条未通过 prefilter 的样本调用 Qwen3.5 或 SAM3。
 
@@ -431,7 +431,7 @@ instruction、尺寸、二值像素、面积及版本：`validation_error_count 
 prefilter 可视化只放被过滤掉的 FAIL/DROP case，不混入 PASS：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/audit/prefilter_drop_selection_20260915.json
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/audit/prefilter_drop_selection_20260915.json
 ```
 
 共 10 条，覆盖未完成编辑、错误位置、源图生成瑕疵、target 畸形、无效 no-op、移除残留和
@@ -452,7 +452,7 @@ mask 可视化使用另一份选择文件，10 条样本均满足 prefilter PASS
 confidence 不低于 0.95：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/audit/mask_pass_selection_seed20260915.json
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/audit/mask_pass_selection_seed20260915.json
 ```
 
 以下 mask 图每行从左到右是 source + MLLM bbox、target + MLLM bbox、source + final mask、
@@ -471,19 +471,19 @@ binary final mask。
 
 ```bash
 .venv-refedit-vllm/bin/python scripts/visualize_refedit_quality_prefilter.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit \
-  --audit-parquet /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-quality-prefilter-qwen38/audit \
-  --selection-file /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/audit/prefilter_drop_selection_20260915.json \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/source/RefEdit \
+  --audit-parquet /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-quality-prefilter-qwen38/audit \
+  --selection-file /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/audit/prefilter_drop_selection_20260915.json \
   --verdict FAIL --rows-per-page 5 \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/visualization/prefilter_drop
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/visualization/prefilter_drop
 
 .venv-refedit-vllm/bin/python scripts/visualize_refedit_masks.py \
-  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit \
-  --grounding-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask/grounding \
-  --mask-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask/masks \
-  --selection-file /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/audit/mask_pass_selection_seed20260915.json \
+  --input-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/source/RefEdit \
+  --grounding-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask/grounding \
+  --mask-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask/masks \
+  --selection-file /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/audit/mask_pass_selection_seed20260915.json \
   --rows-per-page 5 \
-  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit-mask-prefiltered-qwen38/visualization/mask_pass
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/RefEdit_Labeling/stages/RefEdit-mask-prefiltered-qwen38/visualization/mask_pass
 ```
 
 ## 9. 注意事项

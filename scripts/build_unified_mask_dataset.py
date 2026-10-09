@@ -32,10 +32,10 @@ SCHEMA_VERSION = "edit_mask_train_v1"
 QUALITY_POLICY_VERSION = "strict_qc_and_integrity_v1"
 
 DEFAULT_CRISPEDIT_RAW_ROOT = Path(
-    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M"
+    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/source/CrispEdit-2M"
 )
 DEFAULT_CRISPEDIT_MASK_ROOT = Path(
-    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit-2M-mask"
+    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/CrispEdit_Labeling/iterations/datasets/CrispEdit-2M-mask"
 )
 DEFAULT_SCALEEDIT_RAW_ROOT = Path(
     "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/"
