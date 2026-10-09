@@ -1,5 +1,7 @@
 # 同类多实例细粒度指代编辑筛选
 
+> **2026-10-09：本文记录的旧版产物已删除。** `datasets/ScaleEdit-CrispEdit-mask-referential-filter`（筛选结果）和作为输入的 `datasets/ScaleEdit-CrispEdit-mask-train`属于旧版统一流程，不在当前四个子集的最终数据产出链上，确认没有被在用的数据集引用后已删除。当前数据见 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/` 下的 `RefEdit_Labeling`、`CrispEdit_Labeling`、`ScaleEdit_Labeling`、`SAMTok_Derived_Edit_Labeling`；下文路径仅作历史记录，重新运行本流程会重新生成这些目录。
+
 ## 1. 目标与输入
 
 本流程从已经通过 mask QC、且已经统一字段的 CrispEdit 与 ScaleEdit 训练数据中，筛选：

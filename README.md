@@ -110,6 +110,6 @@ bash scripts/run_refedit_full.sh
 
 2026-09-14 全量筛选已完成：输入 167,345 条，严格 `keep` 17,095 条，`review`
 23,289 条，宽松集合 `keep + review` 共 40,384 条。生产结果位于
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-CrispEdit-mask-referential-filter`；
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/ScaleEdit-CrispEdit-mask-referential-filter`（2026-10-09 作为旧版产物删除，未被在用数据引用）；
 完整统计与固定随机抽样看板见
 [筛选文档的全量结果章节](docs/REFERENTIAL_EDIT_DIFFICULTY_FILTER.md#8-全量结果与随机抽样2026-09-14)。
