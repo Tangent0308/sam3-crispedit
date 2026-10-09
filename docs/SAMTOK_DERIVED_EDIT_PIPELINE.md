@@ -16,7 +16,7 @@ been intentionally removed. The retained remove-only four-node result is organiz
 at `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/remove/`;
 use `final/` for its delivered manifests/reports and `intermediate/` for the
 full run evidence. The canonical execution root is
-`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/`.
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-derived-4n-20260925/`.
 
 The older paths below are historical experiment names retained as provenance
 in the design narrative; their external artifacts are no longer available and

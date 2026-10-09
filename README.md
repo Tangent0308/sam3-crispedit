@@ -23,7 +23,7 @@ The final combined dataset is at
 It contains all four types in one manifest, regular hard-linked source/edited
 PNGs, COCO RLE masks, model audit fields, and a standalone HTML gallery.
 The two canonical run roots remain under
-`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/`.
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/`.
 
 ## Environment
 

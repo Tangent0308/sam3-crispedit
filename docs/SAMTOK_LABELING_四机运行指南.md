@@ -83,7 +83,7 @@ Arnold平台注入的变量与本任务的使用方式：
 本次维护的共享副本路径为：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/launchers/bootstrap_arnold_4node.sh
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/launchers/bootstrap_arnold_4node.sh
 ```
 
 Arnold 配置 **4 workers × 8 GPUs**，在四个 worker 共同入口填写同一个新名称：
@@ -93,7 +93,7 @@ Arnold 配置 **4 workers × 8 GPUs**，在四个 worker 共同入口填写同�
 set -euo pipefail
 export SAMTOK_RUN_ID="samtok-remove-4n-20260924-001"  # 每次提交换新名字
 export SAMTOK_LIMIT_SOURCES=0                      # 0=全部正例，不是0条
-bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/launchers/bootstrap_arnold_4node.sh
+bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/launchers/bootstrap_arnold_4node.sh
 ```
 
 不需要 W&B key。不要仅在 worker0 执行，也不要用本机现存 repo 代替 clone。
@@ -106,7 +106,7 @@ bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Lab
 独立输入目录；历史 pilot 目录已经清理，不再使用）：
 
 ```bash
-export SAMTOK_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID/data/source"
+export SAMTOK_DATA_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/$SAMTOK_RUN_ID/data/source"
 ```
 
 这里必须已有 `annotations.jsonl` 和 `sources/`。正式 run 默认使用
@@ -129,7 +129,7 @@ $SAMTOK_RUN_ROOT/data/add_replace_attribute/
 set -euo pipefail
 export SAMTOK_RUN_ID="samtok-add-replace-attribute-4n-20260926"
 export SAMTOK_LIMIT_SOURCES=0
-bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/launchers/bootstrap_arnold_4node_multitype.sh
+bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/launchers/bootstrap_arnold_4node_multitype.sh
 ```
 
 如果共享 `launchers/` 尚未同步，使用下面的完整 Arnold 入口。四个 worker 粘贴同一段；
@@ -145,7 +145,7 @@ export SAMTOK_LIMIT_SOURCES=0
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
 export SAMTOK_PIPELINE_MODE=multitype
-export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
+export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/$SAMTOK_RUN_ID"
 export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
 export SAMTOK_BOOTSTRAP_DIR="/opt/tiger/tanyue/labeling_bootstrap/$SAMTOK_RUN_ID"
 
@@ -257,7 +257,7 @@ export SAMTOK_STAGE_EDITOR_MODEL=1
 export SAMTOK_AUDIT_PROGRESS_TIMEOUT=1800
 export SAMTOK_MODEL_CACHE_ROOT="/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID"
 export SAMTOK_PIPELINE_MODE=multitype
-export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
+export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/$SAMTOK_RUN_ID"
 export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
 export SAMTOK_BOOTSTRAP_DIR="/opt/tiger/tanyue/labeling_bootstrap/$SAMTOK_RUN_ID-$SAMTOK_ATTEMPT_ID"
 
@@ -283,7 +283,7 @@ Arnold 仍需配置 **4 workers × 8 GPUs**，并在四个 worker 使用同一�
 三类型正式 run 保留如下按类型的原始结果；四类交付已在 `combined/` 合并：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/<run-id>/
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/<run-id>/
   data/add_replace_attribute/                 # 三类型输入 manifest
   nodes/node<N>/planning/                     # ground/scope/regions
   nodes/node<N>/generation/context_grounded_v4_qwen21/edited/
@@ -352,7 +352,7 @@ set -euo pipefail
 : "${ARNOLD_ID:?Arnold topology missing}"
 [[ "$SAMTOK_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
 [[ "$ARNOLD_WORKER_NUM" == 4 && "$ARNOLD_WORKER_GPU" == 8 && "$ARNOLD_ID" =~ ^[0-3]$ ]] || { echo 'Requires 4 nodes x 8 GPUs' >&2; exit 2; }
-export SAMTOK_RUN_ROOT="${SAMTOK_RUN_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID}"
+export SAMTOK_RUN_ROOT="${SAMTOK_RUN_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/$SAMTOK_RUN_ID}"
 export SAMTOK_RESUME="${SAMTOK_RESUME:-0}"
 [[ "$SAMTOK_RESUME" == 0 || "$SAMTOK_RESUME" == 1 ]] || { echo 'SAMTOK_RESUME must be 0 or 1' >&2; exit 2; }
 resume_args=()
@@ -521,7 +521,7 @@ export SAMTOK_RUN_ID="samtok-derived-4n-20260925"
 export SAMTOK_RESUME=1
 export SAMTOK_ATTEMPT_ID="resume-001"  # 下次再重启改成resume-002，不重复使用
 export SAMTOK_LIMIT_SOURCES=0
-bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/launchers/bootstrap_arnold_4node.sh
+bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/launchers/bootstrap_arnold_4node.sh
 ```
 
 这仍会在每台机器本地clone对应分支并安装环境。clone目录增加
@@ -561,7 +561,7 @@ $SAMTOK_RUN_ROOT/attempts/resume-001/
 编辑、审核也打印复用与待执行数量。不要按追加日志的行数累计完成量，应读取当前JSONL或summary。
 
 ```bash
-run_root="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925"
+run_root="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-derived-4n-20260925"
 tail -f "$run_root/attempts/resume-001/logs/bootstrap.node0.log"
 # 实际规划worker的模型输出和进度：
 tail -f "$run_root/nodes/node0/pipeline/logs/plan_0.log"
@@ -650,7 +650,7 @@ Arnold镜像需已有git、curl、flock、可运行的python3/pip、NVIDIA驱动
 默认正式运行根目录：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/$SAMTOK_RUN_ID
 ├── logs/bootstrap.node0.log ... node3.log    # clone、安装、准备与调度输出
 ├── logs/pipeline.node0.log ... node3.log     # 各节点规划/解析/编辑总入口
 ├── logs/audit.node0.log ... node3.log        # 审核总入口
@@ -674,7 +674,7 @@ Arnold镜像需已有git、curl、flock、可运行的python3/pip、NVIDIA驱动
 
 ```bash
 export SAMTOK_RUN_ID="samtok-remove-4n-20260924-001"
-export RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
+export RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/$SAMTOK_RUN_ID"
 tail -F "$RUN_ROOT/logs/bootstrap.node0.log"
 tail -F "$RUN_ROOT/nodes/node0/pipeline/logs/plan_0.log"
 tail -F "$RUN_ROOT/nodes/node0/pipeline/editing/logs/editor_0.log"  # 模型tqdm
@@ -736,7 +736,7 @@ cat "$RUN_ROOT/reports/final.json"
 小批次冷启动时间不能外推为100k稳定吞吐，也不保证四机刚好达到四倍加速。
 
 2026-09-25 OpenCV修复的验证记录见统一迭代文档最后小节，证据目录为
-`experiments/SAMTok_Derived_Edit_Labeling/opencv_fix_20260925`。新锁文件已从空目录安装，
+`datasets/SAMTok_Derived_Edit_Labeling/runs/opencv_fix_20260925`。新锁文件已从空目录安装，
 全部环境实际使用headless；回归测试348 passed / 6 skipped，5项融合测试另在新SAM环境通过。
 修复后单机8卡模拟四worker的9个region已全部完成出图、审核及汇总，四worker退出0，
 `run/control/finalize.ok.json`存在。模型审核9 pass，未新增人工质量验收。原四机任务没有自动重启。
@@ -756,7 +756,7 @@ code commit:  165bfaf2a57bce1563686b1e2e786093851c3ba8
 共享运行根目录：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-derived-4n-20260925
 ```
 
 整理后的正式数据交付根目录：
@@ -795,7 +795,7 @@ audit、checkpoint 和日志通过 `intermediate/` 保持原始目录结构，�
 最终 attempt 目录：
 
 ```text
-/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/attempts/resume-002
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-derived-4n-20260925/attempts/resume-002
 ```
 
 本轮曾经使用过`resume-001`，该 attempt 在外部任务生命周期终止时停止；正确的规划、SAM、编辑和审核检查点均保留，之后使用新的`resume-002`续跑。`resume-002`最终产生四个节点的`node<N>.done.json`，并写入：
@@ -1012,7 +1012,7 @@ export SAMTOK_ENV_PROBE_TIMEOUT=300
 export SAMTOK_REPO_URL="https://github.com/Tangent0308/sam3-crispedit.git"
 export SAMTOK_BRANCH="samtok-derived-edit-labeling"
 export SAMTOK_EXPECTED_COMMIT="33bfefeb69d15c3890ceebeac4a49a646287c068"
-export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/$SAMTOK_RUN_ID"
+export SAMTOK_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/$SAMTOK_RUN_ID"
 export SAMTOK_DATA_ROOT="$SAMTOK_RUN_ROOT/data/add_replace_attribute"
 export SAMTOK_MODEL_CACHE_ROOT="/opt/tiger/tanyue/labeling_model_cache/$SAMTOK_RUN_ID"
 export SAMTOK_BOOTSTRAP_DIR="/opt/tiger/tanyue/labeling_bootstrap/$SAMTOK_RUN_ID-$SAMTOK_ATTEMPT_ID"
@@ -1064,7 +1064,7 @@ Qwen3.8-27B 审核：模型初始化 **90.908 秒**，批次推理 **22.844 秒*
 查看日志（任一挂载共享盘的机器上运行）：
 
 ```bash
-RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-add-replace-attribute-4n-20260926"
+RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-add-replace-attribute-4n-20260926"
 tail -F "$RUN_ROOT/attempts/resume-012/logs/bootstrap.node0.log"
 # 进入审核后，另一个终端查看模型加载与 tqdm：
 tail -F "$RUN_ROOT/attempts/resume-012/logs/audit.node0.log"

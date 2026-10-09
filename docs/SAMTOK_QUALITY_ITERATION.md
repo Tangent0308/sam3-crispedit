@@ -9,7 +9,7 @@ is available at
 `final/` contains the delivered manifests and reports, while `intermediate/`
 provides the full source, planning, editing, audit, checkpoint, and log view.
 The canonical run root remains
-`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/`.
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-derived-4n-20260925/`.
 
 The old paths in this historical record are descriptive only; do not use them
 as current data or resume paths.
@@ -2441,7 +2441,7 @@ adaptive-remove-v5、40步/seed0、completion-v5/adaptive/pixel-veto均保持原
 源码和测试、文档会一起提交；模型、环境、图片、日志均不进入Git。
 
 证据根目录：
-`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/deployment_validation_20260924`。
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/deployment_validation_20260924`。
 其中`run/`保留第一次共享权重超时，`run_localweights/`为本地权重重测，
 `logs/setup_final_locks.log`为最终锁定环境的完整新建安装日志。
 本轮全套单元测试341 passed / 6 skipped；另在新建SAM环境执行融合测试5项全部通过。
@@ -2481,7 +2481,7 @@ node0/node2通过旧检查并继续复制模型，尚未开始生成。初步判
 新增回归覆盖混装、GUI二进制残留、权重校验期间peer失败以及四节点环境等待和失败优先行为。
 
 本轮证据保存在
-`/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/opencv_fix_20260925/`，
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/opencv_fix_20260925/`，
 `logs/setup.log`为从空目录安装记录，`run/`为真实模型完整链路验证。
 验证已完成：本机8卡分为四worker各2卡，8源图9region，9/9成图、9/9审核，四worker退出0，
 `run/control/finalize.ok.json`已产生；模型9 pass、0解析错误，本轮未新增Assistant逐图质量评审。

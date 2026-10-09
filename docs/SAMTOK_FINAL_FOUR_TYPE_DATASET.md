@@ -9,8 +9,8 @@ parquet，但 `remove` 和 `add/replace/attribute` 分别由两个正式四机 r
 | 用途 | 路径 | 内容 |
 |---|---|---|
 | 源训练数据 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Training_Data/mix_gres8k_ver4k_train.parquet` | SAMTok GRES-8k 与 VER-4k 的原图、指代问题/答案和实例 COCO RLE mask |
-| remove 正式 run | `/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925/` | `relations-v16` 规划、Qwen-Image-2.1 出图、27B remove 专项审核 |
-| 三类型正式 run | `/mnt/bn/strategy-mllm-train/user/tanyue/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-add-replace-attribute-4n-20260926/` | 同一 source/mask 各派生 add、replace、attribute，`resume-012` 完成通用审核 |
+| remove 正式 run | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-derived-4n-20260925/` | `relations-v16` 规划、Qwen-Image-2.1 出图、27B remove 专项审核 |
+| 三类型正式 run | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-add-replace-attribute-4n-20260926/` | 同一 source/mask 各派生 add、replace、attribute，`resume-012` 完成通用审核 |
 | 四类交付目录 | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/combined/` | 自包含的通过样本清单、原图、编辑图、RLE mask、审核字段与可视化 |
 
 源 parquet 共 12,337 行。`prepare_samtok_data.py` 的 positive index 去掉 4,666 条
@@ -78,8 +78,8 @@ remove 最终 attempt 为 `resume-002`；三类型最终 attempt 为 `resume-012
 cd /opt/tiger/tanyue/samtok-derived-edit-labeling
 ROOT=/mnt/bn/strategy-mllm-train/user/tanyue
 python3 -m synthesis_pipeline.materialize_combined_samtok_dataset \
-  --remove-run "$ROOT/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-derived-4n-20260925" \
-  --multitype-run "$ROOT/experiments/SAMTok_Derived_Edit_Labeling/four_node/samtok-add-replace-attribute-4n-20260926" \
+  --remove-run "$ROOT/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-derived-4n-20260925" \
+  --multitype-run "$ROOT/datasets/SAMTok_Derived_Edit_Labeling/runs/four_node/samtok-add-replace-attribute-4n-20260926" \
   --out-root "$ROOT/datasets/SAMTok_Derived_Edit_Labeling/combined" --workers 16
 python3 -m synthesis_pipeline.build_combined_samtok_gallery \
   --dataset-root "$ROOT/datasets/SAMTok_Derived_Edit_Labeling/combined" \
