@@ -7,6 +7,7 @@ from sa1b_pipeline.training import build_training_rows
 from sa1b_pipeline.mllm import _safe_parse
 from sa1b_pipeline.import_selected_sources import import_sources
 from sa1b_pipeline.instructions import build_unit
+from sa1b_pipeline.editor import edit_prompt
 
 
 def _pair(**updates):
@@ -90,3 +91,10 @@ def test_add_instruction_requires_a_new_item_payload(tmp_path: Path):
                       str(tmp_path / "m.png"), geometry, [])
     assert unit.payload == "a small brass badge"
     assert unit.instruction_noref == "Add a small brass badge to the selected chair."
+
+
+def test_remove_editor_prompt_requires_background_reconstruction():
+    prompt = edit_prompt({"operation": "remove", "instruction_ref": "Remove the selected chair."})
+    assert "Completely erase" in prompt
+    assert "newly exposed background" in prompt
+    assert "cyan/gray patch" in prompt
