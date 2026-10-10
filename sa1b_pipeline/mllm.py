@@ -30,13 +30,41 @@ class VLLMSelector:
 
     def __init__(self, model_id: str, *, tensor_parallel_size: int = 1, max_model_len: int = 8192,
                  max_new_tokens: int = 1200, temperature: float = 0.0):
-        from transformers import AutoProcessor  # type: ignore
-        from vllm import LLM, SamplingParams  # type: ignore
+        # Reuse the parent repository's production Qwen3.8 backend. It pins
+        # the multimodal processor settings and the non-thinking chat template
+        # used by the completed derived-edit runs.
+        try:
+            from utils import vlm_utils
+            vlm_utils.configure_backend("qwen38-vllm", model_id=model_id, device="cuda:0", dtype="bf16")
+            self.backend = vlm_utils.get_backend()
+            self._inherited_backend = True
+            self.params = None
+            self.max_new_tokens = max_new_tokens
+            return
+        except (ImportError, ModuleNotFoundError, AttributeError, RuntimeError, ValueError):
+            self._inherited_backend = False
+        try:
+            from transformers import AutoProcessor  # type: ignore
+            from vllm import LLM, SamplingParams  # type: ignore
+            import vllm
+        except ImportError as exc:
+            raise RuntimeError(
+                "Qwen3.8 selection requires the pinned vLLM/Transformers runtime; "
+                "install requirements/mllm-vllm-cu129.txt"
+            ) from exc
+        version = tuple(int(x) for x in re.findall(r"\d+", vllm.__version__)[:2])
+        if version < (0, 28):
+            raise RuntimeError(
+                f"vLLM {vllm.__version__} does not support Qwen3_5ForConditionalGeneration; "
+                "install requirements/mllm-vllm-cu129.txt"
+            )
         self.SamplingParams = SamplingParams
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.processor = AutoProcessor.from_pretrained(model_id, padding_side="left")
         self.llm = LLM(model=model_id, dtype="bfloat16", tensor_parallel_size=tensor_parallel_size,
                        max_model_len=max_model_len, trust_remote_code=True,
-                       limit_mm_per_prompt={"image": 3}, enable_prefix_caching=True)
+                       max_num_seqs=8, max_num_batched_tokens=8192,
+                       limit_mm_per_prompt={"image": 3}, enable_prefix_caching=True,
+                       gpu_memory_utilization=0.85, enforce_eager=True)
         self.params = SamplingParams(temperature=temperature, max_tokens=max_new_tokens,
                                      top_p=1.0, stop=["<|im_end|>"])
 
@@ -45,17 +73,27 @@ class VLLMSelector:
         messages = [{"role": "user", "content": [
             {"type": "image", "image": image}, {"type": "text", "text": prompt},
         ]}]
-        rendered = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        rendered = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
+                                                       enable_thinking=False)
         return rendered, image
 
     def _multi_messages(self, image_paths: list[str], prompt: str) -> tuple[str, list[Image.Image]]:
         images = [Image.open(path).convert("RGB") for path in image_paths]
         content = [{"type": "image", "image": image} for image in images]
         content.append({"type": "text", "text": prompt})
-        rendered = self.processor.apply_chat_template([{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True)
+        rendered = self.processor.apply_chat_template([{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True,
+                                                       enable_thinking=False)
         return rendered, images
 
     def generate(self, jobs: list[tuple[str, str]]) -> list[dict[str, Any]]:
+        if self._inherited_backend:
+            messages = []
+            for image_path, prompt in jobs:
+                messages.append([{"role": "user", "content": [
+                    {"type": "image", "image": Image.open(image_path).convert("RGB")},
+                    {"type": "text", "text": prompt},
+                ]}])
+            return [parse_json(x) for x in self.backend.chat_batch(messages, max_new_tokens=self.max_new_tokens)]
         requests = []
         images = []
         for image_path, text in jobs:
@@ -70,6 +108,13 @@ class VLLMSelector:
         return result
 
     def generate_multimage(self, jobs: list[tuple[list[str], str]]) -> list[dict[str, Any]]:
+        if self._inherited_backend:
+            messages = []
+            for image_paths, prompt in jobs:
+                content = [{"type": "image", "image": Image.open(p).convert("RGB")} for p in image_paths]
+                content.append({"type": "text", "text": prompt})
+                messages.append([{"role": "user", "content": content}])
+            return [parse_json(x) for x in self.backend.chat_batch(messages, max_new_tokens=self.max_new_tokens)]
         requests = []
         for paths, text in jobs:
             prompt, images = self._multi_messages(paths, text)
