@@ -124,11 +124,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-candidates", type=int, help="bounded pilot input; omit for the full manifest")
     p.add_argument("--min-targets", type=int, default=2)
     p.add_argument("--max-targets", type=int, default=5)
+    p.add_argument("--max-new-tokens", type=int, default=1200, help="pilot generation budget")
     args = p.parse_args(argv)
     candidates = load_candidates(args.manifest)
     if args.max_candidates:
         candidates = sorted(candidates, key=_review_priority, reverse=True)[:args.max_candidates]
-    selector = VLLMSelector(args.model_id, tensor_parallel_size=args.tensor_parallel_size)
+    selector = VLLMSelector(args.model_id, tensor_parallel_size=args.tensor_parallel_size,
+                            max_new_tokens=args.max_new_tokens)
     cases = select_and_plan(candidates, selector, min_targets=args.min_targets, max_targets=args.max_targets, max_cases=args.max_cases)
     write_jsonl(args.output, [c.to_dict() for c in cases])
     print(json.dumps({"status": "ok", "cases": len(cases), "output": str(args.output)}, ensure_ascii=False))
