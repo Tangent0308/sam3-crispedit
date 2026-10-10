@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sa1b-samtok-edit-data"
+version = "0.1.0"
+description = "Benchmark-v2 aligned SA-1B fine-grained edit-pair construction"
+requires-python = ">=3.10"
+dependencies = ["numpy", "Pillow"]
+
+[project.optional-dependencies]
+vision = ["pycocotools", "opencv-python-headless"]
+mllm = ["vllm"]
+dev = ["pytest"]
+
+[project.scripts]
+sa1b-edit = "sa1b_pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sa1b_pipeline*"]

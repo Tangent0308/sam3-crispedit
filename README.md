@@ -1,4 +1,14 @@
-# SAMTok-derived fine-grained edit labeling
+# SA-1B SAMTok edit-data construction
+
+This branch is the SA-1B adaptation of the derived-edit workflow. It selects
+benchmark-v2-like difficult scenes with Qwen3.8-27B through vLLM, constructs
+four-type local edit contracts, generates Qwen-Image-2.1 targets, and audits
+the resulting pairs. See [the pipeline design](docs/SA1B_EDIT_DATA_PIPELINE.md)
+and the `sa1b-edit` command line entry point.
+
+New SA-1B work belongs under `sa1b_pipeline/`; the inherited
+`synthesis_pipeline/` remains available for comparison with the earlier
+CrispEdit-derived data.
 
 This branch derives localized image-editing pairs from the existing SAMTok
 GRES-8k and VER-4k training data. It reuses MIRAGE's regional composition

@@ -52,3 +52,6 @@ experiments/
 *.safetensors
 *.pt
 *.pth
+.sa1b_selector_overlays/
+audit_overlays/
+*.pyc
