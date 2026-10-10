@@ -3,10 +3,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from .io import read_jsonl, write_jsonl
+
+
+MASK_SPAN = re.compile(
+    r"^<\|mt_start\|><\|mt_(\d{4})\|><\|mt_(\d{4})\|><\|mt_end\|>$"
+)
 
 
 def mask_cot(code: str, label: str) -> str:
@@ -14,16 +20,17 @@ def mask_cot(code: str, label: str) -> str:
 
 
 def inline_mask(instruction: str, phrase: str, code: str) -> str:
-    index = instruction.lower().find(phrase.lower())
-    if index < 0:
+    matches = list(re.finditer(re.escape(phrase), instruction, flags=re.IGNORECASE))
+    if len(matches) != 1:
         raise ValueError(f"cannot bind mask label to instruction: {phrase!r}")
-    end = index + len(phrase)
+    end = matches[0].end()
     return instruction[:end] + " " + code + instruction[end:]
 
 
 def build_training_rows(pair: dict[str, Any], mask_code: str) -> list[dict[str, Any]]:
-    if not mask_code.startswith("<|mt_start|>") or "<|mt_end|>" not in mask_code:
-        raise ValueError("mask_code must be a SAMTok four-token span")
+    match = MASK_SPAN.fullmatch(mask_code)
+    if not match or not (0 <= int(match.group(1)) <= 255 and 256 <= int(match.group(2)) <= 511):
+        raise ValueError("mask_code must contain one SAMTok span with codes 0000-0255 and 0256-0511")
     ref = pair["instruction"]
     phrase = pair.get("ref_phrase") or _infer_phrase(pair)
     no_ref = pair.get("instruction_noref") or ref

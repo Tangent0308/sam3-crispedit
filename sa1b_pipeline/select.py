@@ -13,7 +13,7 @@ from .geometry import difficulty_features, load_mask, sha256
 from .instructions import build_unit
 from .io import load_candidates, write_jsonl
 from .mllm import VLLMSelector, planning_prompt, selection_prompt
-from .schema import Candidate, SelectionCase, validate_case
+from .schema import Candidate, CandidateObject, SelectionCase, validate_case
 
 
 def _candidate_dict(candidate: Candidate) -> dict[str, Any]:
@@ -65,17 +65,22 @@ def _overlay(candidate: Candidate) -> str:
 
 def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_targets: int = 2,
                     max_targets: int = 5, max_cases: int | None = None,
-                    audit_path: Path | None = None) -> list[SelectionCase]:
+                    audit_path: Path | None = None,
+                    selection_decisions: dict[str, dict[str, Any]] | None = None) -> list[SelectionCase]:
     def record(stage: str, source_id: str, value: dict) -> None:
         if audit_path:
             audit_path.parent.mkdir(parents=True, exist_ok=True)
             with audit_path.open('a', encoding='utf-8') as stream:
                 stream.write(json.dumps({'stage': stage, 'source_id': source_id, **value}, ensure_ascii=False) + '\n')
     selection_jobs = [(_overlay(c), selection_prompt(_candidate_dict(c), min_targets=min_targets, max_targets=max_targets) + " The image has numbered translucent mask overlays matching candidate order; inspect the clean scene beneath them.") for c in candidates]
-    selected = selector.generate(selection_jobs)
-    for candidate, decision in zip(candidates, selected):
-        record('selection', candidate.source_id, {'decision': decision})
+    if selection_decisions is None:
+        selected = selector.generate(selection_jobs)
+        for candidate, decision in zip(candidates, selected):
+            record('selection', candidate.source_id, {'decision': decision})
+    else:
+        selected = [selection_decisions.get(c.source_id, {'accept': False, '_parse_error': 'missing cached selection'}) for c in candidates]
     cases: list[SelectionCase] = []
+    planning_context: list[tuple[Candidate, dict[str, Any], list[str], dict[str, Any], dict[str, CandidateObject], tuple[int, int], dict[str, Any], list[str]]] = []
     for candidate, decision in zip(candidates, selected):
         ids = [str(x) for x in decision.get("selected_object_ids", [])]
         if not decision.get("accept") or not min_targets <= len(ids) <= max_targets:
@@ -91,10 +96,17 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
         obj_dicts = [o.__dict__ for o in chosen]
         difficulty = difficulty_features(obj_dicts, size)
         geom_by_id = {x["object_id"]: x for x in difficulty["target_features"]}
-        plan = selector.generate([(_overlay(candidate), planning_prompt(_candidate_dict(candidate), ids, difficulty))])[0]
-        record('planning', candidate.source_id, {'plan': plan})
-        units = []
         protection = [str(x) for x in decision.get("protection_notes", [])]
+        planning_context.append((candidate, decision, ids, difficulty, lookup, size, geom_by_id, protection))
+    planning_jobs = [(_overlay(candidate), planning_prompt(_candidate_dict(candidate), ids, difficulty))
+                     for candidate, _decision, ids, difficulty, _lookup, _size, _geom, _protection in planning_context]
+    plans = selector.generate(planning_jobs) if planning_jobs else []
+    for (candidate, decision, ids, difficulty, lookup, size, geom_by_id, protection), plan in zip(planning_context, plans):
+        record('planning', candidate.source_id, {'plan': plan})
+        if plan.get('_parse_error') or not isinstance(plan.get('units'), list):
+            record('rejection', candidate.source_id, {'error': plan.get('_parse_error', 'planning output has no units list')})
+            continue
+        units = []
         for index, raw in enumerate(plan.get("units", []), 1):
             raw = dict(raw)
             raw["unit_index"] = index
@@ -110,7 +122,12 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
                 mask_file = mask_dir / (key + '.png')
                 Image.fromarray(mask.astype('uint8') * 255).save(mask_file)
                 obj.mask_path = str(mask_file.resolve())
-            unit = build_unit(raw, obj.__dict__, obj.mask_path, geom_by_id[obj.object_id], protection)
+            try:
+                unit = build_unit(raw, obj.__dict__, obj.mask_path, geom_by_id[obj.object_id], protection)
+            except (TypeError, ValueError) as exc:
+                record('rejection', candidate.source_id, {'error': f'unit {raw.get("object_id")}: {exc}'})
+                units = []
+                break
             unit.locator = "mask" if index % 3 == 0 else "point" if index % 3 == 1 else "box"
             unit.has_ref = index % 4 != 0
             units.append(unit)
@@ -146,16 +163,27 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--min-targets", type=int, default=2)
     p.add_argument("--max-targets", type=int, default=5)
     p.add_argument("--max-new-tokens", type=int, default=1200, help="pilot generation budget")
+    p.add_argument("--selection-decisions", type=Path, help="reuse stage=selection decisions from an audit JSONL")
     args = p.parse_args(argv)
     candidates = load_candidates(args.manifest)
     if args.max_candidates:
         candidates = sorted(candidates, key=_review_priority, reverse=True)[:args.max_candidates]
     selector = VLLMSelector(args.model_id, tensor_parallel_size=args.tensor_parallel_size,
                             max_new_tokens=args.max_new_tokens)
-    cases = select_and_plan(candidates, selector, min_targets=args.min_targets, max_targets=args.max_targets, max_cases=args.max_cases,
-                            audit_path=args.output.with_suffix('.decisions.jsonl'))
-    write_jsonl(args.output, [c.to_dict() for c in cases])
-    print(json.dumps({"status": "ok", "cases": len(cases), "output": str(args.output)}, ensure_ascii=False))
+    cached = None
+    if args.selection_decisions:
+        cached = {}
+        for line in args.selection_decisions.open(encoding='utf-8'):
+            row = json.loads(line)
+            if row.get('stage') == 'selection':
+                cached[row['source_id']] = row.get('decision', {})
+    try:
+        cases = select_and_plan(candidates, selector, min_targets=args.min_targets, max_targets=args.max_targets, max_cases=args.max_cases,
+                                audit_path=args.output.with_suffix('.decisions.jsonl'), selection_decisions=cached)
+        write_jsonl(args.output, [c.to_dict() for c in cases])
+        print(json.dumps({"status": "ok", "cases": len(cases), "output": str(args.output)}, ensure_ascii=False))
+    finally:
+        selector.close()
 
 
 if __name__ == "__main__":

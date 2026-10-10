@@ -90,8 +90,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--tensor-parallel-size", type=int, default=1)
     a = p.parse_args(argv)
     selector = VLLMSelector(a.model_id, tensor_parallel_size=a.tensor_parallel_size) if a.model_id else None
-    results = validate(a.manifest, a.output, selector)
-    print(json.dumps({"rows": len(results), "pass": sum(x["decision"] == "pass" for x in results), "output": str(a.output)}))
+    try:
+        results = validate(a.manifest, a.output, selector)
+        print(json.dumps({"rows": len(results), "pass": sum(x["decision"] == "pass" for x in results), "output": str(a.output)}))
+    finally:
+        if selector:
+            selector.close()
 
 
 if __name__ == "__main__":

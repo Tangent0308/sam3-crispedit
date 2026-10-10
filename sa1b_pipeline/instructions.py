@@ -98,6 +98,6 @@ def validate_instruction(unit: EditUnit) -> list[str]:
         errors.append("attribute_missing_property")
     if unit.instruction_ref.lower() == unit.instruction_noref.lower():
         errors.append("ref_and_noref_are_identical")
-    if len(unit.instruction_ref.split()) > 40 or len(unit.instruction_noref.split()) > 24:
+    if len(unit.instruction_ref.split()) > 26 or len(unit.instruction_noref.split()) > 16:
         errors.append("instruction_too_long")
     return errors
