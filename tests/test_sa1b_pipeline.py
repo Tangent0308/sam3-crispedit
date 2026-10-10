@@ -6,6 +6,7 @@ from PIL import Image
 from sa1b_pipeline.geometry import mask_geometry
 from sa1b_pipeline.instructions import build_unit, validate_instruction
 from sa1b_pipeline.io import candidate_from_dict
+from sa1b_pipeline.training import build_training_rows
 
 
 def test_geometry_has_tight_box_and_interior_point():
@@ -40,3 +41,16 @@ def test_fragmented_small_mask_geometry():
     geometry = mask_geometry(mask)
     assert geometry["components"] == 2
     assert geometry["area_fraction"] < 0.02
+
+
+def test_training_materializer_emits_latest_four_row_contract():
+    pair = {
+        "case_id": "c", "unit_id": "U1", "operation": "attribute",
+        "instruction": "Change the color of the red coat to navy blue.",
+        "instruction_noref": "Change the color of the selected coat to navy blue.",
+        "ref_phrase": "the red coat", "source_image": "s.png", "edited_image": "e.png", "mask": "m.png",
+    }
+    rows = build_training_rows(pair, "<|mt_start|><|mt_0001|><|mt_0257|><|mt_end|>")
+    assert [r["sample_type"] for r in rows] == ["edit_ntp", "edit_umt", "edit_umt", "edit"]
+    assert "<|mt_start|>" in rows[1]["prompt"] and rows[2]["instr_variant"] == "noref"
+    assert "image" not in rows[0] and "mt_cot" in rows[0]

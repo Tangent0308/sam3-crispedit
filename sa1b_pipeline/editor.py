@@ -103,6 +103,7 @@ def generate_cases(manifest: Path, output_dir: Path, editor: DiffusersQwenImageE
                             "source_id": case["source"].get("source_id"),
                             "source_image": source, "edited_image": str(path), "instruction": unit["instruction_ref"],
                             "instruction_noref": unit.get("instruction_noref"), "mask": unit["mask_path"],
+                            "ref_phrase": unit.get("ref_phrase"), "scope": unit.get("scope"), "payload": unit.get("payload"),
                             "bbox": unit.get("bbox"), "point": unit.get("point"),
                             "difficulty": case.get("difficulty", {}), "source_provenance": case["source"].get("provenance", {}),
                             "prompt": edit_prompt(unit), "seed": seed})
