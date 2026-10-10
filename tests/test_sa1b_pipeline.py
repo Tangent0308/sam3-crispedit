@@ -54,3 +54,48 @@ def test_training_materializer_emits_latest_four_row_contract():
     assert [r["sample_type"] for r in rows] == ["edit_ntp", "edit_umt", "edit_umt", "edit"]
     assert "<|mt_start|>" in rows[1]["prompt"] and rows[2]["instr_variant"] == "noref"
     assert "image" not in rows[0] and "mt_cot" in rows[0]
+
+
+def test_rle_selected_targets_materialize_masks(tmp_path):
+    from pycocotools import mask as coco
+    from sa1b_pipeline.select import select_and_plan
+    source = tmp_path / 'image.png'
+    Image.new('RGB', (40, 40), 'white').save(source)
+    objects = []
+    for index, x in enumerate((4, 24)):
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        mask[5:15, x:x + 8] = 1
+        rle = coco.encode(np.asfortranarray(mask))
+        rle['counts'] = rle['counts'].decode()
+        objects.append({'object_id': str(index), 'category': 'cup', 'rle': rle})
+    candidate = candidate_from_dict({'source_id': 'source', 'image_path': str(source), 'objects': objects})
+
+    class Selector:
+        calls = 0
+        def generate(self, jobs):
+            self.calls += 1
+            if self.calls == 1:
+                return [{'accept': True, 'selected_object_ids': ['0', '1']}]
+            return [{'units': [
+                {'object_id': '0', 'operation': 'attribute', 'ref_phrase': 'the left cup', 'scope': 'cup', 'payload': 'blue'},
+                {'object_id': '1', 'operation': 'remove', 'ref_phrase': 'the right cup', 'scope': 'cup'},
+            ]}]
+
+    cases = select_and_plan([candidate], Selector(), audit_path=tmp_path / 'decisions.jsonl')
+    assert len(cases) == 1
+    assert len(cases[0].units) == 2
+    for unit in cases[0].units:
+        restored = np.asarray(Image.open(unit.mask_path)) > 0
+        assert restored.sum() == 80
+        assert restored[unit.point[1], unit.point[0]]
+    assert len((tmp_path / 'decisions.jsonl').read_text().splitlines()) == 2
+
+
+def test_instruction_payload_normalizes_model_verbatim_templates():
+    from sa1b_pipeline.instructions import build_unit
+    geometry = {"bbox": [1, 2, 10, 12], "point": [4, 5]}
+    obj = {"object_id": "o", "category": "fence"}
+    unit = build_unit({"operation": "attribute", "ref_phrase": "the fence", "scope": "fence", "payload": "Change the color/material of the fence to polished gold"}, obj, "m.png", geometry, [])
+    assert unit.instruction_ref == "Change the color of the fence to polished gold."
+    unit = build_unit({"operation": "replace", "ref_phrase": "the fence", "scope": "fence", "payload": "Replace the fence with a wooden gate"}, obj, "m.png", geometry, [])
+    assert unit.instruction_ref == "Replace the fence with a wooden gate."

@@ -111,7 +111,7 @@ def validate_case(case: SelectionCase, min_units: int = 2, max_units: int = 5) -
     operations = [u.operation for u in case.units]
     if len(operations) <= 4 and len(set(operations)) != len(operations):
         raise ValueError("benchmark-v2 style scenes keep operations distinct through four targets")
-    if len(operations) == 5 and max(operations.count(op) for op in set(operations)) > 2:
+    if len(operations) == 5 and (len(set(operations)) != 4 or max(operations.count(op) for op in set(operations)) > 2):
         raise ValueError("a five-target scene may repeat at most one operation")
     for unit in case.units:
         validate_unit(unit)
