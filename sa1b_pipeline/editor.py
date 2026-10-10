@@ -23,14 +23,15 @@ def edit_prompt(unit: dict[str, Any]) -> str:
 class DiffusersQwenImageEditor:
     """Lazy diffusers adapter; generation is isolated so it can resume per unit."""
 
-    def __init__(self, model_id: str, *, device: str = "cuda", dtype: str = "bf16", steps: int = 40):
+    def __init__(self, model_id: str, *, device: str = "cuda", dtype: str = "bf16", steps: int = 40,
+                 tensor_parallel_size: int = 1):
         import torch
-        from utils.qwen_pipeline_loader import load_qwen_pipeline
+        from utils.qwen_pipeline_loader import load_qwen21_omni_pipeline
         self.torch = torch
         torch_dtype = {"bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
                        "fp16": torch.float16, "float16": torch.float16,
                        "fp32": torch.float32, "float32": torch.float32}[dtype]
-        self.pipe = load_qwen_pipeline(model_id, device, torch_dtype, "none", model_family="qwen21")
+        self.pipe = load_qwen21_omni_pipeline(model_id, tensor_parallel_size=tensor_parallel_size)
         self.steps = steps
 
     def generate(self, image_path: str, unit: dict[str, Any], seed: int = 0) -> Image.Image:
@@ -43,7 +44,7 @@ class DiffusersQwenImageEditor:
         x0, y0 = max(0, x0 - margin), max(0, y0 - margin)
         x1, y1 = min(image.width, x1 + margin), min(image.height, y1 + margin)
         crop = image.crop((x0, y0, x1, y1))
-        generator = self.torch.Generator(device=self.pipe.device).manual_seed(seed)
+        generator = self.torch.Generator(device="cuda").manual_seed(seed)
         result = self.pipe(image=crop, prompt=edit_prompt(unit), negative_prompt=" ", true_cfg_scale=1.0,
                            guidance_scale=1.0, num_inference_steps=self.steps, generator=generator,
                            height=crop.height, width=crop.width)
@@ -119,9 +120,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--device", default="cuda")
     p.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="bfloat16")
     p.add_argument("--steps", type=int, default=40)
+    p.add_argument("--tensor-parallel-size", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args(argv)
-    generate_cases(a.manifest, a.output_dir, DiffusersQwenImageEditor(a.model_id, device=a.device, dtype=a.dtype, steps=a.steps), a.seed)
+    generate_cases(a.manifest, a.output_dir, DiffusersQwenImageEditor(a.model_id, device=a.device, dtype=a.dtype, steps=a.steps, tensor_parallel_size=a.tensor_parallel_size), a.seed)
 
 
 if __name__ == "__main__":
