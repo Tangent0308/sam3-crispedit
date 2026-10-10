@@ -5,6 +5,9 @@ set -euo pipefail
 # explicit so a missing mount fails before a multi-GPU model load.
 SA1B_ROOT=${SA1B_ROOT:-/mnt/hdfs/byte_ttlive_strategy_llm/user/haobo.yuan/datasets}
 WORK_ROOT=${WORK_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work}
+PREP_PYTHON=${PREP_PYTHON:-python}
+MLLM_PYTHON=${MLLM_PYTHON:-python}
+EDITOR_PYTHON=${EDITOR_PYTHON:-python}
 MODEL=${MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B}
 IMAGE_ROOT="$SA1B_ROOT/sa1b_tfd_1k"
 DENSE_ROOT="$SA1B_ROOT/sa1b_dense_label/annotation"
@@ -34,7 +37,7 @@ else
 fi
 
 mkdir -p "$WORK_ROOT"
-python -m sa1b_pipeline.normalize "${NORMALIZE_ARGS[@]}" --output-dir "$WORK_ROOT/candidates"
-python -m sa1b_pipeline.select --manifest "$WORK_ROOT/candidates/candidates.jsonl" --output "$WORK_ROOT/selection/selected_cases.jsonl" --model-id "$MODEL" --tensor-parallel-size "${TP_SIZE:-8}"
-python -m sa1b_pipeline.editor --manifest "$WORK_ROOT/selection/selected_cases.jsonl" --output-dir "$WORK_ROOT/generated" --model-id "${QWEN_IMAGE_MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1}" --steps "${STEPS:-40}"
-python -m sa1b_pipeline.validate --manifest "$WORK_ROOT/generated/generated.jsonl" --output "$WORK_ROOT/validation/validation.jsonl" --model-id "$MODEL"
+"$PREP_PYTHON" -m sa1b_pipeline.normalize "${NORMALIZE_ARGS[@]}" --output-dir "$WORK_ROOT/candidates"
+"$MLLM_PYTHON" -m sa1b_pipeline.select --manifest "$WORK_ROOT/candidates/candidates.jsonl" --output "$WORK_ROOT/selection/selected_cases.jsonl" --model-id "$MODEL" --tensor-parallel-size "${TP_SIZE:-8}"
+"$EDITOR_PYTHON" -m sa1b_pipeline.editor --manifest "$WORK_ROOT/selection/selected_cases.jsonl" --output-dir "$WORK_ROOT/generated" --model-id "${QWEN_IMAGE_MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1}" --steps "${STEPS:-40}"
+"$MLLM_PYTHON" -m sa1b_pipeline.validate --manifest "$WORK_ROOT/generated/generated.jsonl" --output "$WORK_ROOT/validation/validation.jsonl" --model-id "$MODEL"

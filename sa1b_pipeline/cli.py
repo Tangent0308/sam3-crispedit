@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> None:
     mat = sub.add_parser("materialize", help="expand validated pairs into edit_ntp/edit_umt/edit rows")
     mat.add_argument("--generated", type=Path, required=True); mat.add_argument("--mask-codes", type=Path, required=True); mat.add_argument("--output", type=Path, required=True)
     doc = sub.add_parser("doctor", help="check SA-1B mounts and Qwen3.8/vLLM compatibility")
-    doc.add_argument("--model", type=Path); doc.add_argument("--handoff", type=Path)
+    doc.add_argument("--model", type=Path); doc.add_argument("--handoff")
     args, rest = p.parse_known_args(argv)
     if args.command == "normalize":
         from .normalize import main as run
@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> None:
         run(argv2 + rest)
     elif args.command == "select":
         from .select import main as run
-        run(["--manifest", str(args.manifest), "--output", str(args.output), "--model-id", args.model_id, "--max-new-tokens", str(args.max_new_tokens)] + (["--max-cases", str(args.max_cases)] if args.max_cases else []) + (["--max-candidates", str(args.max_candidates)] if args.max_candidates else []) + rest)
+        run(["--manifest", str(args.manifest), "--output", str(args.output), "--model-id", args.model_id, "--tensor-parallel-size", str(args.tensor_parallel_size), "--max-new-tokens", str(args.max_new_tokens)] + (["--max-cases", str(args.max_cases)] if args.max_cases else []) + (["--max-candidates", str(args.max_candidates)] if args.max_candidates else []) + rest)
     elif args.command == "generate":
         from .editor import main as run; run(["--manifest", str(args.manifest), "--output-dir", str(args.output_dir), "--model-id", args.model_id, "--steps", str(args.steps)] + rest)
     elif args.command == "materialize":

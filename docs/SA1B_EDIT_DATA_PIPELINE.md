@@ -103,3 +103,19 @@ training. The materializer refuses missing or malformed codes instead of
 silently writing fake mask tokens. Each validated pair expands to one
 `edit_ntp`, two `edit_umt` (`ref`/`noref`), and one plain `edit` row, matching
 the latest Qwen-Image-2.1 protocol.
+
+### Isolated MLLM environment
+
+Run `UV_BIN=$HOME/.local/bin/uv scripts/setup_sa1b_mllm.sh` to install the inherited
+full lock in a new Python 3.12.13 environment. CUDA-specific Torch wheels come
+from the PyTorch cu129 index; installing the generic PyPI Torch wheel is not
+an equivalent runtime. The environment was imported successfully on the pilot
+node with Torch 2.13.0+cu129, vLLM 0.28.0 and Transformers 5.17.0.
+
+The run script accepts `PREP_PYTHON`, `MLLM_PYTHON`, and `EDITOR_PYTHON` so the
+MLLM and editor dependency stacks can remain isolated. `doctor --handoff`
+accepts either a mounted directory or an `hdfs://` root. This checks imports,
+model registration and data access only; it does not prove generation quality.
+Selection saves a `.decisions.jsonl` audit beside its output. Set
+`SA1B_MLLM_LOG` to a JSONL path to capture direct-vLLM raw output before parsing.
+RLE masks are exported to PNG only for selected targets.

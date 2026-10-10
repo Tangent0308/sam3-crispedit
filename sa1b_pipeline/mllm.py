@@ -106,6 +106,12 @@ class VLLMSelector:
             requests.append({"prompt": prompt, "multi_modal_data": {"image": [image]}})
             images.append(image)
         outputs = self.llm.generate(requests, self.params, use_tqdm=False)
+        import os
+        log_path = os.environ.get('SA1B_MLLM_LOG')
+        if log_path:
+            with open(log_path, 'a', encoding='utf-8') as stream:
+                for job, output in zip(jobs, outputs):
+                    stream.write(json.dumps({'image': job[0], 'prompt': job[1], 'text': output.outputs[0].text if output.outputs else '', 'finish_reason': output.outputs[0].finish_reason if output.outputs else None}, ensure_ascii=False) + '\n')
         result = []
         for output in outputs:
             text = output.outputs[0].text if output.outputs else ""

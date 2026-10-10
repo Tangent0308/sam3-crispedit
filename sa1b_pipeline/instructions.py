@@ -11,6 +11,25 @@ def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().rstrip(" .;"))
 
 
+def _payload_for_operation(operation: str, payload: str, target: str) -> str:
+    """Normalize an MLLM that returned a full instruction instead of payload."""
+    value = _clean(payload)
+    lower = value.lower()
+    if operation == "attribute":
+        match = re.search(r"\bto\s+(.+)$", value, re.I)
+        if lower.startswith("change ") and match:
+            return _clean(match.group(1))
+    if operation == "replace":
+        match = re.search(r"\bwith\s+(.+)$", value, re.I)
+        if lower.startswith("replace ") and match:
+            return _clean(match.group(1))
+    if operation == "add":
+        match = re.search(r"\bto\s+(.+)$", value, re.I)
+        if lower.startswith("add ") and match:
+            return _clean(match.group(1))
+    return value
+
+
 def render_instruction(operation: str, target: str, payload: str, attribute_kind: str | None = None) -> str:
     target, payload = _clean(target), _clean(payload)
     if operation == "add":
@@ -32,7 +51,9 @@ def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometr
         raise ValueError(f"invalid MLLM operation: {operation}")
     ref = _clean(raw.get("ref_phrase") or raw.get("target") or obj.get("description") or obj.get("category"))
     scope = _clean(raw.get("scope") or obj.get("category") or "object")
-    payload = _clean(raw.get("payload") or raw.get("new_content"))
+    payload = _payload_for_operation(operation, _clean(raw.get("payload") or raw.get("new_content")), ref)
+    if operation == 'remove' and not payload:
+        payload = 'remove the selected target and reconstruct the revealed background'
     if not payload:
         raise ValueError(f"MLLM omitted payload for {obj.get('object_id')}")
     attribute_kind = _clean(raw.get("attribute_kind")) or None

@@ -51,7 +51,7 @@ def validate(manifest: Path, output: Path, selector: VLLMSelector | None = None)
         results.append({**row, **check})
         if selector and check["decision"] != "fail":
             overlay = _mask_overlay(row["source_image"], row["mask"], output.parent / "audit_overlays")
-            jobs.append(([row["source_image"], row["edited_image"], overlay], AUDIT_PROMPT.format(instruction=row["instruction"])))
+            jobs.append(([row["source_image"], row["edited_image"], overlay], AUDIT_PROMPT.replace('{instruction}', row['instruction'])))
     if selector:
         audits = selector.generate_multimage(jobs)
         index = 0
