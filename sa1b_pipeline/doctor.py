@@ -3,17 +3,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
 
-def inspect(model: Path, handoff: Path) -> dict:
+def _handoff_available(handoff: str | Path) -> bool:
+    value = str(handoff)
+    if value.startswith("hdfs://"):
+        image = value.rstrip("/") + "/sa1b_tfd_1k"
+        dense = value.rstrip("/") + "/sa1b_dense_label/annotation"
+        return all(subprocess.run(["hdfs", "dfs", "-test", "-d", uri], check=False,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+                   for uri in (image, dense))
+    path = Path(value)
+    return (path / "sa1b_tfd_1k").is_dir() and (path / "sa1b_dense_label/annotation").is_dir()
+
+
+def inspect(model: Path, handoff: str | Path) -> dict:
     result = {"model": str(model), "handoff": str(handoff), "checks": {}}
     config = model / "config.json"
     if config.exists():
         data = json.loads(config.read_text())
         result["architecture"] = data.get("architectures", [])
     result["checks"]["model"] = model.is_dir() and config.exists()
-    result["checks"]["handoff"] = (handoff / "sa1b_tfd_1k").is_dir() and (handoff / "sa1b_dense_label/annotation").is_dir()
+    result["checks"]["handoff"] = _handoff_available(handoff)
     try:
         import torch
         result["torch"] = {"version": torch.__version__, "cuda": torch.version.cuda, "gpu_count": torch.cuda.device_count()}
@@ -42,7 +55,8 @@ def inspect(model: Path, handoff: Path) -> dict:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", type=Path, default=Path("/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B"))
-    p.add_argument("--handoff", type=Path, default=Path("/mnt/hdfs/byte_ttlive_strategy_llm/user/haobo.yuan/datasets"))
+    p.add_argument("--handoff", default="/mnt/hdfs/byte_ttlive_strategy_llm/user/haobo.yuan/datasets",
+                   help="local handoff root or an hdfs:// URI")
     a = p.parse_args(argv)
     result = inspect(a.model, a.handoff)
     print(json.dumps(result, ensure_ascii=False, indent=2))

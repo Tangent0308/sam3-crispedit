@@ -28,21 +28,26 @@ def parse_json(text: str) -> dict[str, Any]:
 class VLLMSelector:
     """Continuous-batching selector/planner for Qwen3.8-27B."""
 
-    def __init__(self, model_id: str, *, tensor_parallel_size: int = 1, max_model_len: int = 8192,
+    def __init__(self, model_id: str, *, tensor_parallel_size: int = 1, max_model_len: int = 16384,
                  max_new_tokens: int = 1200, temperature: float = 0.0):
         # Reuse the parent repository's production Qwen3.8 backend. It pins
         # the multimodal processor settings and the non-thinking chat template
         # used by the completed derived-edit runs.
-        try:
-            from utils import vlm_utils
-            vlm_utils.configure_backend("qwen38-vllm", model_id=model_id, device="cuda:0", dtype="bf16")
-            self.backend = vlm_utils.get_backend()
-            self._inherited_backend = True
-            self.params = None
-            self.max_new_tokens = max_new_tokens
-            return
-        except (ImportError, ModuleNotFoundError, AttributeError, RuntimeError, ValueError):
-            self._inherited_backend = False
+        # The inherited production adapter is useful for a one-GPU smoke, but
+        # it intentionally hard-codes tensor_parallel_size=1. Full selection
+        # runs must honor the caller's TP setting and use the direct vLLM path.
+        self._inherited_backend = False
+        if tensor_parallel_size == 1:
+            try:
+                from utils import vlm_utils
+                vlm_utils.configure_backend("qwen38-vllm", model_id=model_id, device="cuda:0", dtype="bf16")
+                self.backend = vlm_utils.get_backend()
+                self._inherited_backend = True
+                self.params = None
+                self.max_new_tokens = max_new_tokens
+                return
+            except (ImportError, ModuleNotFoundError, AttributeError, RuntimeError, ValueError):
+                pass
         try:
             from transformers import AutoProcessor  # type: ignore
             from vllm import LLM, SamplingParams  # type: ignore
@@ -125,12 +130,18 @@ class VLLMSelector:
 
 def selection_prompt(candidate: dict[str, Any], *, min_targets: int = 2, max_targets: int = 5) -> str:
     objects = candidate.get("objects", [])
-    compact = [{k: o.get(k) for k in ("object_id", "category", "description", "bbox", "area_fraction") if o.get(k) is not None} for o in objects]
+    # Keep the candidate index well below the 8k context budget on crowded
+    # SA-1B scenes. The image and numbered mask overlay carry the visual
+    # description; category/geometry metadata is sufficient for object IDs.
+    compact = [
+        [str(o.get("object_id", "")), str(o.get("category", ""))[:48], o.get("bbox"), o.get("area_fraction")]
+        for o in objects
+    ]
     return f"""You are curating hard SA-1B source scenes for a fine-grained interactive image-editing training set.
 Inspect the image, then use the supplied dense-object candidates only as identity/mask hints. Select {min_targets} to {max_targets} DIFFERENT physical objects or parts in this same scene.
 Prefer multiple near-duplicate instances, occlusion, touching boundaries, thin straps/rods, holes, disconnected visible fragments, small parts, and mixed object/part granularity. Reject background blobs, duplicate fragments of one parent, ambiguous or badly segmented masks, and targets too small to judge.
 Return JSON only with keys: accept (bool), scene_summary, difficulty_tags (array), selected_object_ids (array), rejected_object_ids (array), protection_notes (array), evidence (string).
-Candidates: {json.dumps(compact, ensure_ascii=False)}"""
+Candidates (object_id, category, bbox, area_fraction): {json.dumps(compact, ensure_ascii=False, separators=(',', ':'))}"""
 
 
 def planning_prompt(candidate: dict[str, Any], selected_ids: list[str], difficulty: dict[str, Any]) -> str:
