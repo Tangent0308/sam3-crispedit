@@ -16,6 +16,20 @@ from .mllm import VLLMSelector, planning_prompt, selection_prompt
 from .schema import Candidate, CandidateObject, SelectionCase, validate_case
 
 
+# The frozen v2 release exercises every valid locator/ref combination except
+# no-ref+none. Rotate these across units so a training pilot does not collapse
+# to one interaction form while keeping no-ref locators spatially grounded.
+BENCHMARK_V2_INTERACTIONS = (
+    (True, "none"),
+    (True, "point"),
+    (True, "box"),
+    (True, "mask"),
+    (False, "point"),
+    (False, "box"),
+    (False, "mask"),
+)
+
+
 def _candidate_dict(candidate: Candidate) -> dict[str, Any]:
     return candidate.to_dict()
 
@@ -66,7 +80,8 @@ def _overlay(candidate: Candidate) -> str:
 def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_targets: int = 2,
                     max_targets: int = 5, max_cases: int | None = None,
                     audit_path: Path | None = None,
-                    selection_decisions: dict[str, dict[str, Any]] | None = None) -> list[SelectionCase]:
+                    selection_decisions: dict[str, dict[str, Any]] | None = None,
+                    planning_decisions: dict[str, dict[str, Any]] | None = None) -> list[SelectionCase]:
     def record(stage: str, source_id: str, value: dict) -> None:
         if audit_path:
             audit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,8 +115,12 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
         planning_context.append((candidate, decision, ids, difficulty, lookup, size, geom_by_id, protection))
     planning_jobs = [(_overlay(candidate), planning_prompt(_candidate_dict(candidate), ids, difficulty))
                      for candidate, _decision, ids, difficulty, _lookup, _size, _geom, _protection in planning_context]
-    plans = selector.generate(planning_jobs) if planning_jobs else []
-    for (candidate, decision, ids, difficulty, lookup, size, geom_by_id, protection), plan in zip(planning_context, plans):
+    if planning_decisions is None:
+        plans = selector.generate(planning_jobs) if planning_jobs else []
+    else:
+        plans = [planning_decisions.get(candidate.source_id, {'_parse_error': 'missing cached planning'})
+                 for candidate, *_rest in planning_context]
+    for case_index, ((candidate, decision, ids, difficulty, lookup, size, geom_by_id, protection), plan) in enumerate(zip(planning_context, plans)):
         record('planning', candidate.source_id, {'plan': plan})
         if plan.get('_parse_error') or not isinstance(plan.get('units'), list):
             record('rejection', candidate.source_id, {'error': plan.get('_parse_error', 'planning output has no units list')})
@@ -128,8 +147,7 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
                 record('rejection', candidate.source_id, {'error': f'unit {raw.get("object_id")}: {exc}'})
                 units = []
                 break
-            unit.locator = "mask" if index % 3 == 0 else "point" if index % 3 == 1 else "box"
-            unit.has_ref = index % 4 != 0
+            unit.has_ref, unit.locator = BENCHMARK_V2_INTERACTIONS[(case_index + index - 1) % len(BENCHMARK_V2_INTERACTIONS)]
             units.append(unit)
         if len(units) != len(chosen):
             continue
@@ -168,22 +186,33 @@ def main(argv: list[str] | None = None) -> None:
     candidates = load_candidates(args.manifest)
     if args.max_candidates:
         candidates = sorted(candidates, key=_review_priority, reverse=True)[:args.max_candidates]
-    selector = VLLMSelector(args.model_id, tensor_parallel_size=args.tensor_parallel_size,
-                            max_new_tokens=args.max_new_tokens)
     cached = None
+    cached_plans = None
     if args.selection_decisions:
         cached = {}
+        cached_plans = {}
+        planning_rows = 0
         for line in args.selection_decisions.open(encoding='utf-8'):
             row = json.loads(line)
             if row.get('stage') == 'selection':
                 cached[row['source_id']] = row.get('decision', {})
+            elif row.get('stage') == 'planning':
+                cached_plans[row['source_id']] = row.get('plan', {})
+                planning_rows += 1
+        if planning_rows == 0:
+            cached_plans = None
+    needs_model = cached is None or cached_plans is None
+    selector = VLLMSelector(args.model_id, tensor_parallel_size=args.tensor_parallel_size,
+                            max_new_tokens=args.max_new_tokens) if needs_model else None
     try:
         cases = select_and_plan(candidates, selector, min_targets=args.min_targets, max_targets=args.max_targets, max_cases=args.max_cases,
-                                audit_path=args.output.with_suffix('.decisions.jsonl'), selection_decisions=cached)
+                                audit_path=args.output.with_suffix('.decisions.jsonl'), selection_decisions=cached,
+                                planning_decisions=cached_plans)
         write_jsonl(args.output, [c.to_dict() for c in cases])
         print(json.dumps({"status": "ok", "cases": len(cases), "output": str(args.output)}, ensure_ascii=False))
     finally:
-        selector.close()
+        if selector:
+            selector.close()
 
 
 if __name__ == "__main__":
