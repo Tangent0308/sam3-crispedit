@@ -39,7 +39,10 @@ def load_mask(obj: dict[str, Any], image_size: tuple[int, int]) -> np.ndarray:
             decoded = coco_mask.decode(rle)
             if decoded.ndim == 3:
                 decoded = decoded[:, :, 0]
-            return np.asarray(decoded, dtype=bool)
+            # `pycocotools` releases before its NumPy 2 compatibility fix can
+            # pass an unsupported `copy=` keyword through `asarray`; an
+            # explicit array copy keeps the handoff reader compatible.
+            return np.array(decoded, dtype=bool, copy=True)
         except ImportError as exc:
             raise RuntimeError("pycocotools is required for compressed SA-1B RLE") from exc
     raise ValueError("object has no mask_path, mask, rle, or segmentation")
@@ -55,27 +58,41 @@ def mask_geometry(mask: np.ndarray) -> dict[str, Any]:
     bbox = [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)]
     # A deterministic interior point approximates the benchmark point contract.
     best = (int(xs[0]), int(ys[0]), -1)
+    min_x, max_x, min_y, max_y = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
     for y, x in zip(ys[:: max(1, len(ys) // 5000)], xs[:: max(1, len(xs) // 5000)]):
         d = int(
-            min(x - xs.min(), xs.max() - x, y - ys.min(), ys.max() - y)
+            min(x - min_x, max_x - x, y - min_y, max_y - y)
         )
         if d > best[2]:
             best = (int(x), int(y), d)
-    # Connected components without scipy/cv2.
-    seen = np.zeros_like(mask, dtype=bool)
-    components = 0
-    for y, x in zip(ys, xs):
-        if seen[y, x]:
-            continue
-        components += 1
-        stack = [(int(y), int(x))]
-        seen[y, x] = True
-        while stack:
-            cy, cx = stack.pop()
-            for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
-                if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
-                    seen[ny, nx] = True
-                    stack.append((ny, nx))
+    # SA-1B images are large; use the optional vision dependency for connected
+    # components when available, while retaining a dependency-free fallback.
+    components = None
+    try:
+        import cv2  # type: ignore
+        components = int(cv2.connectedComponents(mask.astype(np.uint8), connectivity=4)[0] - 1)
+    except ImportError:
+        pass
+    if components is None:
+        try:
+            from scipy import ndimage  # type: ignore
+            _, components = ndimage.label(mask, structure=np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=np.uint8))
+            components = int(components)
+        except ImportError:
+            seen = np.zeros_like(mask, dtype=bool)
+            components = 0
+            for y, x in zip(ys, xs):
+                if seen[y, x]:
+                    continue
+                components += 1
+                stack = [(int(y), int(x))]
+                seen[y, x] = True
+                while stack:
+                    cy, cx = stack.pop()
+                    for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                        if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
+                            seen[ny, nx] = True
+                            stack.append((ny, nx))
     # Boundary length proxy; high values identify narrow/complex regions.
     neighbors = np.zeros_like(mask, dtype=np.uint8)
     neighbors[1:] += mask[1:] != mask[:-1]

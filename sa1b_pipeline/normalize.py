@@ -8,10 +8,98 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
+import subprocess
 from pathlib import Path
 from typing import Any, Iterable
 
 from .io import write_jsonl
+
+
+def iter_hdfs_tfrecord(uri: str, max_records: int | None = None):
+    """Stream standard TFRecord Examples through `hdfs dfs -cat`.
+
+    This is intentionally a pilot/sampling reader. Full-corpus production runs
+    should use the handoff's `tfd-utils` random-access indexes from an allocation
+    with the SG2 FUSE volume mounted.
+    """
+    try:
+        from tfd_utils.pb2 import Example
+    except ImportError as exc:
+        raise RuntimeError("install tfd-utils to stream remote SA-1B records") from exc
+    process = subprocess.Popen(["hdfs", "dfs", "-cat", uri], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    count = 0
+    try:
+        while max_records is None or count < max_records:
+            header = process.stdout.read(12)
+            if not header:
+                break
+            if len(header) != 12:
+                raise IOError(f"truncated TFRecord header from {uri}")
+            length = struct.unpack("<Q", header[:8])[0]
+            payload = process.stdout.read(length)
+            trailer = process.stdout.read(4)
+            if len(payload) != length or len(trailer) != 4:
+                raise IOError(f"truncated TFRecord payload from {uri}")
+            example = Example.FromString(payload)
+            values = {}
+            for key, feature in example.features.feature.items():
+                values[key] = list(feature.bytes_list.value)
+            yield values
+            count += 1
+    finally:
+        process.kill()
+        process.wait()
+
+
+def normalize_hdfs_pair(image_uri: str, dense_uri: str, output_dir: Path,
+                        *, scan_records: int = 5000, minimum_matches: int = 100) -> list[dict[str, Any]]:
+    """Create a local pilot manifest from two live SG2 shard streams."""
+    images = {}
+    for index, record in enumerate(iter_hdfs_tfrecord(image_uri, scan_records)):
+        key = record.get("key", [b""])[0].decode("utf-8", "replace")
+        if key and record.get("jpg"):
+            images[key] = (record["jpg"][0], index)
+    rows = []
+    for index, record in enumerate(iter_hdfs_tfrecord(dense_uri, scan_records)):
+        key = record.get("key", [b""])[0].decode("utf-8", "replace")
+        if key not in images:
+            continue
+        def decoded(name: str, default: Any = ""):
+            value = record.get(name, [])
+            return value[0].decode("utf-8", "replace") if value else default
+        try:
+            objects = json.loads(decoded("objects_json", "[]"))
+        except json.JSONDecodeError:
+            continue
+        image_bytes, image_index = images[key]
+        image_path = output_dir / "images" / f"{key}.jpg"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        if not image_path.exists():
+            image_path.write_bytes(image_bytes)
+        normalized = []
+        for obj in objects:
+            segmentation = obj.get("segmentation")
+            if not segmentation:
+                continue
+            normalized.append({
+                "object_id": str(obj.get("object_id")),
+                "category": str(obj.get("category", "object")),
+                "description": str(obj.get("gar_caption", "")),
+                "rle": segmentation,
+                "bbox": obj.get("bbox"),
+                "metadata": {"score": obj.get("score")},
+            })
+        if len(normalized) < 2:
+            continue
+        rows.append({"source_id": key, "image_path": str(image_path),
+                     "caption": decoded("caption"), "tags": decoded("merged_tags").split(","),
+                     "objects": normalized,
+                     "provenance": {"image_uri": image_uri, "dense_uri": dense_uri,
+                                     "image_record_index": image_index, "dense_record_index": index}})
+        if len(rows) >= minimum_matches:
+            break
+    return normalize_records(rows, output_dir)
 
 
 def _value(feature: Any, key: str = "") -> Any:
@@ -123,10 +211,21 @@ def main(argv: list[str] | None = None) -> None:
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", type=Path, help="JSON/JSONL or TFRecord file")
     source.add_argument("--image-records-dir", type=Path, help="SA-1B image TFRecord tree")
+    source.add_argument("--hdfs-image-uri", help="remote SG2 image shard URI")
+    p.add_argument("--hdfs-dense-uri", help="remote SG2 dense shard URI")
+    p.add_argument("--scan-records", type=int, default=5000)
+    p.add_argument("--minimum-matches", type=int, default=100)
     p.add_argument("--dense-records-dir", type=Path, help="SA-1B dense annotation TFRecord tree")
     p.add_argument("--id-file", type=Path, help="newline-delimited keys to join/sample")
     p.add_argument("--output-dir", type=Path, required=True)
     a = p.parse_args(argv)
+    if a.hdfs_image_uri:
+        if not a.hdfs_dense_uri:
+            p.error("--hdfs-dense-uri is required with --hdfs-image-uri")
+        rows = normalize_hdfs_pair(a.hdfs_image_uri, a.hdfs_dense_uri, a.output_dir,
+                                   scan_records=a.scan_records, minimum_matches=a.minimum_matches)
+        print(json.dumps({"records": len(rows), "manifest": str(a.output_dir / 'candidates.jsonl')}))
+        return
     if a.image_records_dir:
         if not a.dense_records_dir:
             p.error("--dense-records-dir is required with --image-records-dir")

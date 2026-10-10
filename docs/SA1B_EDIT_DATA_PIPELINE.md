@@ -52,8 +52,24 @@ python -m sa1b_pipeline.normalize \
 For a pilot, put a small set of SA IDs in `ids.txt`; this avoids scanning the
 full 11M-record corpus. `--input exported.jsonl` is also supported.
 
+When the SG2 FUSE volume is unavailable, stream a pilot directly from HDFS
+without copying the corpus:
+
+```bash
+python -m sa1b_pipeline.normalize \
+  --hdfs-image-uri hdfs://harunasg/home/byte_ttlive_strategy_llm/user/haobo.yuan/datasets/sa1b_tfd_1k/sa_000000.tfrecord \
+  --hdfs-dense-uri hdfs://harunasg/home/byte_ttlive_strategy_llm/user/haobo.yuan/datasets/sa1b_dense_label/annotation/00000_of_00999.tfrecord \
+  --scan-records 5000 --minimum-matches 100 \
+  --output-dir /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/candidates
+```
+
+This remote mode is for bounded pilots; production should use the handoff
+indexes with `tfd-utils` on a node where the SG2 volume is mounted.
+
 `scripts/run_sa1b_pipeline.sh` performs the same four stages and exits before
-model loading when either handoff root is not mounted.
+model loading when either handoff root is not mounted. For a remote pilot, set
+`HDFS_IMAGE_URI`, `HDFS_DENSE_URI`, and optionally `SCAN_RECORDS` and
+`MINIMUM_MATCHES`; the script then uses the bounded HDFS stream mode above.
 
 An exported JSONL row contains `source_id`, `image_path`, and `objects`; an
 object contains `object_id`, `category`, and either `mask_path` or COCO `rle`.
