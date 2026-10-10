@@ -99,6 +99,11 @@ def normalize_hdfs_pair(image_uri: str, dense_uri: str, output_dir: Path,
                                      "image_record_index": image_index, "dense_record_index": index}})
         if len(rows) >= minimum_matches:
             break
+    if len(rows) < minimum_matches:
+        raise RuntimeError(
+            f"remote pilot found only {len(rows)} matched records after scanning "
+            f"{scan_records} per shard; increase --scan-records or lower --minimum-matches"
+        )
     return normalize_records(rows, output_dir)
 
 
