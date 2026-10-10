@@ -9,14 +9,32 @@ MODEL=${MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/
 IMAGE_ROOT="$SA1B_ROOT/sa1b_tfd_1k"
 DENSE_ROOT="$SA1B_ROOT/sa1b_dense_label/annotation"
 
-[[ -d "$IMAGE_ROOT" && -d "$DENSE_ROOT" ]] || {
-  echo "SA-1B handoff roots are unavailable: $IMAGE_ROOT / $DENSE_ROOT" >&2
-  exit 2
-}
-[[ -f ids.txt ]] || { echo "create ids.txt with a pilot/sample of SA IDs" >&2; exit 2; }
+# Set HDFS_IMAGE_URI/HDFS_DENSE_URI for a bounded remote pilot when the SG2
+# FUSE mount is not present. This mode is deliberately shard-scoped and
+# bounded by SCAN_RECORDS/MINIMUM_MATCHES.
+HDFS_IMAGE_URI=${HDFS_IMAGE_URI:-}
+HDFS_DENSE_URI=${HDFS_DENSE_URI:-}
+SCAN_RECORDS=${SCAN_RECORDS:-5000}
+MINIMUM_MATCHES=${MINIMUM_MATCHES:-100}
+
+if [[ -n "$HDFS_IMAGE_URI" || -n "$HDFS_DENSE_URI" ]]; then
+  [[ -n "$HDFS_IMAGE_URI" && -n "$HDFS_DENSE_URI" ]] || {
+    echo "set both HDFS_IMAGE_URI and HDFS_DENSE_URI for remote mode" >&2
+    exit 2
+  }
+  NORMALIZE_ARGS=(--hdfs-image-uri "$HDFS_IMAGE_URI" --hdfs-dense-uri "$HDFS_DENSE_URI"
+    --scan-records "$SCAN_RECORDS" --minimum-matches "$MINIMUM_MATCHES")
+else
+  [[ -d "$IMAGE_ROOT" && -d "$DENSE_ROOT" ]] || {
+    echo "SA-1B handoff roots are unavailable: $IMAGE_ROOT / $DENSE_ROOT" >&2
+    exit 2
+  }
+  [[ -f ids.txt ]] || { echo "create ids.txt with a pilot/sample of SA IDs" >&2; exit 2; }
+  NORMALIZE_ARGS=(--image-records-dir "$IMAGE_ROOT" --dense-records-dir "$DENSE_ROOT" --id-file ids.txt)
+fi
 
 mkdir -p "$WORK_ROOT"
-python -m sa1b_pipeline.normalize --image-records-dir "$IMAGE_ROOT" --dense-records-dir "$DENSE_ROOT" --id-file ids.txt --output-dir "$WORK_ROOT/candidates"
+python -m sa1b_pipeline.normalize "${NORMALIZE_ARGS[@]}" --output-dir "$WORK_ROOT/candidates"
 python -m sa1b_pipeline.select --manifest "$WORK_ROOT/candidates/candidates.jsonl" --output "$WORK_ROOT/selection/selected_cases.jsonl" --model-id "$MODEL" --tensor-parallel-size "${TP_SIZE:-8}"
 python -m sa1b_pipeline.editor --manifest "$WORK_ROOT/selection/selected_cases.jsonl" --output-dir "$WORK_ROOT/generated" --model-id "${QWEN_IMAGE_MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1}" --steps "${STEPS:-40}"
 python -m sa1b_pipeline.validate --manifest "$WORK_ROOT/generated/generated.jsonl" --output "$WORK_ROOT/validation/validation.jsonl" --model-id "$MODEL"

@@ -20,6 +20,18 @@ def _candidate_dict(candidate: Candidate) -> dict[str, Any]:
     return candidate.to_dict()
 
 
+def _review_priority(candidate: Candidate) -> tuple[float, int, str]:
+    """Cheap pre-MLLM priority for bounded pilots.
+
+    It deliberately uses only annotation metadata. Mask decoding and visual
+    difficulty features remain downstream of the MLLM decision, so this never
+    replaces visual review in a full run.
+    """
+    categories = [o.category.strip().lower() for o in candidate.objects if o.category.strip()]
+    duplicates = len(categories) - len(set(categories))
+    return (min(len(candidate.objects), 128) + 2.0 * duplicates, len(candidate.objects), candidate.source_id)
+
+
 def _overlay(candidate: Candidate) -> str:
     """Make a temporary numbered dense-mask view for reliable MLLM grounding."""
     cache = Path(candidate.image_path).parent / ".sa1b_selector_overlays"
@@ -104,10 +116,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--model-id", default="/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B")
     p.add_argument("--tensor-parallel-size", type=int, default=1)
     p.add_argument("--max-cases", type=int)
+    p.add_argument("--max-candidates", type=int, help="bounded pilot input; omit for the full manifest")
     p.add_argument("--min-targets", type=int, default=2)
     p.add_argument("--max-targets", type=int, default=5)
     args = p.parse_args(argv)
     candidates = load_candidates(args.manifest)
+    if args.max_candidates:
+        candidates = sorted(candidates, key=_review_priority, reverse=True)[:args.max_candidates]
     selector = VLLMSelector(args.model_id, tensor_parallel_size=args.tensor_parallel_size)
     cases = select_and_plan(candidates, selector, min_targets=args.min_targets, max_targets=args.max_targets, max_cases=args.max_cases)
     write_jsonl(args.output, [c.to_dict() for c in cases])
