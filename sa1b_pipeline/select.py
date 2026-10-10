@@ -55,7 +55,7 @@ def _overlay(candidate: Candidate) -> str:
     """Make a temporary numbered dense-mask view for reliable MLLM grounding."""
     cache = Path(candidate.image_path).parent / ".sa1b_selector_overlays"
     cache.mkdir(parents=True, exist_ok=True)
-    path = cache / (candidate.source_id + ".jpg")
+    path = cache / (candidate.source_id + ".v2.jpg")
     if path.exists():
         return str(path)
     image = Image.open(candidate.image_path).convert("RGB")
@@ -75,7 +75,14 @@ def _overlay(candidate: Candidate) -> str:
         # The prompt enumerates object_id values, so the visual marker must
         # carry that same identifier rather than a position-only index.
         ImageDraw.Draw(image).text((int(x), int(y)), str(obj.object_id), fill=color)
-    image.save(path, quality=94)
+    # Keep labels legible while reducing vision-token cost for large SA-1B
+    # sources. The original source and masks remain full resolution.
+    max_side = 1280
+    if max(image.size) > max_side:
+        scale = max_side / max(image.size)
+        image = image.resize((max(32, round(image.width * scale)),
+                              max(32, round(image.height * scale))), Image.Resampling.LANCZOS)
+    image.save(path, quality=92)
     return str(path)
 
 
