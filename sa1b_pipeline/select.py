@@ -49,7 +49,9 @@ def _overlay(candidate: Candidate) -> str:
     for index, obj in enumerate(candidate.objects):
         try:
             mask = load_mask(obj.__dict__, image.size)
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError, TypeError):
+            continue
+        if not mask.any():
             continue
         color = colors[index % len(colors)]
         layer = Image.new("RGB", image.size, color)
