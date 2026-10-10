@@ -13,6 +13,13 @@ from .io import read_jsonl, write_jsonl
 
 
 def edit_prompt(unit: dict[str, Any]) -> str:
+    if unit["operation"] == "remove":
+        return (
+            f"{unit['instruction_ref']} Completely erase the specified target from the image. "
+            "Reconstruct the newly exposed background using the surrounding texture, perspective, lighting and occlusion; "
+            "leave no recolored silhouette, outline, placeholder, cyan/gray patch or duplicate. "
+            "Keep every unrequested object, instance, part, boundary, occluder and background unchanged."
+        )
     return (
         f"{unit['instruction_ref']} Render a natural photographic result. "
         "Keep every unrequested object, instance, part, boundary, occluder, lighting cue and background unchanged; "
