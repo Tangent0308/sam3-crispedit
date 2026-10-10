@@ -29,6 +29,15 @@ the semantic mask ground truth: the diff is a veto/diagnostic, while the
 semantic audit checks target completion, non-target preservation and natural
 quality.
 
+The selector requires the pinned vLLM CUDA runtime in
+`requirements/mllm-vllm-cu129.txt`. A generic older vLLM may install
+successfully but reject the local checkpoint architecture
+`Qwen3_5ForConditionalGeneration` at startup.
+
+Run `python -m sa1b_pipeline.doctor` before loading a model. It verifies the
+two SA-1B roots, CUDA visibility, vLLM version, and registry support for the
+checkpoint architecture.
+
 ## Running against the documented SA-1B layout
 
 ```bash

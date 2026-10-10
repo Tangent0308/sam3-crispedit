@@ -22,6 +22,8 @@ def main(argv: list[str] | None = None) -> None:
     audit.add_argument("--manifest", type=Path, required=True); audit.add_argument("--output", type=Path, required=True); audit.add_argument("--model-id")
     mat = sub.add_parser("materialize", help="expand validated pairs into edit_ntp/edit_umt/edit rows")
     mat.add_argument("--generated", type=Path, required=True); mat.add_argument("--mask-codes", type=Path, required=True); mat.add_argument("--output", type=Path, required=True)
+    doc = sub.add_parser("doctor", help="check SA-1B mounts and Qwen3.8/vLLM compatibility")
+    doc.add_argument("--model", type=Path); doc.add_argument("--handoff", type=Path)
     args, rest = p.parse_known_args(argv)
     if args.command == "normalize":
         from .normalize import main as run; run(["--input", str(args.input), "--output-dir", str(args.output_dir)])
@@ -32,6 +34,12 @@ def main(argv: list[str] | None = None) -> None:
         from .editor import main as run; run(["--manifest", str(args.manifest), "--output-dir", str(args.output_dir), "--model-id", args.model_id, "--steps", str(args.steps)] + rest)
     elif args.command == "materialize":
         from .training import main as run; run(["--generated", str(args.generated), "--mask-codes", str(args.mask_codes), "--output", str(args.output)] + rest)
+    elif args.command == "doctor":
+        from .doctor import main as run
+        argv2 = []
+        if args.model: argv2 += ["--model", str(args.model)]
+        if args.handoff: argv2 += ["--handoff", str(args.handoff)]
+        run(argv2 + rest)
     else:
         from .validate import main as run; run(["--manifest", str(args.manifest), "--output", str(args.output)] + (["--model-id", args.model_id] if args.model_id else []) + rest)
 
