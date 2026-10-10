@@ -42,6 +42,9 @@ python -m sa1b_pipeline.normalize \
 For a pilot, put a small set of SA IDs in `ids.txt`; this avoids scanning the
 full 11M-record corpus. `--input exported.jsonl` is also supported.
 
+`scripts/run_sa1b_pipeline.sh` performs the same four stages and exits before
+model loading when either handoff root is not mounted.
+
 An exported JSONL row contains `source_id`, `image_path`, and `objects`; an
 object contains `object_id`, `category`, and either `mask_path` or COCO `rle`.
 Original shard/index and offset are retained under `provenance`.
