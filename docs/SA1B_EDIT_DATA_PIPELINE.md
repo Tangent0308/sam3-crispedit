@@ -120,6 +120,13 @@ Selection saves a `.decisions.jsonl` audit beside its output. Set
 `SA1B_MLLM_LOG` to a JSONL path to capture direct-vLLM raw output before parsing.
 RLE masks are exported to PNG only for selected targets.
 
+The validated pilot artifacts are under
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/pilot_100`:
+`candidates/` contains 100 joined SA1B records, `selection/` contains the
+Qwen3.8 decisions and selected case, and `generated_smoke/` contains a real
+Qwen-Image-2.1 PNG from a one-step interface smoke. Use the normal 40-step
+setting before accepting generated pairs for training.
+
 For the Qwen-Image-2.1 Omni editor, run with
 `DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA`. The editor lock currently resolves a
 FlashAttention3 wheel built for CUDA 13 while the tested Arnold H100 node uses
