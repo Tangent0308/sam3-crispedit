@@ -126,3 +126,9 @@ FlashAttention3 wheel built for CUDA 13 while the tested Arnold H100 node uses
 a CUDA 12.9 driver; SDPA is the compatible attention backend. The first smoke
 request produced a PNG successfully. Use the default 40 steps for data, and
 judge the 1-step smoke only as an interface check.
+
+Install the editor stack with `scripts/setup_sa1b_editor.sh`. It installs the
+pinned editor lock, checks out the tested vLLM-Omni revision, and installs this
+repo so Omni worker subprocesses can import the regional Qwen-Image-2.1
+pipeline. Export the printed `EDITOR_PYTHON` and `EDITOR_RUNTIME_ROOT` before
+using `scripts/run_sa1b_pipeline.sh`.
