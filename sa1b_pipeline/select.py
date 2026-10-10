@@ -29,7 +29,12 @@ def _review_priority(candidate: Candidate) -> tuple[float, int, str]:
     """
     categories = [o.category.strip().lower() for o in candidate.objects if o.category.strip()]
     duplicates = len(categories) - len(set(categories))
-    return (min(len(candidate.objects), 128) + 2.0 * duplicates, len(candidate.objects), candidate.source_id)
+    count = len(candidate.objects)
+    # Very crowded annotations make a bounded pilot overlay and prompt
+    # needlessly large. Keep them eligible, but prefer scenes that fit a
+    # human-scale numbered review before the full run is scheduled.
+    crowding_penalty = max(0, count - 96) * 1.5
+    return (min(count, 96) + 2.0 * duplicates - crowding_penalty, -count, candidate.source_id)
 
 
 def _overlay(candidate: Candidate) -> str:
