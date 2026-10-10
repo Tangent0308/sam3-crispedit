@@ -10,7 +10,7 @@ OMNI_REV=${VLLM_OMNI_REV:-44ea27c8094095bbffd88fa3befdfaa55ba4bc50}
 "$UV_BIN" pip install --python "$RUNTIME_DIR/bin/python" --no-deps --link-mode=copy \
   --index-url https://bytedpypi.byted.org/simple/ \
   --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match \
-  -r "$REPO_DIR/../sam3-crispedit-samtok-derived-edit-labeling/requirements/labeling-editor.lock.txt"
+  -r "$REPO_DIR/requirements/labeling-editor.lock.txt"
 git clone --filter=blob:none https://github.com/vllm-project/vllm-omni.git "$OMNI_DIR"
 git -C "$OMNI_DIR" checkout --detach "$OMNI_REV"
 "$UV_BIN" pip install --python "$RUNTIME_DIR/bin/python" --no-deps --link-mode=copy -e "$OMNI_DIR" -e "$REPO_DIR"
