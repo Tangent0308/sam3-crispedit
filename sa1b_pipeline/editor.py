@@ -72,6 +72,15 @@ class DiffusersQwenImageEditor:
                            guidance_scale=1.0, num_inference_steps=self.steps, generator=generator,
                            height=gen_input.height, width=gen_input.width)
         edited_crop = result.images[0].convert("RGB").resize(crop.size)
+        if unit["operation"] == "remove":
+            # Keep Qwen's generated surroundings, but enforce complete target
+            # disappearance inside the requested mask with a source-neighbor
+            # reconstruction. This prevents residual objects and cyan patches
+            # from entering the training set when diffusion follows the input
+            # identity too strongly.
+            background = _erase_target(crop, mask[y0:y1, x0:x1])
+            local_alpha = Image.fromarray((mask[y0:y1, x0:x1].astype("uint8") * 255), mode="L")
+            edited_crop = Image.composite(background, edited_crop, local_alpha)
         # Feather an expanded region to retain contact shadows and prevent
         # local edits from producing a rectangular paste seam. Add/replace
         # receive a larger footprint because new content may extend beyond
