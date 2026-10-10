@@ -97,6 +97,23 @@ python -m sa1b_pipeline.training \
   --output .../training/train.jsonl
 ```
 
+Encode the codes with the official Qwen3-VL-8B-SAMTok VQ-SAM2 checkpoint:
+
+```bash
+scripts/setup_sa1b_samtok.sh
+PYTHONPATH="$PWD:$SAMTOK_REPO_ROOT" "$SA1B_SAMTOK_RUNTIME/bin/python" \
+  -m sa1b_pipeline.samtok \
+  --generated .../generated/generated.jsonl \
+  --output .../sam_tok_codes.jsonl \
+  --model-dir /mnt/bn/strategy-mllm-train/user/tanyue/models/SAMTok/Qwen3-VL-8B-SAMTok \
+  --samtok-root "$SAMTOK_REPO_ROOT"
+```
+
+The encoder uses the official SAM2 image path, source mask, normalized tight
+box, and two residual codebooks. It records the tokenizer checkpoint hash and
+Sa2VA revision beside every code. Coordinate, bbox, or hand-written token
+substitutes are rejected by the training materializer.
+
 `sam_tok_codes.jsonl` is intentionally an explicit input: codes must be
 produced by the Qwen3-VL-8B-SAMTok mask tokenizer that will be used for
 training. The materializer refuses missing or malformed codes instead of
@@ -126,6 +143,12 @@ The validated pilot artifacts are under
 Qwen3.8 decisions and selected case, and `generated_smoke/` contains a real
 Qwen-Image-2.1 PNG from a one-step interface smoke. Use the normal 40-step
 setting before accepting generated pairs for training.
+
+The completed 40-step pilot is in `generated_40step/`: its Qwen-Image-2.1
+output passed deterministic checks and a Qwen3.8-27B semantic audit, and
+`training_rows.jsonl` contains the four contract rows. The sample is an
+attribute edit of the selected metal fence; its official SAMTok code is
+`<|mt_start|><|mt_0223|><|mt_0356|><|mt_end|>`.
 
 For the Qwen-Image-2.1 Omni editor, run with
 `DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA`. The editor lock currently resolves a
