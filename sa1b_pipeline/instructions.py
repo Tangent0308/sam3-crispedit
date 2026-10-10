@@ -60,8 +60,16 @@ def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometr
     if operation == "attribute" and attribute_kind not in {"color", "material"}:
         attribute_kind = "color"
     ref_instruction = render_instruction(operation, ref, payload, attribute_kind)
-    no_ref_target = f"the selected {scope}"
-    no_ref_instruction = render_instruction(operation, no_ref_target, payload, attribute_kind)
+    # The benchmark contract uses type-specific region language.  Keeping the
+    # replacement phrase explicit is important: a mask must follow a complete
+    # referring phrase, never an article or a guessed scope description.
+    kind = "material" if attribute_kind == "material" else "color"
+    no_ref_instruction = {
+        "add": f"Add {payload} in this region.",
+        "replace": f"Replace the object in this region with {payload}.",
+        "remove": "Remove the object in this region.",
+        "attribute": f"Change the {kind} of this region to {payload}.",
+    }[operation]
     object_id = str(obj.get("object_id", obj.get("id")))
     completion = {
         "add": "The source object remains, and the added item must have the specified attachment.",

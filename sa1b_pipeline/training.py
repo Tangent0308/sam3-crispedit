@@ -31,10 +31,8 @@ def build_training_rows(pair: dict[str, Any], mask_code: str) -> list[dict[str, 
     no_ref_phrase = _infer_noref_phrase(no_ref)
     no_ref_inline = inline_mask(no_ref, no_ref_phrase, mask_code)
     common = {
-        "edit_type": pair["operation"], "edit_image": pair["source_image"],
-        "source_id": pair.get("source_id"), "case_id": pair.get("case_id"),
-        "unit_id": pair.get("unit_id"), "mask_path": pair.get("mask"),
-        "mask_code": mask_code, "provenance": pair.get("source_provenance", {}),
+        "edit_type": pair["operation"],
+        "edit_image": pair["source_image"],
     }
     return [
         {**common, "sample_type": "edit_ntp", "prompt": ref, "mt_cot": mask_cot(mask_code, phrase)},
@@ -53,20 +51,20 @@ def _infer_phrase(instruction: dict[str, Any]) -> str:
 
 
 def _infer_noref_phrase(instruction: str) -> str:
-    # The instruction builder emits "the selected <scope>" for every no-ref
-    # unit; keeping this explicit avoids inserting a span after an article.
+    # Keep the mask after a complete type-specific region phrase.
     lower = instruction.lower()
+    for phrase in ("the object in this region", "this region", "in this region"):
+        if phrase in lower:
+            return instruction[lower.find(phrase):lower.find(phrase) + len(phrase)]
+    # Accept manifests written before the benchmark-v2 region wording was
+    # enforced; newly built rows always use one of the phrases above.
     marker = "the selected "
     start = lower.find(marker)
-    if start < 0:
-        raise ValueError("no-ref instruction has no selected-object anchor")
-    end = instruction.find(" ", start + len(marker))
-    # Include the scope words until the operation's final payload preposition.
-    words = instruction[start:].rstrip(".").split()
-    if len(words) < 3:
-        raise ValueError("invalid no-ref instruction")
-    stop = next((i for i, word in enumerate(words[2:], 2) if word.lower() in {"to", "with"}), len(words))
-    return " ".join(words[:stop])
+    if start >= 0:
+        words = instruction[start:].rstrip(".").split()
+        stop = next((i for i, word in enumerate(words[2:], 2) if word.lower() in {"to", "with"}), len(words))
+        return " ".join(words[:stop])
+    raise ValueError("no-ref instruction has no benchmark region anchor")
 
 
 def materialize(generated_manifest: Path, codes_jsonl: Path, output: Path) -> list[dict[str, Any]]:
