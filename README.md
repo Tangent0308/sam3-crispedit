@@ -50,6 +50,25 @@ The full design rationale, task taxonomy, quality rubric, 100-case pilot
 commands, and measured results are documented in
 [`docs/SAMTOK_DERIVED_EDIT_PIPELINE.md`](docs/SAMTOK_DERIVED_EDIT_PIPELINE.md).
 
+## SA-1B benchmark-v2 pilot status
+
+The reproducible benchmark-v2 pilot is on branch `sa1b-benchmark-v2`. A
+Qwen3.8-27B selection/planning pass accepted 14 hard scenes from the local
+100-image SA-1B candidate pool, producing 70 units (five per scene) with the
+seven benchmark interaction combinations. Qwen-Image-2.1 generated all 70
+targets at 40 steps; the Qwen3.8-27B audit passed 35 pairs (attribute 16,
+replace 10, add 8, remove 1). Only those 35 pairs were encoded with the
+official SAMTok tokenizer and materialized into 140 protocol rows.
+
+The resumable artifacts are under
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/pilot_100/selection_20/`:
+`selected_cases_v4.jsonl`, `generated_v4_40step/validation.jsonl`,
+`generated_v4_40step/mask_codes.jsonl`, and
+`generated_v4_40step/training_rows.jsonl`. The 13 failed remove retries remain
+in separate `generated_remove_retry_*` directories and are excluded from
+training. The pipeline now pre-fills remove targets and enforces mask-local
+background reconstruction before a pair can be considered for audit.
+
 ## Lineage
 
 The branch starts from MIRAGE commit `50a5df5` and retains its history. MIRAGE
