@@ -25,6 +25,21 @@ def parse_json(text: str) -> dict[str, Any]:
     return value
 
 
+def _safe_parse(text: str, *, stage: str) -> dict[str, Any]:
+    """Turn one malformed generation into an auditable rejection.
+
+    vLLM returns a batch atomically, but a single vision-language generation
+    can still truncate or emit prose.  The caller must be able to keep the
+    other batch members and let the stage-specific contract reject this one.
+    """
+    try:
+        return parse_json(text)
+    except (ValueError, json.JSONDecodeError) as exc:
+        if stage == "audit":
+            return {"decision": "fail", "failure_reasons": ["malformed_mllm_json"], "evidence": str(exc)}
+        return {"accept": False, "_parse_error": str(exc), "_raw_output": text}
+
+
 class VLLMSelector:
     """Continuous-batching selector/planner for Qwen3.8-27B."""
 
@@ -73,6 +88,13 @@ class VLLMSelector:
         self.params = SamplingParams(temperature=temperature, max_tokens=max_new_tokens,
                                      top_p=1.0, stop=["<|im_end|>"])
 
+    def close(self) -> None:
+        """Release vLLM's worker processes and CUDA allocations explicitly."""
+        engine = getattr(getattr(self, "llm", None), "llm_engine", None)
+        shutdown = getattr(engine, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+
     def _messages(self, image_path: str, prompt: str) -> tuple[str, Image.Image]:
         image = Image.open(image_path).convert("RGB")
         messages = [{"role": "user", "content": [
@@ -98,7 +120,7 @@ class VLLMSelector:
                     {"type": "image", "image": Image.open(image_path).convert("RGB")},
                     {"type": "text", "text": prompt},
                 ]}])
-            return [parse_json(x) for x in self.backend.chat_batch(messages, max_new_tokens=self.max_new_tokens)]
+            return [_safe_parse(x, stage="selection") for x in self.backend.chat_batch(messages, max_new_tokens=self.max_new_tokens)]
         requests = []
         images = []
         for image_path, text in jobs:
@@ -115,7 +137,7 @@ class VLLMSelector:
         result = []
         for output in outputs:
             text = output.outputs[0].text if output.outputs else ""
-            result.append(parse_json(text))
+            result.append(_safe_parse(text, stage="selection"))
         return result
 
     def generate_multimage(self, jobs: list[tuple[list[str], str]]) -> list[dict[str, Any]]:
@@ -125,13 +147,13 @@ class VLLMSelector:
                 content = [{"type": "image", "image": Image.open(p).convert("RGB")} for p in image_paths]
                 content.append({"type": "text", "text": prompt})
                 messages.append([{"role": "user", "content": content}])
-            return [parse_json(x) for x in self.backend.chat_batch(messages, max_new_tokens=self.max_new_tokens)]
+            return [_safe_parse(x, stage="audit") for x in self.backend.chat_batch(messages, max_new_tokens=self.max_new_tokens)]
         requests = []
         for paths, text in jobs:
             prompt, images = self._multi_messages(paths, text)
             requests.append({"prompt": prompt, "multi_modal_data": {"image": images}})
         outputs = self.llm.generate(requests, self.params, use_tqdm=False)
-        return [parse_json(output.outputs[0].text if output.outputs else "") for output in outputs]
+        return [_safe_parse(output.outputs[0].text if output.outputs else "", stage="audit") for output in outputs]
 
 
 def selection_prompt(candidate: dict[str, Any], *, min_targets: int = 2, max_targets: int = 5) -> str:

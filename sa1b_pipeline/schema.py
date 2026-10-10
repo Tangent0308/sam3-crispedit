@@ -97,7 +97,7 @@ def validate_unit(unit: EditUnit) -> None:
         raise ValueError("ref_phrase and scope are required")
     words = unit.instruction_ref.split()
     no_words = unit.instruction_noref.split()
-    if not 4 <= len(words) <= 40 or not 4 <= len(no_words) <= 24:
+    if not 4 <= len(words) <= 26 or not 4 <= len(no_words) <= 16:
         raise ValueError("instruction length is outside the benchmark contract")
 
 
