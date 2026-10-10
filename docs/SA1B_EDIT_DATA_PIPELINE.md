@@ -21,6 +21,7 @@ SA-1B dense TFRecord / JSONL
   → select.py (Qwen3.8-27B vLLM scene selection + edit planning)
   → editor.py (Qwen-Image-2.1 checkpointed target generation)
   → validate.py (mask-aware deterministic checks + optional Qwen3.8 audit)
+  → training.py (SAMTok code binding + edit_ntp/edit_umt/edit rows)
 ```
 
 The pipeline can resume each stage from JSONL. It never treats a pixel diff as
@@ -64,4 +65,16 @@ python -m sa1b_pipeline.validate \
   --manifest .../generated/generated.jsonl \
   --output .../validation.jsonl \
   --model-id /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B
+
+python -m sa1b_pipeline.training \
+  --generated .../generated/generated.jsonl \
+  --mask-codes .../sam_tok_codes.jsonl \
+  --output .../training/train.jsonl
 ```
+
+`sam_tok_codes.jsonl` is intentionally an explicit input: codes must be
+produced by the Qwen3-VL-8B-SAMTok mask tokenizer that will be used for
+training. The materializer refuses missing or malformed codes instead of
+silently writing fake mask tokens. Each validated pair expands to one
+`edit_ntp`, two `edit_umt` (`ref`/`noref`), and one plain `edit` row, matching
+the latest Qwen-Image-2.1 protocol.
