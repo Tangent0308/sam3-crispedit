@@ -51,7 +51,58 @@ def _review_priority(candidate: Candidate) -> tuple[int, float, int, str]:
     return (int(count <= 96), min(count, 96) + 2.0 * duplicates - crowding_penalty, -count, candidate.source_id)
 
 
-def _overlay(candidate: Candidate) -> str:
+_PART_HINTS = ("strap", "sleeve", "handle", "trim", "pole", "pipe", "rail", "button", "logo", "wheel", "tire", "window", "door", "armband", "necklace", "text", "sign")
+_BACKGROUND_HINTS = ("background", "sky", "ground", "wall", "floor", "water", "road", "scene")
+
+
+def _review_objects(candidate: Candidate, limit: int = 40) -> list[CandidateObject]:
+    """Bound overlay/multimodal context while retaining difficult targets.
+
+    Dense SA-1B scenes can contain hundreds of masks. Decode only a compact
+    visual shortlist for MLLM review; the original candidate retains every mask
+    and a selected object must still resolve against that immutable map.
+    """
+    if len(candidate.objects) <= limit:
+        return list(candidate.objects)
+    image = Image.open(candidate.image_path)
+    width, height = image.size
+    categories = [o.category.lower() for o in candidate.objects]
+    frequency = {category: categories.count(category) for category in set(categories)}
+    ranked = []
+    for index, obj in enumerate(candidate.objects):
+        category = obj.category.lower()
+        bbox = obj.bbox or []
+        area = obj.area_fraction
+        if area is None and len(bbox) == 4:
+            area = abs(float(bbox[2] - bbox[0]) * float(bbox[3] - bbox[1])) / max(1, width * height)
+        area = max(float(area or 0.0), 1e-8)
+        score = (3.0 if any(token in category for token in _PART_HINTS) else 0.0)
+        score += 1.5 if frequency.get(category, 0) > 1 else 0.0
+        score += 1.0 if not any(token in category for token in _BACKGROUND_HINTS) else -2.0
+        score += min(2.0, 0.02 / area)
+        ranked.append((score, -area, index, obj))
+    ranked.sort(reverse=True, key=lambda value: (value[0], value[1], -value[2]))
+    chosen = [value[3] for value in ranked[: max(1, limit - 4)]]
+    # Keep a few large objects so the review is not biased to tiny fragments.
+    chosen_ids = {obj.object_id for obj in chosen}
+    largest = sorted(candidate.objects, key=lambda obj: -(obj.area_fraction or 0.0))
+    for obj in largest:
+        if obj.object_id not in chosen_ids:
+            chosen.append(obj)
+            chosen_ids.add(obj.object_id)
+        if len(chosen) >= limit:
+            break
+    return chosen[:limit]
+
+
+def _candidate_view(candidate: Candidate) -> dict[str, Any]:
+    value = _candidate_dict(candidate)
+    reviewed = {obj.object_id for obj in _review_objects(candidate)}
+    value["objects"] = [obj for obj in value["objects"] if str(obj.get("object_id")) in reviewed]
+    return value
+
+
+def _overlay(candidate: Candidate, objects: list[CandidateObject] | None = None) -> str:
     """Make a temporary numbered dense-mask view for reliable MLLM grounding."""
     cache = Path(candidate.image_path).parent / ".sa1b_selector_overlays"
     cache.mkdir(parents=True, exist_ok=True)
@@ -60,7 +111,7 @@ def _overlay(candidate: Candidate) -> str:
         return str(path)
     image = Image.open(candidate.image_path).convert("RGB")
     colors = [(235, 40, 75), (0, 150, 240), (220, 165, 0), (145, 75, 210), (0, 175, 120)]
-    for index, obj in enumerate(candidate.objects):
+    for index, obj in enumerate(objects or _review_objects(candidate)):
         try:
             mask = load_mask(obj.__dict__, image.size)
         except (ValueError, RuntimeError, TypeError):
@@ -96,7 +147,7 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
             audit_path.parent.mkdir(parents=True, exist_ok=True)
             with audit_path.open('a', encoding='utf-8') as stream:
                 stream.write(json.dumps({'stage': stage, 'source_id': source_id, **value}, ensure_ascii=False) + '\n')
-    selection_jobs = [(_overlay(c), selection_prompt(_candidate_dict(c), min_targets=min_targets, max_targets=max_targets) + " The image has numbered translucent mask overlays matching candidate order; inspect the clean scene beneath them.") for c in candidates]
+    selection_jobs = [(_overlay(c, _review_objects(c)), selection_prompt(_candidate_view(c), min_targets=min_targets, max_targets=max_targets) + " The image labels show the object_id values; inspect the clean scene beneath them.") for c in candidates]
     if selection_decisions is None:
         selected = selector.generate(selection_jobs)
         for candidate, decision in zip(candidates, selected):
@@ -122,7 +173,7 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
         geom_by_id = {x["object_id"]: x for x in difficulty["target_features"]}
         protection = [str(x) for x in decision.get("protection_notes", [])]
         planning_context.append((candidate, decision, ids, difficulty, lookup, size, geom_by_id, protection))
-    planning_jobs = [(_overlay(candidate), planning_prompt(_candidate_dict(candidate), ids, difficulty))
+    planning_jobs = [(_overlay(candidate, _review_objects(candidate)), planning_prompt(_candidate_dict(candidate), ids, difficulty))
                      for candidate, _decision, ids, difficulty, _lookup, _size, _geom, _protection in planning_context]
     if planning_decisions is None:
         plans = selector.generate(planning_jobs) if planning_jobs else []
