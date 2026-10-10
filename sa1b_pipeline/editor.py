@@ -57,10 +57,20 @@ class DiffusersQwenImageEditor:
         scale = min(1.0, (1024 * 1024 / (crop.width * crop.height)) ** 0.5)
         gen_crop = crop.resize((max(32, round(crop.width * scale / 32) * 32),
                                 max(32, round(crop.height * scale / 32) * 32))) if scale < 1.0 else crop
+        # For removal, hide the target before asking Qwen to reconstruct the
+        # exposed background.  Sending the untouched target back as context
+        # makes the diffusion edit preserve it or recolor it into a mask-like
+        # artifact, especially for small text and thin structures.
+        if unit["operation"] == "remove":
+            gen_input = _erase_target(crop, mask[y0:y1, x0:x1])
+            if gen_input.size != gen_crop.size:
+                gen_input = gen_input.resize(gen_crop.size)
+        else:
+            gen_input = gen_crop
         generator = self.torch.Generator(device="cuda").manual_seed(seed)
-        result = self.pipe(image=gen_crop, prompt=edit_prompt(unit), negative_prompt=" ", true_cfg_scale=1.0,
+        result = self.pipe(image=gen_input, prompt=edit_prompt(unit), negative_prompt=" ", true_cfg_scale=1.0,
                            guidance_scale=1.0, num_inference_steps=self.steps, generator=generator,
-                           height=gen_crop.height, width=gen_crop.width)
+                           height=gen_input.height, width=gen_input.width)
         edited_crop = result.images[0].convert("RGB").resize(crop.size)
         # Feather an expanded region to retain contact shadows and prevent
         # local edits from producing a rectangular paste seam. Add/replace
@@ -73,6 +83,23 @@ class DiffusersQwenImageEditor:
         output = image.copy()
         output.paste(edited_crop, (x0, y0), alpha)
         return output
+
+
+def _erase_target(crop: Image.Image, local_mask) -> Image.Image:
+    """Inpaint the target from a remove crop before diffusion generation."""
+    import numpy as np
+    array = np.asarray(crop.convert("RGB"))
+    mask = (np.asarray(local_mask).astype("uint8") * 255)
+    try:
+        import cv2
+        filled = cv2.inpaint(array, mask, 5, cv2.INPAINT_TELEA)
+        return Image.fromarray(filled, mode="RGB")
+    except ImportError:  # pragma: no cover - isolated editor runtime has cv2
+        # Conservative fallback: use the crop median so the model still sees
+        # a missing target rather than the original object.
+        fallback = array.copy()
+        fallback[mask > 0] = np.median(array[mask == 0], axis=0) if np.any(mask == 0) else 127
+        return Image.fromarray(fallback, mode="RGB")
 
 
 def _dilate(mask, radius: int):
