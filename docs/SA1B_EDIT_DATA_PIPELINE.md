@@ -119,3 +119,10 @@ model registration and data access only; it does not prove generation quality.
 Selection saves a `.decisions.jsonl` audit beside its output. Set
 `SA1B_MLLM_LOG` to a JSONL path to capture direct-vLLM raw output before parsing.
 RLE masks are exported to PNG only for selected targets.
+
+For the Qwen-Image-2.1 Omni editor, run with
+`DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA`. The editor lock currently resolves a
+FlashAttention3 wheel built for CUDA 13 while the tested Arnold H100 node uses
+a CUDA 12.9 driver; SDPA is the compatible attention backend. The first smoke
+request produced a PNG successfully. Use the default 40 steps for data, and
+judge the 1-step smoke only as an interface check.

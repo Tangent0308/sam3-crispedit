@@ -8,6 +8,7 @@ WORK_ROOT=${WORK_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edi
 PREP_PYTHON=${PREP_PYTHON:-python}
 MLLM_PYTHON=${MLLM_PYTHON:-python}
 EDITOR_PYTHON=${EDITOR_PYTHON:-python}
+export DIFFUSION_ATTENTION_BACKEND=${DIFFUSION_ATTENTION_BACKEND:-TORCH_SDPA}
 MODEL=${MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B}
 IMAGE_ROOT="$SA1B_ROOT/sa1b_tfd_1k"
 DENSE_ROOT="$SA1B_ROOT/sa1b_dense_label/annotation"

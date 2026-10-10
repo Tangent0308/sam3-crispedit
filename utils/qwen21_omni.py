@@ -84,6 +84,7 @@ class QwenImage21OmniPipeline:
         prompt: str,
         num_inference_steps: int = 40,
         true_cfg_scale: float = 1.0,
+        guidance_scale: float | None = None,
         negative_prompt: str | None = None,
         generator: Any = None,
         height: int | None = None,

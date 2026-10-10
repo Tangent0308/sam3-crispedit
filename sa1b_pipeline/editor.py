@@ -44,10 +44,16 @@ class DiffusersQwenImageEditor:
         x0, y0 = max(0, x0 - margin), max(0, y0 - margin)
         x1, y1 = min(image.width, x1 + margin), min(image.height, y1 + margin)
         crop = image.crop((x0, y0, x1, y1))
+        # Qwen-Image-2.1's supported 1024-pixel recipe is much cheaper and
+        # more stable than sending full SA-1B panoramas to Omni. Resize only
+        # the generation canvas; the final composite returns to source size.
+        scale = min(1.0, (1024 * 1024 / (crop.width * crop.height)) ** 0.5)
+        gen_crop = crop.resize((max(32, round(crop.width * scale / 32) * 32),
+                                max(32, round(crop.height * scale / 32) * 32))) if scale < 1.0 else crop
         generator = self.torch.Generator(device="cuda").manual_seed(seed)
-        result = self.pipe(image=crop, prompt=edit_prompt(unit), negative_prompt=" ", true_cfg_scale=1.0,
+        result = self.pipe(image=gen_crop, prompt=edit_prompt(unit), negative_prompt=" ", true_cfg_scale=1.0,
                            guidance_scale=1.0, num_inference_steps=self.steps, generator=generator,
-                           height=crop.height, width=crop.width)
+                           height=gen_crop.height, width=gen_crop.width)
         edited_crop = result.images[0].convert("RGB").resize(crop.size)
         # Feather an expanded region to retain contact shadows and prevent
         # local edits from producing a rectangular paste seam. Add/replace
