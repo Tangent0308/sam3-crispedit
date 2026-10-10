@@ -82,6 +82,15 @@ python -m sa1b_pipeline.select \
   --model-id /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B \
   --tensor-parallel-size 8
 
+# Resume planning from a previous selection audit without rerunning scene
+# selection (useful when one malformed or overlong plan was rejected).
+python -m sa1b_pipeline.select \
+  --manifest .../candidates/candidates.jsonl \
+  --selection-decisions .../selection/selected_cases.decisions.jsonl \
+  --output .../selection/selected_cases.jsonl \
+  --model-id /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B \
+  --tensor-parallel-size 8
+
 python -m sa1b_pipeline.editor \
   --manifest .../selection/selected_cases.jsonl \
   --output-dir .../generated --model-id /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1 --steps 40
@@ -144,11 +153,15 @@ Qwen3.8 decisions and selected case, and `generated_smoke/` contains a real
 Qwen-Image-2.1 PNG from a one-step interface smoke. Use the normal 40-step
 setting before accepting generated pairs for training.
 
-The completed 40-step pilot is in `generated_40step/`: its Qwen-Image-2.1
-output passed deterministic checks and a Qwen3.8-27B semantic audit, and
-`training_rows.jsonl` contains the four contract rows. The sample is an
-attribute edit of the selected metal fence; its official SAMTok code is
-`<|mt_start|><|mt_0223|><|mt_0356|><|mt_end|>`.
+The completed 40-step pilot is in
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/pilot_100/selection_20/generated_40step/`:
+12 selected five-target cases were planned from 20 candidates. Four bounded
+Qwen-Image-2.1 pairs were generated across `attribute`, `replace`, `remove`,
+and `add`; semantic audit retained two. The resulting
+`training_rows.jsonl` contains eight rows (two each of `edit_ntp`,
+`edit_umt/ref`, `edit_umt/noref`, and plain `edit`). Failed remove/add pairs
+remain in `validation.jsonl` with their audit evidence and are excluded from
+SAMTok materialization. `pilot_summary.json` records all counts and paths.
 
 For the Qwen-Image-2.1 Omni editor, run with
 `DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA`. The editor lock currently resolves a
