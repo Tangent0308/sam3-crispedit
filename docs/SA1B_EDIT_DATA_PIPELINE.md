@@ -29,6 +29,18 @@ the semantic mask ground truth: the diff is a veto/diagnostic, while the
 semantic audit checks target completion, non-target preservation and natural
 quality.
 
+The frozen benchmark-v2 SA-1B shortlist can be used as a high-difficulty
+candidate pool without importing its instructions or edit outputs. The
+adapter keeps the original selected mask files and provenance, after which a
+new MLLM selection/planning pass is still required:
+
+```bash
+python -m sa1b_pipeline.import_selected_sources \
+  --selected-sources /mnt/bn/strategy-mllm-train/user/tanyue/datasets/samtok_edit_benchmark_v2/sa1b_source_selection/selected_sources.jsonl \
+  --asset-root /mnt/bn/strategy-mllm-train/user/tanyue/datasets/samtok_edit_benchmark_v2/sa1b_source_selection \
+  --output .../candidates/benchmark_v2_source_pool.jsonl
+```
+
 The selector requires the pinned vLLM CUDA runtime in
 `requirements/mllm-vllm-cu129.txt`. A generic older vLLM may install
 successfully but reject the local checkpoint architecture
@@ -129,6 +141,13 @@ training. The materializer refuses missing or malformed codes instead of
 silently writing fake mask tokens. Each validated pair expands to one
 `edit_ntp`, two `edit_umt` (`ref`/`noref`), and one plain `edit` row, matching
 the latest Qwen-Image-2.1 protocol.
+
+No-ref instructions follow the v2 frozen grammar (`the selected <scope>`),
+while ref instructions preserve a concise image-grounded phrase. Add payloads
+must introduce a new physical item; a host surface or existing subregion is
+rejected before generation. Interaction assignment covers the seven valid v2
+combinations (`ref` with none/point/box/mask and `noref` with point/box/mask),
+leaving `noref+none` unused.
 
 ### Isolated MLLM environment
 

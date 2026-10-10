@@ -11,6 +11,26 @@ def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().rstrip(" .;"))
 
 
+def _lower_article(value: str) -> str:
+    """Match benchmark-v2's sentence-internal referring phrases."""
+    for article in ("the ", "a ", "an "):
+        if value.lower().startswith(article):
+            return value[:1].lower() + value[1:]
+    return value
+
+
+def _scope_phrase(raw_scope: str, category: str) -> str:
+    """Return the short noun phrase used by v2 no-ref instructions."""
+    category = _clean(category)
+    if category and category.lower() not in {"object", "thing", "part", "unknown", "item"}:
+        # Dense SA-1B categories sometimes contain comma-separated aliases.
+        return _lower_article(category.split(",", 1)[0].strip())
+    value = _clean(raw_scope)
+    value = re.sub(r"^(?:the|a|an)\s+", "", value, flags=re.I)
+    value = re.sub(r"^(?:entire|whole|visible|selected)\s+", "", value, flags=re.I)
+    return _lower_article(value or "object")
+
+
 def _payload_for_operation(operation: str, payload: str, target: str) -> str:
     """Normalize an MLLM that returned a full instruction instead of payload."""
     value = _clean(payload)
@@ -24,7 +44,7 @@ def _payload_for_operation(operation: str, payload: str, target: str) -> str:
         if lower.startswith("replace ") and match:
             return _clean(match.group(1))
     if operation == "add":
-        match = re.search(r"\bto\s+(.+)$", value, re.I)
+        match = re.match(r"add\s+(.+?)\s+to\s+.+$", value, re.I)
         if lower.startswith("add ") and match:
             return _clean(match.group(1))
     return value
@@ -49,9 +69,11 @@ def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometr
     operation = _clean(raw.get("operation")).lower()
     if operation not in {"add", "replace", "remove", "attribute"}:
         raise ValueError(f"invalid MLLM operation: {operation}")
-    ref = _clean(raw.get("ref_phrase") or raw.get("target") or obj.get("description") or obj.get("category"))
-    scope = _clean(raw.get("scope") or obj.get("category") or "object")
+    ref = _lower_article(_clean(raw.get("ref_phrase") or raw.get("target") or obj.get("description") or obj.get("category")))
+    scope = _scope_phrase(_clean(raw.get("scope") or ""), _clean(obj.get("category") or ""))
     payload = _payload_for_operation(operation, _clean(raw.get("payload") or raw.get("new_content")), ref)
+    if operation == "add" and not re.match(r"^(?:a|an|one|two|three)\s+", payload, flags=re.I):
+        raise ValueError("add payload must introduce a new physical item")
     if operation == 'remove' and not payload:
         payload = 'remove the selected target and reconstruct the revealed background'
     if not payload:
@@ -65,10 +87,10 @@ def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometr
     # referring phrase, never an article or a guessed scope description.
     kind = "material" if attribute_kind == "material" else "color"
     no_ref_instruction = {
-        "add": f"Add {payload} in this region.",
-        "replace": f"Replace the object in this region with {payload}.",
-        "remove": "Remove the object in this region.",
-        "attribute": f"Change the {kind} of this region to {payload}.",
+        "add": f"Add {payload} to the selected {scope}.",
+        "replace": f"Replace the selected {scope} with {payload}.",
+        "remove": f"Remove the selected {scope}.",
+        "attribute": f"Change the {kind} of the selected {scope} to {payload}.",
     }[operation]
     object_id = str(obj.get("object_id", obj.get("id")))
     completion = {

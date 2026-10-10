@@ -60,6 +60,9 @@ def _infer_phrase(instruction: dict[str, Any]) -> str:
 def _infer_noref_phrase(instruction: str) -> str:
     # Keep the mask after a complete type-specific region phrase.
     lower = instruction.lower()
+    selected = re.search(r"the selected\s+.+?(?=\s+to\s|\s+with\s|\.?$)", lower)
+    if selected:
+        return instruction[selected.start():selected.end()].rstrip(" .")
     for phrase in ("the object in this region", "this region", "in this region"):
         if phrase in lower:
             return instruction[lower.find(phrase):lower.find(phrase) + len(phrase)]
