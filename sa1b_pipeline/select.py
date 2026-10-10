@@ -20,7 +20,7 @@ def _candidate_dict(candidate: Candidate) -> dict[str, Any]:
     return candidate.to_dict()
 
 
-def _review_priority(candidate: Candidate) -> tuple[float, int, str]:
+def _review_priority(candidate: Candidate) -> tuple[int, float, int, str]:
     """Cheap pre-MLLM priority for bounded pilots.
 
     It deliberately uses only annotation metadata. Mask decoding and visual
@@ -34,7 +34,7 @@ def _review_priority(candidate: Candidate) -> tuple[float, int, str]:
     # needlessly large. Keep them eligible, but prefer scenes that fit a
     # human-scale numbered review before the full run is scheduled.
     crowding_penalty = max(0, count - 96) * 1.5
-    return (min(count, 96) + 2.0 * duplicates - crowding_penalty, -count, candidate.source_id)
+    return (int(count <= 96), min(count, 96) + 2.0 * duplicates - crowding_penalty, -count, candidate.source_id)
 
 
 def _overlay(candidate: Candidate) -> str:
