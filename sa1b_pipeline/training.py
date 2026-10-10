@@ -77,10 +77,25 @@ def _infer_noref_phrase(instruction: str) -> str:
     raise ValueError("no-ref instruction has no benchmark region anchor")
 
 
-def materialize(generated_manifest: Path, codes_jsonl: Path, output: Path) -> list[dict[str, Any]]:
+def materialize(generated_manifest: Path, codes_jsonl: Path, output: Path,
+                exclude_benchmark: Path | None = None) -> list[dict[str, Any]]:
+    from .geometry import sha256
+    from .source_pool import benchmark_keys
+    forbidden_ids, forbidden_hashes = benchmark_keys(exclude_benchmark) if exclude_benchmark else (set(), set())
+    image_hashes = {}
     codes = {(str(row["case_id"]), str(row["unit_id"])): row["mask_code"] for row in read_jsonl(codes_jsonl)}
     rows = []
     for pair in read_jsonl(generated_manifest):
+        provenance = pair.get("source_provenance", {})
+        if str(provenance.get("selection_status", "")).startswith("benchmark_shortlist"):
+            raise ValueError("benchmark calibration pairs cannot be materialized for training")
+        if exclude_benchmark:
+            source_id = str(pair.get("source_id") or pair["case_id"]).removeprefix("sa1b-")
+            image_path = pair["source_image"]
+            if image_path not in image_hashes:
+                image_hashes[image_path] = sha256(image_path)
+            if source_id in forbidden_ids or image_hashes[image_path] in forbidden_hashes:
+                raise ValueError(f"benchmark source leakage: {source_id}")
         key = (str(pair["case_id"]), str(pair["unit_id"]))
         if key not in codes:
             raise ValueError(f"missing SAMTok code for {key}")
@@ -94,8 +109,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--generated", type=Path, required=True)
     p.add_argument("--mask-codes", type=Path, required=True, help="JSONL with case_id, unit_id, mask_code")
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--exclude-benchmark", type=Path, required=True,
+                   help="frozen benchmark cases JSONL; checks source IDs and image bytes before export")
     a = p.parse_args(argv)
-    rows = materialize(a.generated, a.mask_codes, a.output)
+    rows = materialize(a.generated, a.mask_codes, a.output, a.exclude_benchmark)
     print(json.dumps({"rows": len(rows), "output": str(a.output)}))
 
 

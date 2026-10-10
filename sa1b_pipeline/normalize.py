@@ -137,7 +137,7 @@ def iter_tfrecord(path: str | Path) -> Iterable[dict[str, Any]]:
                 objects = json.loads(objects)
             except json.JSONDecodeError:
                 objects = []
-        image = features.get("image") or features.get("image_bytes")
+        image = features.get("jpg") or features.get("image") or features.get("image_bytes")
         # Dense shards often keep image bytes in a separate TFRecord.  Such
         # records remain traceable and can be joined by key in a later stage.
         yield {"source_id": str(features.get("key", offset)), "image_bytes": image,

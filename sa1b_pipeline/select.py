@@ -72,7 +72,9 @@ def _overlay(candidate: Candidate) -> str:
         alpha = Image.fromarray((mask.astype("uint8") * 80), mode="L")
         image = Image.composite(layer, image, alpha)
         x, y = np.where(mask)[1][0], np.where(mask)[0][0]
-        ImageDraw.Draw(image).text((int(x), int(y)), str(index + 1), fill=color)
+        # The prompt enumerates object_id values, so the visual marker must
+        # carry that same identifier rather than a position-only index.
+        ImageDraw.Draw(image).text((int(x), int(y)), str(obj.object_id), fill=color)
     image.save(path, quality=94)
     return str(path)
 
@@ -181,6 +183,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--min-targets", type=int, default=2)
     p.add_argument("--max-targets", type=int, default=5)
     p.add_argument("--max-new-tokens", type=int, default=1200, help="pilot generation budget")
+    p.add_argument("--batch-size", type=int, default=8, help="MLLM request chunk size for resumable progress")
     p.add_argument("--selection-decisions", type=Path, help="reuse stage=selection decisions from an audit JSONL")
     args = p.parse_args(argv)
     candidates = load_candidates(args.manifest)
@@ -203,7 +206,7 @@ def main(argv: list[str] | None = None) -> None:
             cached_plans = None
     needs_model = cached is None or cached_plans is None
     selector = VLLMSelector(args.model_id, tensor_parallel_size=args.tensor_parallel_size,
-                            max_new_tokens=args.max_new_tokens) if needs_model else None
+                            max_new_tokens=args.max_new_tokens, batch_size=args.batch_size) if needs_model else None
     try:
         cases = select_and_plan(candidates, selector, min_targets=args.min_targets, max_targets=args.max_targets, max_cases=args.max_cases,
                                 audit_path=args.output.with_suffix('.decisions.jsonl'), selection_decisions=cached,

@@ -44,7 +44,10 @@ class VLLMSelector:
     """Continuous-batching selector/planner for Qwen3.8-27B."""
 
     def __init__(self, model_id: str, *, tensor_parallel_size: int = 1, max_model_len: int = 16384,
-                 max_new_tokens: int = 1200, temperature: float = 0.0):
+                 max_new_tokens: int = 1200, temperature: float = 0.0, batch_size: int = 8):
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        self.batch_size = batch_size
         # Reuse the parent repository's production Qwen3.8 backend. It pins
         # the multimodal processor settings and the non-thinking chat template
         # used by the completed derived-edit runs.
@@ -113,6 +116,12 @@ class VLLMSelector:
         return rendered, images
 
     def generate(self, jobs: list[tuple[str, str]]) -> list[dict[str, Any]]:
+        if len(jobs) > self.batch_size:
+            results = []
+            for start in range(0, len(jobs), self.batch_size):
+                results.extend(self.generate(jobs[start:start + self.batch_size]))
+                print(f"MLLM single-image requests completed: {len(results)}/{len(jobs)}", flush=True)
+            return results
         if self._inherited_backend:
             messages = []
             for image_path, prompt in jobs:
@@ -141,6 +150,12 @@ class VLLMSelector:
         return result
 
     def generate_multimage(self, jobs: list[tuple[list[str], str]]) -> list[dict[str, Any]]:
+        if len(jobs) > self.batch_size:
+            results = []
+            for start in range(0, len(jobs), self.batch_size):
+                results.extend(self.generate_multimage(jobs[start:start + self.batch_size]))
+                print(f"MLLM multi-image requests completed: {len(results)}/{len(jobs)}", flush=True)
+            return results
         if self._inherited_backend:
             messages = []
             for image_paths, prompt in jobs:
