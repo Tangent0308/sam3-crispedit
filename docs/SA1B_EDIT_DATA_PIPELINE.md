@@ -115,7 +115,8 @@ python -m sa1b_pipeline.validate \
 python -m sa1b_pipeline.training \
   --generated .../generated/generated.jsonl \
   --mask-codes .../sam_tok_codes.jsonl \
-  --output .../training/train.jsonl
+  --output .../training/train.jsonl \
+  --exclude-benchmark /opt/tiger/tanyue/samtok_edit_benchmark_v2branch/data/v2/cases.jsonl
 ```
 
 Encode the codes with the official Qwen3-VL-8B-SAMTok VQ-SAM2 checkpoint:
