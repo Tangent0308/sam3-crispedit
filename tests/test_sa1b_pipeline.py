@@ -84,6 +84,7 @@ def test_rle_selected_targets_materialize_masks(tmp_path):
     cases = select_and_plan([candidate], Selector(), audit_path=tmp_path / 'decisions.jsonl')
     assert len(cases) == 1
     assert len(cases[0].units) == 2
+    assert cases[0].source.provenance["selection_status"] == "mllm_selected"
     for unit in cases[0].units:
         restored = np.asarray(Image.open(unit.mask_path)) > 0
         assert restored.sum() == 80

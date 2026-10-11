@@ -47,6 +47,7 @@ class VLLMSelector:
                  max_new_tokens: int = 1200, temperature: float = 0.0, batch_size: int = 8):
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
+        self.model_id = model_id
         self.batch_size = batch_size
         # Reuse the parent repository's production Qwen3.8 backend. It pins
         # the multimodal processor settings and the non-thinking chat template

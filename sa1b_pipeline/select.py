@@ -160,6 +160,14 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
         ids = [str(x) for x in decision.get("selected_object_ids", [])]
         if not decision.get("accept") or not min_targets <= len(ids) <= max_targets:
             continue
+        # The source-pool importer deliberately marks every candidate as
+        # unreviewed.  Once this MLLM decision accepts a scene, carry an
+        # auditable status into the immutable case provenance so downstream
+        # manifests do not look like unreviewed calibration data.
+        candidate.provenance["selection_status"] = "mllm_selected"
+        model_id = getattr(selector, "model_id", None)
+        if model_id:
+            candidate.provenance["selection_model"] = str(model_id)
         lookup = {o.object_id: o for o in candidate.objects}
         chosen = [lookup[i] for i in ids if i in lookup]
         if len(chosen) != len(ids):
