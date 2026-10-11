@@ -44,7 +44,8 @@ class VLLMSelector:
     """Continuous-batching selector/planner for Qwen3.8-27B."""
 
     def __init__(self, model_id: str, *, tensor_parallel_size: int = 1, max_model_len: int = 16384,
-                 max_new_tokens: int = 1200, temperature: float = 0.0, batch_size: int = 8):
+                 max_new_tokens: int = 1200, temperature: float = 0.0, batch_size: int = 8,
+                 disable_custom_all_reduce: bool = False):
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         self.model_id = model_id
@@ -88,7 +89,8 @@ class VLLMSelector:
                        max_model_len=max_model_len, trust_remote_code=True,
                        max_num_seqs=8, max_num_batched_tokens=8192,
                        limit_mm_per_prompt={"image": 3}, enable_prefix_caching=True,
-                       gpu_memory_utilization=0.85, enforce_eager=True)
+                       gpu_memory_utilization=0.85, enforce_eager=True,
+                       disable_custom_all_reduce=disable_custom_all_reduce)
         self.params = SamplingParams(temperature=temperature, max_tokens=max_new_tokens,
                                      top_p=1.0, stop=["<|im_end|>"])
 
