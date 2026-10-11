@@ -77,7 +77,10 @@ were encoded with the official Qwen3-VL-8B-SAMTok tokenizer and expanded to
 168 training rows. Artifacts are under
 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/disjoint_mllm_plan30/generated_full22_40step/`.
 The source-pool manifest excludes every frozen benchmark source ID and image
-byte hash, and `training.py` repeats that guard at materialization time.
+byte hash, and `training.py` repeats that guard at materialization time. A
+64-bit grayscale DCT perceptual-hash comparison against all 200 benchmark
+sources found no selected pair within Hamming distance 8 (minimum distance
+15).
 
 ## Lineage
 
