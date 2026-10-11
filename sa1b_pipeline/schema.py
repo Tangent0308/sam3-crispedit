@@ -101,17 +101,22 @@ def validate_unit(unit: EditUnit) -> None:
         raise ValueError("instruction length is outside the benchmark contract")
 
 
-def validate_case(case: SelectionCase, min_units: int = 2, max_units: int = 5) -> None:
+def validate_case(case: SelectionCase, min_units: int = 2, max_units: int = 5,
+                  enforce_operation_mix: bool = False) -> None:
     if not min_units <= len(case.units) <= max_units:
         raise ValueError(f"a case needs {min_units}-{max_units} independent targets")
     if len({u.object_id for u in case.units}) != len(case.units):
         raise ValueError("one physical object cannot be counted as multiple targets")
     if not set(u.operation for u in case.units) <= set(OPERATIONS):
         raise ValueError("unknown operation in case")
-    operations = [u.operation for u in case.units]
-    if len(operations) <= 4 and len(set(operations)) != len(operations):
-        raise ValueError("benchmark-v2 style scenes keep operations distinct through four targets")
-    if len(operations) == 5 and (len(set(operations)) != 4 or max(operations.count(op) for op in set(operations)) > 2):
-        raise ValueError("a five-target scene may repeat at most one operation")
+    # Quality-first cohorts choose an operation per mask. The old pilot rule
+    # forced four operation types into every five-target image and pushed
+    # unsuitable targets into remove/add. Keep it only for compatibility runs.
+    if enforce_operation_mix:
+        operations = [u.operation for u in case.units]
+        if len(operations) <= 4 and len(set(operations)) != len(operations):
+            raise ValueError("benchmark-v2 style scenes keep operations distinct through four targets")
+        if len(operations) == 5 and (len(set(operations)) != 4 or max(operations.count(op) for op in set(operations)) > 2):
+            raise ValueError("a five-target scene may repeat at most one operation")
     for unit in case.units:
         validate_unit(unit)

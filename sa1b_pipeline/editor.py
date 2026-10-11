@@ -6,24 +6,38 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from PIL import Image
 
 from .geometry import load_mask
 from .io import read_jsonl, write_jsonl
 
 
-def edit_prompt(unit: dict[str, Any]) -> str:
+def edit_prompt(unit: dict[str, Any], *, target_hint: str | None = None,
+                guided: bool = False) -> str:
+    locator = ""
+    if target_hint:
+        locator = f" The selected target is located at {target_hint} in the provided crop."
+    guide = (
+        " Image 2 is an aligned location guide with a thin black/white boundary; use it only "
+        "to locate the target, never copy the boundary or any annotation into the result."
+        if guided else ""
+    )
     if unit["operation"] == "remove":
         return (
             f"{unit['instruction_ref']} Completely erase the specified target from the image. "
             "Reconstruct the newly exposed background using the surrounding texture, perspective, lighting and occlusion; "
             "leave no recolored silhouette, outline, placeholder, cyan/gray patch or duplicate. "
             "Keep every unrequested object, instance, part, boundary, occluder and background unchanged."
+            + locator + guide
         )
     return (
         f"{unit['instruction_ref']} Render a natural photographic result. "
         "Keep every unrequested object, instance, part, boundary, occluder, lighting cue and background unchanged; "
-        "make only physically necessary local attachment, revealed-background, shadow and contact changes."
+        "make only physically necessary local attachment, revealed-background, shadow and contact changes. "
+        "Preserve the target silhouette and photographic texture for attribute edits; for replace edits, "
+        "remove the old identity completely; for add edits, make the new item clearly visible and physically attached."
+        + locator + guide
     )
 
 
@@ -51,28 +65,84 @@ class DiffusersQwenImageEditor:
         x0, y0 = max(0, x0 - margin), max(0, y0 - margin)
         x1, y1 = min(image.width, x1 + margin), min(image.height, y1 + margin)
         crop = image.crop((x0, y0, x1, y1))
-        # Qwen-Image-2.1's supported 1024-pixel recipe is much cheaper and
-        # more stable than sending full SA-1B panoramas to Omni. Resize only
-        # the generation canvas; the final composite returns to source size.
-        scale = min(1.0, (1024 * 1024 / (crop.width * crop.height)) ** 0.5)
-        gen_crop = crop.resize((max(32, round(crop.width * scale / 32) * 32),
-                                max(32, round(crop.height * scale / 32) * 32))) if scale < 1.0 else crop
-        generator = self.torch.Generator(device="cuda").manual_seed(seed)
-        result = self.pipe(image=gen_crop, prompt=edit_prompt(unit), negative_prompt=" ", true_cfg_scale=1.0,
-                           guidance_scale=1.0, num_inference_steps=self.steps, generator=generator,
-                           height=gen_crop.height, width=gen_crop.width)
-        edited_crop = result.images[0].convert("RGB").resize(crop.size)
-        # Feather an expanded region to retain contact shadows and prevent
-        # local edits from producing a rectangular paste seam. Add/replace
-        # receive a larger footprint because new content may extend beyond
-        # the source support mask; attribute stays tightly scoped.
-        radius = max(3, round(margin * (0.35 if unit["operation"] in {"add", "replace"} else 0.18)))
         local = mask[y0:y1, x0:x1]
-        expanded = _dilate(local, radius)
+        target_hint = _target_hint(local)
+        guided = hasattr(self.pipe, "region_callback_kwargs")
+        guide = _target_guide(crop, local) if guided else None
+        generator = self.torch.Generator(device="cuda").manual_seed(seed)
+        prompt = edit_prompt(unit, target_hint=target_hint, guided=guided)
+        call_kwargs = dict(
+            prompt=prompt, negative_prompt=" ", true_cfg_scale=1.0,
+            num_inference_steps=self.steps, generator=generator,
+        )
+        if guided:
+            # The official Qwen-Image-2.1 Omni adapter accepts an aligned guide
+            # image and regional latent weights. This keeps the clean source
+            # trajectory outside the editable support instead of asking text
+            # alone to resolve multiple nearby instances.
+            regional, _weights = self.pipe.region_callback_kwargs(
+                crop, local, unit["operation"], None, "guard-any-v1"
+            )
+            call_kwargs.update(regional)
+            call_kwargs["image"] = [crop, guide]
+        else:
+            # Fallback for a plain Diffusers-compatible pipeline.
+            scale = min(1.0, (1024 * 1024 / (crop.width * crop.height)) ** 0.5)
+            gen_crop = crop.resize((max(32, round(crop.width * scale / 32) * 32),
+                                    max(32, round(crop.height * scale / 32) * 32))) if scale < 1.0 else crop
+            call_kwargs.update(image=gen_crop, guidance_scale=1.0,
+                               height=gen_crop.height, width=gen_crop.width)
+        result = self.pipe(**call_kwargs)
+        raw = result.images[0]
+        if raw.mode == "RGBA":
+            layer = raw.resize(crop.size, Image.Resampling.LANCZOS)
+            edited_crop = Image.alpha_composite(crop.convert("RGBA"), layer).convert("RGB")
+        else:
+            edited_crop = raw.convert("RGB").resize(crop.size, Image.Resampling.LANCZOS)
+        # Use a bounded operation-specific writable support. Attribute remains
+        # on the original mask; add/replace get a collar for new silhouettes;
+        # remove gets only a narrow boundary repair band.
+        radius = _support_radius(local, unit["operation"])
+        expanded = _dilate(local, radius) if radius else local
         alpha = Image.fromarray((_feather(expanded, max(2, radius // 3)) * 255).astype("uint8"), mode="L")
         output = image.copy()
         output.paste(edited_crop, (x0, y0), alpha)
         return output
+
+
+def _target_hint(mask: np.ndarray) -> str:
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        raise ValueError("empty target mask")
+    return (
+        f"x={xs.min() / mask.shape[1]:.0%}..{(xs.max() + 1) / mask.shape[1]:.0%}, "
+        f"y={ys.min() / mask.shape[0]:.0%}..{(ys.max() + 1) / mask.shape[0]:.0%}"
+    )
+
+
+def _target_guide(crop: Image.Image, mask: np.ndarray) -> Image.Image:
+    """Create a clean aligned source guide with a thin target boundary."""
+    edge = mask.copy()
+    # Four-neighbour erosion without an OpenCV dependency.
+    padded = np.pad(mask, 1, mode="constant")
+    eroded = (padded[1:-1, 1:-1] & padded[:-2, 1:-1] & padded[2:, 1:-1]
+              & padded[1:-1, :-2] & padded[1:-1, 2:])
+    edge &= ~eroded
+    array = np.asarray(crop.convert("RGB")).copy()
+    array[edge] = (255, 255, 255)
+    return Image.fromarray(array, mode="RGB")
+
+
+def _support_radius(mask: np.ndarray, operation: str) -> int:
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        raise ValueError("empty target mask")
+    extent = max(1, min(np.ptp(xs) + 1, np.ptp(ys) + 1))
+    if operation == "attribute":
+        return 0
+    if operation in {"add", "replace"}:
+        return int(np.clip(round(extent * 0.22), 8, 48))
+    return int(np.clip(round(extent * 0.06), 3, 16))
 
 
 def _dilate(mask, radius: int):
