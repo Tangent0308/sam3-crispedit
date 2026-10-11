@@ -5,6 +5,7 @@ The import is lazy so geometry and unit tests work on CPU-only machines.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ class VLLMSelector:
         # it intentionally hard-codes tensor_parallel_size=1. Full selection
         # runs must honor the caller's TP setting and use the direct vLLM path.
         self._inherited_backend = False
-        if tensor_parallel_size == 1:
+        if tensor_parallel_size == 1 and os.environ.get("SA1B_FORCE_DIRECT_VLLM") != "1":
             try:
                 from utils import vlm_utils
                 vlm_utils.configure_backend("qwen38-vllm", model_id=model_id, device="cuda:0", dtype="bf16")
@@ -85,12 +86,19 @@ class VLLMSelector:
             )
         self.SamplingParams = SamplingParams
         self.processor = AutoProcessor.from_pretrained(model_id, padding_side="left")
-        self.llm = LLM(model=model_id, dtype="bfloat16", tensor_parallel_size=tensor_parallel_size,
-                       max_model_len=max_model_len, trust_remote_code=True,
-                       max_num_seqs=8, max_num_batched_tokens=8192,
-                       limit_mm_per_prompt={"image": 3}, enable_prefix_caching=True,
-                       gpu_memory_utilization=0.85, enforce_eager=True,
-                       disable_custom_all_reduce=disable_custom_all_reduce)
+        llm_kwargs = dict(model=model_id, dtype="bfloat16", tensor_parallel_size=tensor_parallel_size,
+                          max_model_len=max_model_len, trust_remote_code=True,
+                          max_num_seqs=8, max_num_batched_tokens=8192,
+                          limit_mm_per_prompt={"image": 3}, enable_prefix_caching=True,
+                          gpu_memory_utilization=0.85, enforce_eager=True,
+                          disable_custom_all_reduce=disable_custom_all_reduce)
+        # Older CUDA drivers cannot execute the cu13 FlashAttention-3 wheel
+        # used by the pinned runtime.  Keep the production default unchanged,
+        # but allow a documented runtime override for the vision encoder.
+        mm_backend = os.environ.get("SA1B_MM_ENCODER_ATTN_BACKEND")
+        if mm_backend:
+            llm_kwargs["mm_encoder_attn_backend"] = mm_backend
+        self.llm = LLM(**llm_kwargs)
         self.params = SamplingParams(temperature=temperature, max_tokens=max_new_tokens,
                                      top_p=1.0, stop=["<|im_end|>"])
 
