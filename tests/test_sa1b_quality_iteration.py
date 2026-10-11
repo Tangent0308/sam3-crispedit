@@ -73,10 +73,9 @@ def test_editor_uses_aligned_guide_and_regional_weights(tmp_path):
     }
     output = editor.generate(str(source_path), unit, seed=17)
     assert output.size == source.size
-    assert isinstance(captured["image"], list) and len(captured["image"]) == 2
+    assert captured["image"].size == (captured["regional_mask"].shape[1], captured["regional_mask"].shape[0])
     assert captured["regional_weights"].shape == (4, 6)
     assert captured["policy"] == "guard-any-v1"
-    assert "Image 2 is an aligned location guide" in captured["prompt"]
     assert "x=" in captured["prompt"] and "y=" in captured["prompt"]
 
 

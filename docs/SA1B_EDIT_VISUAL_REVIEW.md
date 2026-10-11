@@ -96,6 +96,14 @@
 
 ## 6. 本轮质量优先迭代的离线验证
 
-本轮代码把 mask 几何质量门槛前移到规划前，并按 operation 做门控；同时取消默认的四类操作强制混合，编辑器在 Qwen-Image-2.1 Omni 接口可用时发送对齐 target guide 和 regional latent weights，审核器增加目标局部高分辨率 panel，并对 attribute/replace 的低变化结果直接 veto。
+本轮代码把 mask 几何质量门槛前移到规划前，并按 operation 做门控；同时取消默认的四类操作强制混合，编辑器在 Qwen-Image-2.1 Omni 接口可用时发送干净 source crop、坐标提示和 regional latent weights，审核器增加目标局部高分辨率 panel，并对 attribute/replace 的低变化结果直接 veto。
 
 用既有 22 个已接受场景及其缓存的选择/规划结果离线回放（`--min-targets 3 --max-targets 5`）得到 20 个场景、88 个 unit：12 个场景保留 5 个目标，4 个保留 4 个目标，4 个保留 3 个目标；操作计数为 attribute 33、replace 18、add 24、remove 13。这个回放证明多目标约束和质量门控能够同时成立，但没有重新运行图像生成，不能替代新模型输出的视觉验收。
+
+## 7. 新一轮 88 个 unit 的生成复核
+
+使用上述 88 个 quality-gated unit 运行了 Qwen-Image-2.1 Omni 生成，结果保存在外部工作目录 `quality_iteration_v1/generated_guided_88_40step/`，对应全量拼图为 `quality_iteration_v1/visual_all_88/index.jpg`，目标局部拼图为 `quality_iteration_v1/target_panels/page_*.jpg`。确定性检查得到 82 个待语义审核、6 个直接失败；6 个失败包括 5 个 remove 目标变化过弱和 1 个整体没有可见变化。
+
+逐页查看这 88 个结果时发现，之前为了定位 mask 而传入的第二张边界 guide 图会在不少 add/replace/remove 结果中被模型复制成青色或实色矩形，或者留下边界形状。这是条件输入接口的错误语义，不能作为训练数据放行。已在编辑器中移除第二张 guide，保留 regional latent weights 和坐标提示，只传入干净 source crop；但这项修复的 5-unit 对照在当前机器上卡在 Omni 多进程初始化，未能完成新的图像输出，因此还不能声称全量质量已达标。
+
+语义 MLLM 审核也尚未完成：Qwen3.8-27B 的 vLLM 初始化在本机触发 `cudaHostGetDevicePointer ... CUDA driver version is insufficient for CUDA runtime version`，即 CUDA driver/runtime 与 UVA 路径不兼容。该环境问题不改变已完成的确定性检查和人工视觉结论，但需要换兼容运行时或机器后再做最终语义审核。

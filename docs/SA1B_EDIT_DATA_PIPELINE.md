@@ -33,10 +33,10 @@ SA-1B dense TFRecord / JSONL
   → training.py (SAMTok code binding + edit_ntp/edit_umt/edit rows)
 ```
 
-The Qwen-Image-2.1 editor sends an aligned target-guide image and regional
-latent weights when the official Omni adapter is available. The guide locates
-the selected instance while the source trajectory is anchored outside the
-operation-specific writable support; the final composite uses a bounded
+The Qwen-Image-2.1 editor sends the clean source crop, a coordinate hint and
+regional latent weights when the official Omni adapter is available. The
+regional weights localize the selected instance without adding a second
+boundary image that the generator could copy into the result; the final composite uses a bounded
 attribute/add/replace/remove support instead of one fixed paste radius. A
 plain Diffusers pipeline remains available as a fallback, but its outputs
 should be treated as an interface fallback until the guided path is audited.

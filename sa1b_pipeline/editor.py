@@ -68,23 +68,26 @@ class DiffusersQwenImageEditor:
         local = mask[y0:y1, x0:x1]
         target_hint = _target_hint(local)
         guided = hasattr(self.pipe, "region_callback_kwargs")
-        guide = _target_guide(crop, local) if guided else None
         generator = self.torch.Generator(device="cuda").manual_seed(seed)
-        prompt = edit_prompt(unit, target_hint=target_hint, guided=guided)
+        # The Omni regional adapter anchors the editable latent tokens itself.
+        # Passing a second boundary image through the generic Qwen image list
+        # is ambiguous for the model and can be copied as a cyan/white patch,
+        # so keep the condition image to the clean source crop.
+        prompt = edit_prompt(unit, target_hint=target_hint, guided=False)
         call_kwargs = dict(
             prompt=prompt, negative_prompt=" ", true_cfg_scale=1.0,
             num_inference_steps=self.steps, generator=generator,
         )
         if guided:
-            # The official Qwen-Image-2.1 Omni adapter accepts an aligned guide
-            # image and regional latent weights. This keeps the clean source
-            # trajectory outside the editable support instead of asking text
-            # alone to resolve multiple nearby instances.
+            # The official Qwen-Image-2.1 Omni adapter accepts regional latent
+            # weights. They keep the clean source trajectory outside the
+            # editable support without feeding a second boundary image that
+            # the generator may copy into the result.
             regional, _weights = self.pipe.region_callback_kwargs(
                 crop, local, unit["operation"], None, "guard-any-v1"
             )
             call_kwargs.update(regional)
-            call_kwargs["image"] = [crop, guide]
+            call_kwargs["image"] = crop
         else:
             # Fallback for a plain Diffusers-compatible pipeline.
             scale = min(1.0, (1024 * 1024 / (crop.width * crop.height)) ** 0.5)
