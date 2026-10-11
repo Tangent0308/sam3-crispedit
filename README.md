@@ -70,12 +70,12 @@ training. Remove generations remain subject to the same semantic audit; no
 remove pair is exported unless it passes.
 
 A disjoint expansion run then used 100 non-benchmark SA-1B candidates selected
-by Qwen3.8-27B, planned 22 cases, and generated a bounded ten-case/50-unit
-manifest with Qwen-Image-2.1. The audit passed 18 pairs (9 attribute, 7
-replace, 2 add); all ten remove units failed and were excluded. The 18 passing
-pairs were encoded with the official Qwen3-VL-8B-SAMTok tokenizer and expanded
-to 72 training rows. Artifacts are under
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/disjoint_mllm_plan30/generated_10_40step/`.
+by Qwen3.8-27B, planned 22 cases, and generated all 110 units with
+Qwen-Image-2.1. The semantic audit passed 42 pairs (18 attribute, 12
+replace, 11 add, 1 remove); the other 68 were excluded. The 42 passing pairs
+were encoded with the official Qwen3-VL-8B-SAMTok tokenizer and expanded to
+168 training rows. Artifacts are under
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/disjoint_mllm_plan30/generated_full22_40step/`.
 The source-pool manifest excludes every frozen benchmark source ID and image
 byte hash, and `training.py` repeats that guard at materialization time.
 
