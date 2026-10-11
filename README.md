@@ -66,8 +66,18 @@ The resumable artifacts are under
 `generated_v4_40step/mask_codes.jsonl`, and
 `generated_v4_40step/training_rows.jsonl`. The 13 failed remove retries remain
 in separate `generated_remove_retry_*` directories and are excluded from
-training. The pipeline now pre-fills remove targets and enforces mask-local
-background reconstruction before a pair can be considered for audit.
+training. Remove generations remain subject to the same semantic audit; no
+remove pair is exported unless it passes.
+
+A disjoint expansion run then used 100 non-benchmark SA-1B candidates selected
+by Qwen3.8-27B, planned 22 cases, and generated a bounded ten-case/50-unit
+manifest with Qwen-Image-2.1. The audit passed 18 pairs (9 attribute, 7
+replace, 2 add); all ten remove units failed and were excluded. The 18 passing
+pairs were encoded with the official Qwen3-VL-8B-SAMTok tokenizer and expanded
+to 72 training rows. Artifacts are under
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/disjoint_mllm_plan30/generated_10_40step/`.
+The source-pool manifest excludes every frozen benchmark source ID and image
+byte hash, and `training.py` repeats that guard at materialization time.
 
 ## Lineage
 
