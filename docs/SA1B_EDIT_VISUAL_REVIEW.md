@@ -107,3 +107,13 @@
 逐页查看这 88 个结果时发现，之前为了定位 mask 而传入的第二张边界 guide 图会在不少 add/replace/remove 结果中被模型复制成青色或实色矩形，或者留下边界形状。这是条件输入接口的错误语义，不能作为训练数据放行。已在编辑器中移除第二张 guide，保留 regional latent weights 和坐标提示，只传入干净 source crop；但这项修复的 5-unit 对照在当前机器上卡在 Omni 多进程初始化，未能完成新的图像输出，因此还不能声称全量质量已达标。
 
 语义 MLLM 审核也尚未完成：Qwen3.8-27B 的 vLLM 初始化在本机触发 `cudaHostGetDevicePointer ... CUDA driver version is insufficient for CUDA runtime version`，即 CUDA driver/runtime 与 UVA 路径不兼容。该环境问题不改变已完成的确定性检查和人工视觉结论，但需要换兼容运行时或机器后再做最终语义审核。
+
+## 8. 无 guide 全量结果与保守发布集
+
+随后用不带第二张 guide 图的路径重新生成全部 88 个 unit，结果位于外部工作目录 `quality_iteration_v1/generated_noguide_88_40step/`，全量人工复核拼图位于 `quality_iteration_v1/visual_noguide_88/index.jpg`，逐页文件为 `page_01.jpg` 到 `page_11.jpg`。这一轮没有再出现旧版的青色/实色边界 guide 伪影。
+
+确定性检查结果为 80 个待语义审核、8 个失败（6 个 remove 变化不足、2 个低变化目标）。对 16 个低置信度 unit 又用两个新 seed 重采样；这些结果大多仍然漏编辑，说明根因是目标尺寸或操作适配性，而不是随机种子。
+
+我逐个查看了 88 个目标局部，并把没有清楚完成目标、产生错误替代物或无法确认新增物的 unit 拒绝。最终保守发布 66 个 unit、17 张源图：每张保留 3–5 个不同目标，分布为 6 张×3、7 张×4、4 张×5；操作为 attribute 29、replace 15、add 15、remove 7。发布拼图在 `quality_iteration_v1/final_release_visual/index.jpg`，发布 JSONL 在 `quality_iteration_v1/final_release/generated_gate.jsonl`。
+
+发布门槛已固化在 `sa1b_pipeline/release.py`：默认要求确定性检查、人工 `manual_pass` 和完整语义审核同时通过；本轮因 CUDA runtime 阻塞，只使用显式的 `--allow-manual-without-semantic` visual-pilot 模式，不能把它误称为最终语义审计通过集。未通过的 22 个 unit 没有进入发布 JSONL。

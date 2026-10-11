@@ -130,6 +130,16 @@ python -m sa1b_pipeline.validate \
   --output .../validation.jsonl \
   --model-id /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B
 
+# Release only rows that pass deterministic, manual, semantic, and
+# per-source target-count gates. The manual-only override is for a labelled
+# visual pilot when the semantic runtime is unavailable; it is not a final
+# release mode.
+python -m sa1b_pipeline.release \
+  --generated .../validation.jsonl \
+  --manual-review .../manual_quality_review.jsonl \
+  --output .../release/generated.jsonl \
+  --report .../release/report.json
+
 python -m sa1b_pipeline.training \
   --generated .../generated/generated.jsonl \
   --mask-codes .../sam_tok_codes.jsonl \
