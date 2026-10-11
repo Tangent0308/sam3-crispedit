@@ -13,16 +13,33 @@ ref and no-ref instructions, preservation contract, and model evidence. Add
 targets the selected host/attachment site; remove and replace require a
 self-contained visible target; attribute keeps identity and geometry.
 
+The quality-first selector still keeps multiple independent targets per image,
+but operation type is chosen per mask. It no longer forces every five-target
+scene to contain a remove unit: a mask must pass an operation-specific geometry
+gate before planning, and a case is retained only when at least the requested
+number of quality-eligible targets remain. Use `--min-targets 3` when a run
+must guarantee at least three tasks per source image; use
+`--enforce-operation-mix` only for compatibility with the older benchmark
+pilot rule.
+
 ## Data flow
 
 ```text
 SA-1B dense TFRecord / JSONL
   → normalize.py (candidate manifest + provenance)
   → select.py (Qwen3.8-27B vLLM scene selection + edit planning)
-  → editor.py (Qwen-Image-2.1 checkpointed target generation)
+  → editor.py (Qwen-Image-2.1 checkpointed, mask-guided target generation)
   → validate.py (mask-aware deterministic checks + optional Qwen3.8 audit)
   → training.py (SAMTok code binding + edit_ntp/edit_umt/edit rows)
 ```
+
+The Qwen-Image-2.1 editor sends an aligned target-guide image and regional
+latent weights when the official Omni adapter is available. The guide locates
+the selected instance while the source trajectory is anchored outside the
+operation-specific writable support; the final composite uses a bounded
+attribute/add/replace/remove support instead of one fixed paste radius. A
+plain Diffusers pipeline remains available as a fallback, but its outputs
+should be treated as an interface fallback until the guided path is audited.
 
 The pipeline can resume each stage from JSONL. It never treats a pixel diff as
 the semantic mask ground truth: the diff is a veto/diagnostic, while the
@@ -91,6 +108,7 @@ Original shard/index and offset are retained under `provenance`.
 python -m sa1b_pipeline.select \
   --manifest .../candidates/candidates.jsonl \
   --output .../selection/selected_cases.jsonl \
+  --min-targets 3 --max-targets 5 \
   --model-id /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B \
   --tensor-parallel-size 8
 

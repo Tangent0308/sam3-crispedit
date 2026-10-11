@@ -101,6 +101,8 @@ def mask_geometry(mask: np.ndarray) -> dict[str, Any]:
     neighbors[:, :-1] += mask[:, 1:] != mask[:, :-1]
     perimeter = int(neighbors[mask].sum())
     bbox_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+    border_pixels = int(mask[0].sum() + mask[-1].sum() + mask[:, 0].sum() + mask[:, -1].sum())
+    border_pixels = min(area, border_pixels)
     return {
         "area_px": area,
         "area_fraction": area / float(h * w),
@@ -110,6 +112,49 @@ def mask_geometry(mask: np.ndarray) -> dict[str, Any]:
         "bbox_fill": area / float(bbox_area),
         "perimeter_proxy": perimeter,
         "thinness": perimeter / max(1.0, area**0.5),
+        "touches_border": bool(mask[0].any() or mask[-1].any() or mask[:, 0].any() or mask[:, -1].any()),
+        "border_fraction": border_pixels / float(area),
+    }
+
+
+def operation_quality_gate(feature: dict[str, Any], operation: str) -> dict[str, Any]:
+    """Return an auditable, operation-specific mask gate before generation."""
+    thresholds = {
+        "attribute": (256, 0.12, 2),
+        "replace": (512, 0.20, 2),
+        # Additions may attach to a host whose visible mask is split by
+        # occlusion or holes. Reject only small highly-fragmented hosts.
+        "add": (1024, 0.10, 4),
+        # A grille/window can legitimately have several visible components;
+        # image-edge and low-fill targets remain unsafe for removal.
+        "remove": (2048, 0.30, 4),
+    }
+    if operation not in thresholds:
+        raise ValueError(f"unknown operation: {operation}")
+    base_min_area, min_fill, max_components = thresholds[operation]
+    # Scale the absolute pixel floor for small synthetic/unit-test canvases;
+    # full SA-1B images still use the conservative base thresholds.
+    fraction = float(feature.get("area_fraction", 0.0))
+    image_area = int(round(feature.get("area_px", 0) / fraction)) if fraction > 0 else base_min_area
+    min_area = min(base_min_area, max(32, int(round(image_area * 0.0005))))
+    reasons = []
+    if int(feature.get("area_px", 0)) < min_area:
+        reasons.append("mask_too_small")
+    if float(feature.get("bbox_fill", 0.0)) < min_fill:
+        reasons.append("mask_too_fragmented_or_thin")
+    components = int(feature.get("components", 0))
+    if operation == "add" and components > max_components and int(feature.get("area_px", 0)) < 250_000:
+        reasons.append("mask_has_multiple_components")
+    elif operation != "add" and components > max_components:
+        reasons.append("mask_has_multiple_components")
+    if operation in {"replace", "remove"} and feature.get("touches_border"):
+        reasons.append("mask_touches_image_border")
+    return {
+        "eligible": not reasons,
+        "reasons": reasons,
+        "min_area_px": min_area,
+        "min_bbox_fill": min_fill,
+        "max_components": max_components,
     }
 
 
@@ -120,6 +165,10 @@ def difficulty_features(objects: list[dict[str, Any]], image_size: tuple[int, in
         f = mask_geometry(load_mask(obj, image_size))
         f["object_id"] = str(obj.get("object_id", obj.get("id", "")))
         f["category"] = str(obj.get("category", ""))
+        f["operation_quality"] = {
+            operation: operation_quality_gate(f, operation)
+            for operation in ("attribute", "replace", "add", "remove")
+        }
         features.append(f)
     mechanisms: set[str] = set()
     for f in features:

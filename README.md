@@ -21,8 +21,10 @@ The data flow is:
    answer is `No target` are excluded.
 2. Decode selected source images from the embedded parquet bytes and retain the
    original COCO RLE instance masks.
-3. Reuse each source image for every annotated mask and generate one independent
-   regional edit case per mask.
+3. Reuse each source image for multiple selected masks and generate one
+   independent regional edit case per quality-gated mask; the current selector
+   keeps multi-target scenes without forcing an unsuitable operation onto every
+   mask.
 4. Plan remove versus add/replace/attribute with task-specific Qwen3.8-27B
    prompts, then edit with Qwen-Image-2.1 through vLLM-Omni (40 steps).
 5. Audit source/edited pairs with Qwen3.8-27B through vLLM and deliver the

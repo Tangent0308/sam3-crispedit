@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .geometry import difficulty_features, load_mask, sha256
+from .geometry import difficulty_features, load_mask, operation_quality_gate, sha256
 from .instructions import build_unit
 from .io import load_candidates, write_jsonl
 from .mllm import VLLMSelector, planning_prompt, selection_prompt
@@ -141,14 +141,15 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
                     max_targets: int = 5, max_cases: int | None = None,
                     audit_path: Path | None = None,
                     selection_decisions: dict[str, dict[str, Any]] | None = None,
-                    planning_decisions: dict[str, dict[str, Any]] | None = None) -> list[SelectionCase]:
+                    planning_decisions: dict[str, dict[str, Any]] | None = None,
+                    enforce_operation_mix: bool = False) -> list[SelectionCase]:
     def record(stage: str, source_id: str, value: dict) -> None:
         if audit_path:
             audit_path.parent.mkdir(parents=True, exist_ok=True)
             with audit_path.open('a', encoding='utf-8') as stream:
                 stream.write(json.dumps({'stage': stage, 'source_id': source_id, **value}, ensure_ascii=False) + '\n')
-    selection_jobs = [(_overlay(c, _review_objects(c)), selection_prompt(_candidate_view(c), min_targets=min_targets, max_targets=max_targets) + " The image labels show the object_id values; inspect the clean scene beneath them.") for c in candidates]
     if selection_decisions is None:
+        selection_jobs = [(_overlay(c, _review_objects(c)), selection_prompt(_candidate_view(c), min_targets=min_targets, max_targets=max_targets) + " The image labels show the object_id values; inspect the clean scene beneath them.") for c in candidates]
         selected = selector.generate(selection_jobs)
         for candidate, decision in zip(candidates, selected):
             record('selection', candidate.source_id, {'decision': decision})
@@ -178,6 +179,30 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
         candidate.image_sha256 = candidate.image_sha256 or sha256(candidate.image_path)
         obj_dicts = [o.__dict__ for o in chosen]
         difficulty = difficulty_features(obj_dicts, size)
+        # Keep multiple targets per image, but do not spend a generation call
+        # on masks that cannot support any quality-first operation.
+        quality_ids = {
+            str(feature["object_id"])
+            for feature in difficulty["target_features"]
+            if any(feature["operation_quality"][op]["eligible"]
+                   for op in ("attribute", "replace", "add", "remove"))
+        }
+        ids = [object_id for object_id in ids if object_id in quality_ids]
+        if len(ids) < min_targets:
+            record('rejection', candidate.source_id, {
+                'error': 'fewer_than_min_quality_targets', 'selected_ids': ids,
+            })
+            continue
+        chosen = [lookup[i] for i in ids]
+        # Keep the planning evidence synchronized with the targets that can
+        # actually be generated; rejected masks must not influence operation
+        # assignment or make the prompt claim more units than will survive.
+        difficulty["target_features"] = [
+            feature for feature in difficulty["target_features"]
+            if str(feature["object_id"]) in set(ids)
+        ]
+        difficulty["target_count"] = len(difficulty["target_features"])
+        difficulty["quality_target_ids"] = ids
         geom_by_id = {x["object_id"]: x for x in difficulty["target_features"]}
         protection = [str(x) for x in decision.get("protection_notes", [])]
         planning_context.append((candidate, decision, ids, difficulty, lookup, size, geom_by_id, protection))
@@ -200,6 +225,21 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
             obj = lookup.get(str(raw.get("object_id")))
             if obj is None or obj.object_id not in geom_by_id:
                 continue
+            feature = geom_by_id[obj.object_id]
+            operation = str(raw.get("operation", "")).lower()
+            if operation not in {"attribute", "replace", "add", "remove"}:
+                record('rejection', candidate.source_id, {
+                    'error': 'unknown_operation', 'object_id': obj.object_id,
+                    'operation': operation,
+                })
+                continue
+            gate = operation_quality_gate(feature, operation)
+            if not gate["eligible"]:
+                record('rejection', candidate.source_id, {
+                    'error': 'operation_quality_gate', 'object_id': obj.object_id,
+                    'operation': operation, 'reasons': gate['reasons'],
+                })
+                continue
             if not obj.mask_path:
                 mask = load_mask(obj.__dict__, size)
                 mask_dir = Path(candidate.image_path).parent / 'selected_masks'
@@ -217,7 +257,11 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
                 break
             unit.has_ref, unit.locator = BENCHMARK_V2_INTERACTIONS[(case_index + index - 1) % len(BENCHMARK_V2_INTERACTIONS)]
             units.append(unit)
-        if len(units) != len(chosen):
+        if len(units) < min_targets:
+            record('rejection', candidate.source_id, {
+                'error': 'fewer_than_min_quality_units', 'planned': len(units),
+                'eligible_targets': len(chosen),
+            })
             continue
         case = SelectionCase(
             case_id="sa1b-" + candidate.source_id, source=candidate, units=units,
@@ -225,7 +269,7 @@ def select_and_plan(candidates: list[Candidate], selector: VLLMSelector, *, min_
             selector={"model_decision": decision, "model_plan": plan},
         )
         try:
-            validate_case(case, min_targets, max_targets)
+            validate_case(case, min_targets, max_targets, enforce_operation_mix=enforce_operation_mix)
         except ValueError as exc:
             # A strict contract is a filter, not a reason to abort a long
             # MLLM batch. The full model decision remains in selector metadata
@@ -248,6 +292,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-candidates", type=int, help="bounded pilot input; omit for the full manifest")
     p.add_argument("--min-targets", type=int, default=2)
     p.add_argument("--max-targets", type=int, default=5)
+    p.add_argument("--enforce-operation-mix", action="store_true",
+                   help="compatibility mode: require benchmark-v2 operation diversity per scene")
     p.add_argument("--max-new-tokens", type=int, default=1200, help="pilot generation budget")
     p.add_argument("--batch-size", type=int, default=8, help="MLLM request chunk size for resumable progress")
     p.add_argument("--selection-decisions", type=Path, help="reuse stage=selection decisions from an audit JSONL")
@@ -276,7 +322,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         cases = select_and_plan(candidates, selector, min_targets=args.min_targets, max_targets=args.max_targets, max_cases=args.max_cases,
                                 audit_path=args.output.with_suffix('.decisions.jsonl'), selection_decisions=cached,
-                                planning_decisions=cached_plans)
+                                planning_decisions=cached_plans,
+                                enforce_operation_mix=args.enforce_operation_mix)
         write_jsonl(args.output, [c.to_dict() for c in cases])
         print(json.dumps({"status": "ok", "cases": len(cases), "output": str(args.output)}, ensure_ascii=False))
     finally:

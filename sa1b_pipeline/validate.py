@@ -14,7 +14,7 @@ from .io import read_jsonl, write_jsonl
 from .mllm import VLLMSelector
 
 
-AUDIT_PROMPT = """Judge this fine-grained edit pair. Images are ordered clean source, edited result, then a cyan target-mask overlay for localization. Compare the first two using the third mask and instruction.
+AUDIT_PROMPT = """Judge this fine-grained edit pair. Images are ordered as full source, full edited result, and a high-resolution target panel. The target panel contains source crop, edited crop, and cyan-mask crop left-to-right for precise localization. Compare the first two using the target panel and instruction.
 Return JSON only: {\"decision\":\"pass\"|\"fail\",\"target_done\":bool,\"non_target_preserved\":bool,\"natural\":bool,\"failure_reasons\":[],\"evidence\":\"...\"}.
 Failure-first rules: wrong instance, missing/partial edit, extra duplicate, changed neighboring instance, broken occlusion/contact, or visible artifact is fail. For add the host remains and the item is attached. For remove the entire visible target disappears. For replace the old identity disappears and a distinct new identity appears. For attribute geometry and identity remain.
 Instruction: {instruction}
@@ -36,7 +36,7 @@ def deterministic_check(row: dict[str, Any]) -> dict[str, Any]:
     reasons = []
     if row["operation"] == "remove" and inside < 0.50:
         reasons.append("remove_mask_change_too_weak")
-    if inside < 0.01 and row["operation"] != "add":
+    if row["operation"] in {"attribute", "replace"} and inside < 0.05:
         reasons.append("no_visible_target_change")
     return {"deterministic": {"inside_changed_fraction": inside, "outside_changed_fraction": outside},
             "decision": "fail" if reasons else "pending_semantic_audit", "failure_reasons": reasons}
@@ -50,8 +50,8 @@ def validate(manifest: Path, output: Path, selector: VLLMSelector | None = None)
         check = deterministic_check(row)
         results.append({**row, **check})
         if selector and check["decision"] != "fail":
-            overlay = _mask_overlay(row["source_image"], row["mask"], output.parent / "audit_overlays")
-            jobs.append(([row["source_image"], row["edited_image"], overlay], AUDIT_PROMPT.replace('{instruction}', row['instruction'])))
+            panel = _target_panel(row, output.parent / "audit_overlays")
+            jobs.append(([row["source_image"], row["edited_image"], panel], AUDIT_PROMPT.replace('{instruction}', row['instruction'])))
     if selector:
         audits = selector.generate_multimage(jobs)
         index = 0
@@ -79,6 +79,40 @@ def _mask_overlay(source_path: str, mask_path: str, directory: Path) -> str:
     overlay = Image.new("RGB", source.size, (0, 210, 220))
     alpha = Image.fromarray((mask.astype("uint8") * 90), mode="L")
     Image.composite(overlay, source, alpha).save(path, quality=94)
+    return str(path)
+
+
+def _target_panel(row: dict[str, Any], directory: Path) -> str:
+    """Build a high-resolution source/edited/mask crop for the semantic auditor."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (Path(row["source_image"]).stem + "__" + Path(row["mask"]).stem + "__panel.jpg")
+    if path.exists():
+        return str(path)
+    source = Image.open(row["source_image"]).convert("RGB")
+    edited = Image.open(row["edited_image"]).convert("RGB")
+    mask = load_mask({"mask_path": row["mask"]}, source.size)
+    ys, xs = np.where(mask)
+    if len(xs):
+        margin = max(32, int(round(0.9 * max(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1))))
+        left = max(0, int(xs.min()) - margin)
+        top = max(0, int(ys.min()) - margin)
+        right = min(source.width, int(xs.max()) + 1 + margin)
+        bottom = min(source.height, int(ys.max()) + 1 + margin)
+        box = (left, top, right, bottom)
+    else:
+        box = (0, 0, source.width, source.height)
+    source_crop = source.crop(box)
+    edited_crop = edited.crop(box)
+    mask_crop = source.crop(box)
+    local = mask[box[1]:box[3], box[0]:box[2]]
+    cyan = Image.new("RGB", mask_crop.size, (0, 210, 220))
+    alpha = Image.fromarray((local.astype("uint8") * 120), mode="L")
+    mask_crop = Image.composite(cyan, mask_crop, alpha)
+    tiles = [im.resize((512, 512), Image.Resampling.LANCZOS) for im in (source_crop, edited_crop, mask_crop)]
+    panel = Image.new("RGB", (1536, 512))
+    for i, tile in enumerate(tiles):
+        panel.paste(tile, (i * 512, 0))
+    panel.save(path, quality=94)
     return str(path)
 
 
