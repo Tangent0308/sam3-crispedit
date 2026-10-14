@@ -7,17 +7,20 @@ from .mllm import parse_json
 class HFSelector:
     model_id = '/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B'
 
-    def __init__(self, model_id=None, max_new_tokens=2400):
+    def __init__(self, model_id=None, max_new_tokens=2400, device_map="auto"):
         self.model_id = model_id or self.model_id
         self.max_new_tokens = max_new_tokens
         import torch
         from transformers import AutoModelForImageTextToText, AutoProcessor
         self.torch = torch
         self.model = AutoModelForImageTextToText.from_pretrained(
-            self.model_id, dtype=torch.bfloat16, device_map={'': 'cuda:0'},
+            self.model_id, dtype=torch.bfloat16, device_map=device_map,
             low_cpu_mem_usage=True, trust_remote_code=True)
         self.model.eval()
         self.proc = AutoProcessor.from_pretrained(self.model_id)
+        devices = [parameter.device for parameter in self.model.parameters()
+                   if parameter.device.type != 'meta']
+        self.input_device = devices[0] if devices else torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     def call(self, paths, prompt, tokens):
         images = []
@@ -29,7 +32,7 @@ class HFSelector:
             [{'role': 'user', 'content': images + [{'type': 'text', 'text': prompt}]}],
             tokenize=True, add_generation_prompt=True, return_tensors='pt',
             return_dict=True, enable_thinking=False)
-        inputs = {k: v.to('cuda:0') if hasattr(v, 'to') else v for k, v in inputs.items()}
+        inputs = {k: v.to(self.input_device) if hasattr(v, 'to') else v for k, v in inputs.items()}
         with self.torch.inference_mode():
             out = self.model.generate(**inputs, max_new_tokens=tokens, do_sample=False, use_cache=True)
         raw = self.proc.batch_decode([out[0][inputs['input_ids'].shape[1]:]], skip_special_tokens=True)[0]

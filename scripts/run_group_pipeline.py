@@ -79,7 +79,8 @@ def _planner(args):
         return None
     if args.planner_backend == "hf":
         from sa1b_pipeline.hf_mllm import HFSelector
-        return HFSelector(model_id=args.planner_model, max_new_tokens=args.max_new_tokens)
+        return HFSelector(model_id=args.planner_model, max_new_tokens=args.max_new_tokens,
+                          device_map=args.planner_device_map)
     from sa1b_pipeline.mllm import VLLMSelector
     return VLLMSelector(args.planner_model, tensor_parallel_size=args.planner_tp,
                         max_new_tokens=args.max_new_tokens, batch_size=args.planner_batch_size)
@@ -301,6 +302,8 @@ def main(argv=None):
     p.add_argument("--reservation", type=Path, help="source isolation reservation JSON")
     p.add_argument("--planner-model")
     p.add_argument("--planner-backend", choices=["hf", "vllm"], default="vllm")
+    p.add_argument("--planner-device-map", default="auto",
+                   help="Transformers device map for the HF planner; auto shards large MoE models across visible GPUs")
     p.add_argument("--planner-tp", type=int, default=1)
     p.add_argument("--max-new-tokens", type=int, default=900)
     p.add_argument("--planner-batch-size", type=int, default=8,
@@ -310,6 +313,8 @@ def main(argv=None):
     p.add_argument("--audit-model")
     p.add_argument("--audit-batch-size", type=int, default=4)
     p.add_argument("--plan-only", action="store_true")
+    p.add_argument("--selection-only", action="store_true",
+                   help="select and persist grouped inputs without loading a planner model")
     p.add_argument("--publish", action="store_true")
     p.add_argument("--max-groups", type=int)
     p.add_argument("--candidate-pool-factor", type=float, default=3.0,
@@ -367,6 +372,11 @@ def main(argv=None):
                                           "category_counts": selection_categories,
                                           "source_count": len({r["candidate"]["source_id"] for r in selected}),
                                           "source_ids": sorted({r["candidate"]["source_id"] for r in selected})})
+    if args.selection_only:
+        print(json.dumps({"status": "selected", "groups": len(selected),
+                          "selection": str(selected_path),
+                          "summary": str(root / "selection.json")}, ensure_ascii=False))
+        return 0
     planner = _planner(args)
     plans_dir = root / "planned"; plans_dir.mkdir(exist_ok=True)
     planned = []

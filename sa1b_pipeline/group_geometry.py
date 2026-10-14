@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from itertools import combinations
+import math
+import os
 from typing import Any
 
 import numpy as np
@@ -59,6 +61,26 @@ def gap_pixels(a: np.ndarray, b: np.ndarray) -> float:
     b = np.asarray(b, dtype=bool)
     if a.shape != b.shape or not a.any() or not b.any():
         raise ValueError("aligned non-empty masks required")
+    # A few SA-1B masks span most of a 4K canvas.  A full distance transform
+    # for every candidate pair is needlessly expensive during selection.  Max
+    # pooling preserves every foreground component and gives a deterministic
+    # conservative proximity estimate; small crops remain pixel-exact.
+    max_pixels = max(262_144, int(os.environ.get("SA1B_GAP_MAX_PIXELS", "1500000")))
+    if a.size > max_pixels:
+        step = int(math.ceil(math.sqrt(a.size / max_pixels)))
+        height, width = a.shape
+        pooled_height = int(math.ceil(height / step))
+        pooled_width = int(math.ceil(width / step))
+        pad_height = pooled_height * step - height
+        pad_width = pooled_width * step - width
+        if pad_height or pad_width:
+            a = np.pad(a, ((0, pad_height), (0, pad_width)), constant_values=False)
+            b = np.pad(b, ((0, pad_height), (0, pad_width)), constant_values=False)
+        a = a.reshape(pooled_height, step, pooled_width, step).any(axis=(1, 3))
+        b = b.reshape(pooled_height, step, pooled_width, step).any(axis=(1, 3))
+        if not a.any() or not b.any():
+            raise ValueError("non-empty masks disappeared during pooling")
+        return gap_pixels(a, b) * step
     try:
         from scipy.ndimage import distance_transform_edt
         return float(distance_transform_edt(~a)[b].min())
