@@ -9,14 +9,16 @@ import numpy as np
 import torch
 
 
-def editable_token_weights(mask, token_size, task_type, protected=None, protection_policy='legacy'):
+def editable_token_weights(mask, token_size, task_type, protected=None, protection_policy='legacy',
+                           editable_mask=None):
     if protection_policy not in {'legacy', 'guard-any-v1', 'guard-fraction-v1'}:
         raise ValueError('Unknown latent protection policy')
     inside=mask.astype(bool)
     ys,xs=np.nonzero(inside)
     if not len(xs):raise ValueError('Empty edit region')
-    support=inside.copy()
-    if task_type in {'add','replace'}:
+    support=inside.copy() if editable_mask is None else np.asarray(editable_mask, dtype=bool)
+    if not support.any():raise ValueError('Empty editable support')
+    if editable_mask is None and task_type in {'add','replace'}:
         px=max(12,round((np.ptp(xs)+1)*.5));py=max(12,round((np.ptp(ys)+1)*.5))
         support[max(0,ys.min()-py):min(mask.shape[0],ys.max()+py+1),
                 max(0,xs.min()-px):min(mask.shape[1],xs.max()+px+1)]=True
@@ -49,12 +51,13 @@ def anchor_step(latents,reference,noise,weight,sigma):
 
 
 @torch.inference_mode()
-def region_callback_kwargs(pipe,crop,mask,task_type,generator,protected=None,protection_policy='legacy'):
+def region_callback_kwargs(pipe,crop,mask,task_type,generator,protected=None,protection_policy='legacy',
+                           editable_mask=None):
     if getattr(pipe, 'backend_name', None) == 'vllm-omni':
-        return pipe.region_callback_kwargs(crop, mask, task_type, protected, protection_policy)
+        return pipe.region_callback_kwargs(crop, mask, task_type, protected, protection_policy, editable_mask)
     if pipe.__class__.__name__ == 'QwenImage21Pipeline':
         return qwen21_region_callback_kwargs(
-            pipe,crop,mask,task_type,generator,protected,protection_policy)
+            pipe,crop,mask,task_type,generator,protected,protection_policy,editable_mask)
     from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import calculate_dimensions,VAE_IMAGE_SIZE
     width,height=calculate_dimensions(VAE_IMAGE_SIZE,crop.width/crop.height)
     multiple=pipe.vae_scale_factor*2
@@ -64,7 +67,7 @@ def region_callback_kwargs(pipe,crop,mask,task_type,generator,protected=None,pro
     noise,reference=pipe.prepare_latents([tensor],1,pipe.transformer.config.in_channels//4,
                                        height,width,dtype,device,generator)
     if noise.shape!=reference.shape:raise ValueError('Source and generated latent grids differ')
-    weights=editable_token_weights(mask,(width//multiple,height//multiple),task_type,protected,protection_policy)
+    weights=editable_token_weights(mask,(width//multiple,height//multiple),task_type,protected,protection_policy,editable_mask)
     weight=torch.from_numpy(weights.reshape(1,-1,1)).to(device=device,dtype=dtype)
     if weight.shape[1]!=noise.shape[1]:raise ValueError('Mask token grid mismatch')
     def callback(pipeline,step,timestep,kwargs):
@@ -75,7 +78,8 @@ def region_callback_kwargs(pipe,crop,mask,task_type,generator,protected=None,pro
 
 
 @torch.inference_mode()
-def qwen21_region_callback_kwargs(pipe,crop,mask,task_type,generator,protected=None,protection_policy='legacy'):
+def qwen21_region_callback_kwargs(pipe,crop,mask,task_type,generator,protected=None,protection_policy='legacy',
+                                  editable_mask=None):
     """Build the same source-trajectory anchor on Qwen-Image-2.1 latents.
 
     Qwen-Image-2.1 has a 16x spatial VAE, 64-channel unpatched latent tokens,
@@ -108,7 +112,7 @@ def qwen21_region_callback_kwargs(pipe,crop,mask,task_type,generator,protected=N
     if noise.shape!=reference.shape:
         raise ValueError('Qwen-Image-2.1 source and generated latent grids differ')
     weights=editable_token_weights(
-        mask,(latent_width,latent_height),task_type,protected,protection_policy)
+        mask,(latent_width,latent_height),task_type,protected,protection_policy,editable_mask)
     weight=torch.from_numpy(weights.reshape(1,-1,1)).to(
         device=device,dtype=dtype)
     if weight.shape[1]!=noise.shape[1]:

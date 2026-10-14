@@ -31,12 +31,22 @@ def build_training_rows(pair: dict[str, Any], mask_code: str) -> list[dict[str, 
     match = MASK_SPAN.fullmatch(mask_code)
     if not match or not (0 <= int(match.group(1)) <= 255 and 256 <= int(match.group(2)) <= 511):
         raise ValueError("mask_code must contain one SAMTok span with codes 0000-0255 and 0256-0511")
+    spec = pair.get('instruction_spec') or {}
+    if spec:
+        from .instruction_protocol import validate_pair
+        validate_pair(spec, pair['instruction'], pair['instruction_noref'])
     ref = pair["instruction"]
     phrase = pair.get("ref_phrase") or _infer_phrase(pair)
     no_ref = pair.get("instruction_noref") or ref
-    ref_inline = inline_mask(ref, phrase, mask_code)
-    no_ref_phrase = _infer_noref_phrase(no_ref)
-    no_ref_inline = inline_mask(no_ref, no_ref_phrase, mask_code)
+    if spec:
+        from .instruction_protocol import render
+        # Bind the semantic selector slot, not a substring that may also occur
+        # inside an exact requested text value.
+        ref_inline = render({**spec, 'ref': spec['ref'] + ' ' + mask_code})
+        no_ref_inline = render({**spec, 'scope': spec['scope'] + ' ' + mask_code}, False)
+    else:
+        ref_inline = inline_mask(ref, phrase, mask_code)
+        no_ref_inline = inline_mask(no_ref, _infer_noref_phrase(no_ref), mask_code)
     common = {
         "edit_type": pair["operation"],
         "edit_image": pair["source_image"],

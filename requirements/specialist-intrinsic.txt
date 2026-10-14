@@ -1,0 +1,6 @@
+# Optional isolated research environment; upstream Intrinsic is academic-use-only.
+# uv venv --python 3.12 /tmp/sa1b-intrinsic-runtime
+# uv pip install --python /tmp/sa1b-intrinsic-runtime/bin/python -r requirements/specialist-intrinsic.txt
+torch==2.8.0
+torchvision==0.23.0
+intrinsic @ git+https://github.com/compphoto/Intrinsic.git@1a93aafaaf7dbe11be7ec86323d9a06e5950966d
