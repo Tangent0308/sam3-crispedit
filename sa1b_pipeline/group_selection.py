@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import random
 from collections import Counter, defaultdict
 from itertools import combinations
@@ -153,6 +154,18 @@ def _short_side(obj: dict[str, Any]) -> float:
     return max(1.0, min(abs(float(bbox[2]) - float(bbox[0])), abs(float(bbox[3]) - float(bbox[1]))))
 
 
+def _bbox_overlap_fraction(left: dict[str, Any], right: dict[str, Any]) -> float:
+    """Intersection over the right bbox area for cheap conflict screening."""
+    try:
+        lx0, ly0, lx1, ly1 = (float(v) for v in left.get("bbox", (0, 0, 0, 0)))
+        rx0, ry0, rx1, ry1 = (float(v) for v in right.get("bbox", (0, 0, 0, 0)))
+    except (TypeError, ValueError):
+        return 1.0
+    inter = max(0.0, min(lx1, rx1) - max(lx0, rx0)) * max(0.0, min(ly1, ry1) - max(ly0, ry0))
+    area = max(1.0, (rx1 - rx0) * (ry1 - ry0))
+    return inter / area
+
+
 def _local_pair_view(a: dict[str, Any], b: dict[str, Any], ma, mb, short: float):
     """Crop aligned masks before the exact distance transform.
 
@@ -177,6 +190,56 @@ def _local_pair_view(a: dict[str, Any], b: dict[str, Any], ma, mb, short: float)
     right = min(width, int(x1) + margin + 1)
     bottom = min(height, int(y1) + margin + 1)
     return ma[top:bottom, left:right], mb[top:bottom, left:right]
+
+
+def _near_bbox_pairs(objects: list[dict[str, Any]], *, limit: int = 8) -> list[tuple[float, dict[str, Any], dict[str, Any]]]:
+    """Return nearest bbox pairs without materialising all O(n²) combinations.
+
+    Dense SA-1B scenes can contain hundreds of masks.  The old combinations()
+    loop spent most of strict selection comparing obviously distant boxes,
+    before the exact RLE gate had a chance to reject them.  A sweep sorted by
+    x0 keeps the same conservative lower-bound test while only examining boxes
+    whose horizontal gap could fit the largest admissible proximity window.
+    """
+    if len(objects) < 2:
+        return []
+    entries = []
+    max_window = 32.0
+    for obj in objects:
+        bbox = obj.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        try:
+            x0, y0, x1, y1 = (float(v) for v in bbox)
+        except (TypeError, ValueError):
+            continue
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        short = max(1.0, min(x1 - x0, y1 - y0))
+        max_window = max(max_window, min(512.0, 0.2 * short))
+        entries.append((x0, x1, y0, y1, obj))
+    entries.sort(key=lambda item: (item[0], item[1], str(item[4].get("object_id", ""))))
+    candidates: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+    for i, (_, _, _, _, left) in enumerate(entries):
+        left_box = left.get("bbox")
+        if not isinstance(left_box, (list, tuple)) or len(left_box) != 4:
+            continue
+        try:
+            lx1 = float(left_box[2])
+        except (TypeError, ValueError):
+            continue
+        for x0, _, _, _, right in entries[i + 1:]:
+            if x0 - lx1 > max_window:
+                break
+            gap = bbox_gap(left, right)
+            threshold = 0.2 * max(1.0, min(_short_side(left), _short_side(right)))
+            if gap <= threshold:
+                candidates.append((gap, left, right))
+    candidates.sort(key=lambda item: (item[0], str(item[1].get("object_id", "")),
+                                      str(item[2].get("object_id", ""))))
+    return candidates[:limit]
 
 
 def _bbox_union(objects: Iterable[dict[str, Any]]) -> tuple[float, float, float, float] | None:
@@ -400,17 +463,9 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
         if len(objects) < 2:
             continue
         # Shortlist near bbox pairs before decoding masks. Dense SA-1B scenes
-        # can contain hundreds of masks; exact geometry for every pair makes
-        # capacity checks quadratic in both object count and RLE decoding.
-        near_pairs = []
-        for a, b in combinations(objects, 2):
-            lower_bound = bbox_gap(a, b)
-            threshold = 0.2 * max(1, min(_short_side(a), _short_side(b)))
-            if lower_bound <= threshold:
-                near_pairs.append((lower_bound, a, b))
-        near_pairs.sort(key=lambda item: (item[0], str(item[1].get("object_id")),
-                                          str(item[2].get("object_id"))))
-        near_pairs = near_pairs[:8]
+        # can contain hundreds of masks; use a sweep instead of materialising
+        # every O(n²) combination.
+        near_pairs = _near_bbox_pairs(objects, limit=8)
         feature_cache: dict[str, dict[str, Any]] = {}
         mask_cache: dict[str, Any] = {}
 
@@ -451,6 +506,13 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
                 # Fast capacity mode only estimates whether an operation is
                 # plausible from category/bbox metadata. Exact mask quality is
                 # enforced by the normal strict selection and group audit.
+                return True
+            # Operation quality is semantic rather than adjacency geometry.
+            # The planner and 27B group audit are the authoritative gates; an
+            # optional exact pre-gate is available for offline diagnostics but
+            # is disabled in production selection because it decodes a dense
+            # scene's mask once per operation and dominates wall time.
+            if os.environ.get("SA1B_EXACT_MULTI_OPERATION_GATE", "0") != "1":
                 return True
             feature = cached_feature(obj)
             quality = {k: v for k, v in feature.items() if k != "mask"}
@@ -512,29 +574,30 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
             if len(objects) < n:
                 continue
             a, b, adjacency = pairs[0]
-            others = [o for o in objects if o not in (a, b)]
+            # Only nearby, operation-plausible objects are needed to fill the
+            # remaining target slots. This avoids decoding hundreds of dense
+            # scene masks merely to prove they conflict with the pair.
+            plausible = [o for o in objects if o not in (a, b)
+                         and any(_cheap_operation_allowed(o, op, size) for op in OPERATIONS)]
+            plausible.sort(key=lambda o: (min(bbox_gap(o, a), bbox_gap(o, b)),
+                                          str(o.get("object_id", ""))))
+            others = plausible[:32]
             rng.shuffle(others)
             chosen = [a, b]
             for obj in others:
                 try:
                     if strict_geometry:
-                        obj_mask = cached_mask(obj)
-                        obj_support = cached_support(obj)
-                        conflict = any(
-                            bool((obj_support & cached_mask(prev)).sum() >
-                                 0.10 * max(1, int(cached_mask(prev).sum()))
-                                 or (cached_support(prev) & obj_mask).sum() >
-                                 0.10 * max(1, int(obj_mask.sum())))
-                            for prev in chosen
-                        )
+                        # Exact RLE geometry is reserved for the required
+                        # adjacent pair above.  Additional target conflicts
+                        # are conservatively screened by bbox overlap here;
+                        # generation/audit repeats the support-mask check on
+                        # the chosen group before publication.
+                        conflict = any(_bbox_overlap_fraction(obj, prev) > 0.10
+                                       or _bbox_overlap_fraction(prev, obj) > 0.10
+                                       for prev in chosen)
                     else:
-                        def bbox_overlap(left, right):
-                            lx0, ly0, lx1, ly1 = [float(v) for v in left.get("bbox", (0, 0, 0, 0))]
-                            rx0, ry0, rx1, ry1 = [float(v) for v in right.get("bbox", (0, 0, 0, 0))]
-                            area = max(1.0, (rx1 - rx0) * (ry1 - ry0))
-                            inter = max(0.0, min(lx1, rx1) - max(lx0, rx0)) * max(0.0, min(ly1, ry1) - max(ly0, ry0))
-                            return inter / area
-                        conflict = any(bbox_overlap(obj, prev) > 0.10 for prev in chosen)
+                        conflict = any(_bbox_overlap_fraction(obj, prev) > 0.10
+                                       for prev in chosen)
                 except (OSError, RuntimeError, TypeError, ValueError):
                     conflict = True
                 if not conflict:
