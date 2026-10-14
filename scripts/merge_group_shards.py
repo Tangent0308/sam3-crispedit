@@ -61,7 +61,19 @@ def main(argv=None):
             raise RuntimeError(f"twin operation quotas are not balanced: {dict(operation_counts)}")
     else:
         for row in rows:
-            member_counts[len(row.get("units", []))] += 1
+            units = row.get("units", [])
+            n = len(units)
+            if n not in (2, 3, 4, 5):
+                raise RuntimeError(f"multi-target group has invalid unit count: {n}")
+            operations = [str(unit.get("operation") or unit.get("instruction_spec", {}).get("operation", ""))
+                          for unit in units]
+            if n <= 4 and (len(set(operations)) != n or not set(operations).issubset(set(OPS))):
+                raise RuntimeError(f"multi-target operations are not distinct valid types: {operations}")
+            if n == 5 and (set(operations) != set(OPS) or len(set(operations)) != 4):
+                raise RuntimeError(f"five-target group must contain four types and one repeat: {operations}")
+            if not row.get("adjacent_pairs"):
+                raise RuntimeError(f"multi-target group has no adjacent-pair evidence: {_group_id(row)}")
+            member_counts[n] += 1
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temp = args.output.with_suffix(args.output.suffix + ".tmp")
     temp.write_text("".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
