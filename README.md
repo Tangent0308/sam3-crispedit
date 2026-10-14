@@ -15,6 +15,7 @@ scripts/run_generation_queue.py   常驻编辑器 worker
 scripts/run_audit_queue.py        批量审核 worker
 scripts/shard_group_selection.py  分组数据四 rank 确定性分片
 scripts/merge_group_shards.py     分片结果合并与硬校验
+scripts/group_4node_entry.sh      分组数据 Arnold 四机 rank 入口
 requirements/production/       CUDA 12.9 的三套锁定运行时
 tests/                         协议、配额、恢复、缓存和生产回归测试
 docs/PIPELINE.md               当前版本说明

@@ -140,23 +140,22 @@ python scripts/shard_group_selection.py \
   --output-root "$GROUP_ROOT/shards/twins_train_wave1" --world-size 4
 ```
 
-每个 Arnold worker（`ARNOLD_ID=0..3`）执行同一入口，仅替换 rank：
+每个 Arnold worker（`ARNOLD_ID=0..3`）可以直接执行仓库内的统一入口
+`scripts/group_4node_entry.sh`。它会校验 4×8 拓扑、原子复制本 rank shard、复用已有
+checkpoint，并把日志写到 rank 独立目录。示例环境变量如下：
 
 ```bash
-RANK="${ARNOLD_ID:?}"
-SHARD="$GROUP_ROOT/shards/twins_train_wave1/selected_rank${RANK}.jsonl"
-RUN="$GROUP_ROOT/twins_train_wave1/rank${RANK}"
-mkdir -p "$RUN/inputs"
-cp -n "$SHARD" "$RUN/inputs/selected.jsonl"
-python scripts/run_group_pipeline.py --kind twins \
-  --manifest "$GROUP_ROOT/inputs/train_candidates.jsonl" \
-  --output-root "$RUN" --target "$(wc -l < "$SHARD")" --split train \
-  --reservation "$GROUP_ROOT/inputs/eval_reservation.json" \
-  --planner-model /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8 \
-  --planner-backend vllm --planner-tp 4 --planner-batch-size 8 \
-  --editor-model /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1 \
-  --audit-model /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B \
-  --publish
+export GROUP_ROOT="$GROUP_ROOT"
+export GROUP_KIND=twins GROUP_SPLIT=train
+export GROUP_SHARD_ROOT="$GROUP_ROOT/shards/twins_train_wave1"
+export GROUP_SELECTION="$GROUP_ROOT/inputs/train_twin_selected.jsonl"
+export GROUP_MANIFEST="$GROUP_ROOT/inputs/train_candidates.jsonl"
+export GROUP_RESERVATION="$GROUP_ROOT/inputs/eval_reservation.json"
+export GROUP_PLANNER_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8
+export GROUP_EDITOR_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1
+export GROUP_AUDIT_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B
+export GROUP_PUBLISH=1
+bash scripts/group_4node_entry.sh
 ```
 
 四个 rank 都结束后合并并做硬校验：
