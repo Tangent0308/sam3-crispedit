@@ -1,9 +1,9 @@
 """Official vLLM-Omni adapter for Qwen-Image-2.1 image-conditioned generation.
 
 The adapter deliberately exposes the small ``pipe(image=..., prompt=...)``
-surface used by the existing editor.  All prompt construction and late
-composition stay in ``utils.context_edit``; vLLM-Omni only replaces the
-diffusion execution backend.
+surface used by the current production editor. Prompt construction and
+regional protection remain in the surrounding pipeline; vLLM-Omni replaces
+only the diffusion execution backend.
 
 Qwen-Image-2.1 support is currently provided by the vLLM-Omni PR #7759
 branch.  That branch's official API is ``Omni.generate`` with
@@ -66,14 +66,16 @@ class QwenImage21OmniPipeline:
         self.model_class_name = get_model_class_name(self.omni)
 
     @staticmethod
-    def region_callback_kwargs(crop, mask, task_type, protected=None, protection_policy='legacy'):
+    def region_callback_kwargs(crop, mask, task_type, protected=None, protection_policy='legacy',
+                               editable_mask=None):
         from utils.region_denoise import editable_token_weights
 
         # Same calculate_dimensions(1024**2, ratio) and 16x VAE as Diffusers.
         width = round(math.sqrt(1024 * 1024 * crop.width / crop.height) / 32) * 32
         height = round(math.sqrt(1024 * 1024 * crop.height / crop.width) / 32) * 32
         weights = editable_token_weights(
-            mask, (width // 16, height // 16), task_type, protected, protection_policy)
+            mask, (width // 16, height // 16), task_type, protected, protection_policy,
+                   editable_mask)
         return dict(height=height, width=width, regional_weights=weights,
                     output_resolution=1024, use_kv_cache=True), weights
 

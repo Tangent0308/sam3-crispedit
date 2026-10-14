@@ -3,6 +3,7 @@
 The import is lazy so geometry and unit tests work on CPU-only machines.
 """
 from __future__ import annotations
+from .instruction_style import INSTRUCTION_STYLE
 
 import json
 import os
@@ -182,7 +183,28 @@ class VLLMSelector:
         return [_safe_parse(output.outputs[0].text if output.outputs else "", stage="audit") for output in outputs]
 
 
-def selection_prompt(candidate: dict[str, Any], *, min_targets: int = 2, max_targets: int = 5) -> str:
+def _required_operation_rule(operation: str | None) -> str:
+    if operation is None:
+        return "No operation was assigned (legacy unconstrained planning)."
+    from .schema import OPERATIONS
+    if operation not in OPERATIONS:
+        raise ValueError(f"invalid required operation: {operation}")
+    criteria = {
+        'add': 'Select existing hosts with a visible usable attachment/resting surface for the requested conventional accessories. Keep the host. The source mask is the host anchor, not the new item. Avoid hosts with no natural accessory.',
+        'replace': 'Select complete, compact objects or detachable parts that admit a visibly different design with compatible size, support and function. A recolor is not a replacement.',
+        'remove': 'Select self-contained removable objects or detachable decorations whose absence leaves a plausible scene. Avoid deleting body parts, worn shoes/clothes wholesale, load-bearing supports or mixed-background masks. A named removable garment part is allowed only with a prepared execution region.',
+        'attribute': 'Select a specific editable surface or single-material object with a credible visible appearance change. Preserve geometry, unrequested markings and other materials. Avoid already-present target colors and whole-person masks.',
+    }
+    return (f"HARD OPERATION ASSIGNMENT: {operation}. This was assigned BEFORE target selection. "
+            f"Select targets and design instructions ONLY for {operation}; every returned unit.operation MUST equal '{operation}'. "
+            "Do not choose, relabel, or fall back to any other operation, including attribute. "
+            "If a target cannot support a natural edit of the assigned type, skip it with a concrete reason. "
+            "If fewer than the required number of independent targets remain, reject the scene. "
+            "Reject nested/overlapping targets and mutually conflicting instructions. " + criteria[operation])
+
+
+def selection_prompt(candidate: dict[str, Any], *, min_targets: int = 2, max_targets: int = 5, required_operation: str | None = None) -> str:
+    operation_rule = _required_operation_rule(required_operation)
     objects = candidate.get("objects", [])
     # Keep the candidate index well below the 8k context budget on crowded
     # SA-1B scenes. The image and numbered mask overlay carry the visual
@@ -192,20 +214,50 @@ def selection_prompt(candidate: dict[str, Any], *, min_targets: int = 2, max_tar
         for o in objects
     ]
     return f"""You are curating hard SA-1B source scenes for a fine-grained interactive image-editing training set.
+{operation_rule}
+The supplied panel shows the clean photograph on the LEFT and a mask-only object_id map on the RIGHT. Read appearance only from the clean photograph.
 Inspect the image, then use the supplied dense-object candidates only as identity/mask hints. Select {min_targets} to {max_targets} DIFFERENT physical objects or parts in this same scene.
 Prefer multiple near-duplicate instances, occlusion, touching boundaries, thin straps/rods, holes, disconnected visible fragments, small parts, and mixed object/part granularity. Reject background blobs, duplicate fragments of one parent, ambiguous or badly segmented masks, and targets too small to judge.
 Return JSON only with keys: accept (bool), scene_summary, difficulty_tags (array), selected_object_ids (array), rejected_object_ids (array), protection_notes (array), evidence (string).
 Candidates (object_id, category, bbox, area_fraction): {json.dumps(compact, ensure_ascii=False, separators=(',', ':'))}"""
 
 
-def planning_prompt(candidate: dict[str, Any], selected_ids: list[str], difficulty: dict[str, Any]) -> str:
+def planning_prompt(candidate: dict[str, Any], selected_ids: list[str], difficulty: dict[str, Any], *, required_operation: str | None = None) -> str:
+    operation_rule = _required_operation_rule(required_operation)
     selected = [
-        {k: o.get(k) for k in ("object_id", "category", "description", "bbox", "area_fraction") if o.get(k) is not None}
+        {k: o.get(k) for k in ("object_id", "category", "bbox", "area_fraction") if o.get(k) is not None}
         for o in candidate.get("objects", []) if str(o.get("object_id")) in set(selected_ids)
     ]
-    return f"""You are designing benchmark-v2-aligned local edits for a selected SA-1B scene.
-Each selected object becomes one independent unit. Choose exactly one operation for each object from add, replace, remove, attribute, using the operation_quality table below. Prefer different operation types when the mask is eligible, but never force an unsuitable operation merely to balance a scene; global balance is handled after quality filtering. Use the visible selected mask as the source semantic selector; never invent a mask or count fragments as separate objects.
-For each unit return object_id, operation, ref_phrase (a concise image-grounded referring phrase beginning with a lowercase article when needed), scope (a short noun phrase for the visible object/part, at most four words, without location words), payload (a concrete, visibly judgeable local change), attribute_kind (color/material for attribute, otherwise null), evidence. Instructions must follow the benchmark-v2 forms: Add <new item> to <target>. / Replace <target> with <new object/part>. / Remove <target>. / Change the color/material of <target> to <value>. The no-ref form is generated as Add <new item> to the selected <scope>. / Replace the selected <scope> with <new object/part>. / Remove the selected <scope>. / Change the color/material of the selected <scope> to <value>. For add, payload MUST be a new physical item absent from the source (for example, a small pocket, badge, cushion, tag, or attached accessory); never write an existing surface, top, center, or section of the selected host as the payload. Additions must attach to the selected host; replacement must change identity/form; attribute preserves geometry; removal must be self-contained.
-For remove, choose only a self-contained object with no visible support/dependency. For replace, the mask must cover the complete visible old identity. For add, use a sufficiently large, stable host and a clearly visible attached item; avoid tiny stickers, droplets, bells, or other changes that will be below the generation resolution. Return JSON only: {{\"units\":[{{\"object_id\":...,\"operation\":...,\"ref_phrase\":...,\"scope\":...,\"payload\":...,\"attribute_kind\":null,\"evidence\":...}}]}}.
+    for item in selected:
+        obj = next(o for o in candidate.get('objects', []) if str(o.get('object_id')) == str(item['object_id']))
+        item['resolved_execution_region_available'] = bool(obj.get('metadata', {}).get('execution_mask_path'))
+    # Earlier selection may have seen a colored overlay. Do not recycle its
+    # appearance descriptions as visual evidence for the clean-image planner.
+    difficulty = {k: v for k, v in difficulty.items()
+                  if k in {'difficulty_score', 'mechanisms', 'quality_target_ids', 'target_features', 'target_count'}}
+    prompt = f"""You are designing benchmark-v2-aligned local edits for a selected SA-1B scene.
+{operation_rule}
+The supplied panel has TWO aligned halves: LEFT is the clean source photograph, RIGHT is a grayscale mask-only map with object_id labels. Read ALL colors, materials, textures, object identities and scene context from the LEFT photograph only. The RIGHT half is only for locating masks. Never interpret guide pixels, labels or annotation descriptions as source appearance; visible clean-image evidence overrides metadata. If appearance is uncertain, omit the color from ref_phrase instead of guessing.
+ATTRIBUTE SURFACE CONTRACT: Identify the real editable object/part, never silently reinterpret a person mask as clothing or a window mask as only its frame. Return edit_surface and clean-source source_color when relevant. A host selector may support target_part only when resolved_execution_region_available is true; otherwise select a precise part mask or skip the task. Color, material, finish, pattern, texture, text, tint and opacity are distinct. Material must name a real material; matte black is color/finish. Preserve unrequested geometry and appearance. Tint preserves transparency; change opacity only when explicitly requested. Never invent filesystem paths.
+
+
+Each selected object can become at most one independent unit. Choose exactly one suitable operation for each accepted object from add, replace, remove, attribute, using the operation_quality table below. If no natural, locally feasible edit exists, omit that object from units and report its object_id and reason in skipped_objects; never force a payload to fill a quota. Prefer different operation types when the mask is eligible, but never force an unsuitable operation merely to balance a scene; global operation assignments are made before selection; preserve the assigned type even when rejecting a target. Use the visible selected mask as the source semantic selector; never invent a mask or count fragments as separate objects.
+UNIFIED INSTRUCTION PROTOCOL 1.0: Return object_id, operation, ref_phrase (source-instance phrase), scope (visually verified short source-instance noun, not a blindly copied metadata alias), payload, target_part (optional named part of the selected host), remove_mode (whole/part/contents/contents_only/lowerlegs/hem), placement (for add: relation, optional site, anchor_mode=support/reference), attributes (for attribute: list of property/value records), edit_surface, source_color, evidence. For simple attribute, attribute_kind plus payload is accepted. For other operations attributes must be empty. Defaults: no target_part; remove_mode=whole; add relation=to. For remove leave payload empty; encode the part and extent in target_part/remove_mode/qualifier. With placement.site, choose a concrete spatial relation rather than to. Ref/no-ref are deterministically rendered from these SAME slots, replacing only the source-instance phrase with the selected <scope>; retain all part, count, result and placement semantics. Do not return two independently authored instructions.
+{INSTRUCTION_STYLE}
+Forms: Add <item> <relation> <anchor>. Replace <target> with <replacement>. Remove <target>. Remove <part> from <host>. Remove <target>, including its contents. Remove the contents from <host>. Remove the lower section of <target> to make it knee-length. Change the <property> of <target> to <value>. Tint <target> <color>. Make <target> translucent/opaque. Text values are exact strings; do not add quotation marks to the stored value. One source unit has one operation; compatible attributes on that same target may be combined, but do not mix operations. Keep one short sentence; aim for ref<=26 and no-ref<=16 words without dropping necessary meaning. No minimum word count.
+ADD PLACEMENT: payload is only the new physical item plus necessary count/appearance. Put relation and site in placement instead of embedding ambiguous its/it references in payload. Example: payload=a beige cushion, placement relation=on, site=seat, anchor_mode=support. Preserve the source anchor. A reference placement such as beside requires resolved_execution_region_available=true; otherwise skip. Add a physical patch = add; change a printed surface pattern = attribute; erase an existing logo/text = remove; change the existing text content = attribute.text. No moving objects or pose editing under these four labels.
+EXECUTABILITY: target_part, contents_only, lowerlegs and hem need resolved_execution_region_available=true. Use them only when available; never replace a missing part mask with the entire host. remove_mode=part requires target_part. For attributes supply one or more of color/material/finish/pattern/texture/text; tint and opacity each stand alone. Preserve source identity, credible scene role and real support relationships.
+
+CONTENT DESIGN: Treat these as ordinary photo-retouching requests, not demonstrations of arbitrary model capabilities. Before writing a payload, inspect the visible object category, function, current appearance, surrounding scene, scale, and attachment/support relationships. Consider a few feasible edits internally and choose the most contextually convincing one. The result should look like a plausible alternate photograph of the same scene. Do not invent an unseen backstory to justify an odd edit. Visible change is necessary, but novelty, saturation, and maximum contrast are not goals. Preserve independent single-target tasks; one unit must not rely on another unit being applied first.
+ADD: Choose one kind of absent, useful or conventional accessory, with the requested count and a visible, physically suitable attachment/resting site on the selected host. Specify enough about the item to determine normal size and placement, within the short instruction budget. Conditional examples: a seat cushion on a bare chair seat, a luggage tag on a suitcase with an accessible handle. These are illustrations, not defaults. Reject arbitrary bows/tags/badges on unrelated architecture, tires, plants or tools; decorative additions require a visible scene-based reason. Do not obscure the host's main function, attach to a neighboring object, require new supports, or enlarge the addition merely to make it noticeable. If it cannot be both naturally sized and judgeable, skip it; never switch an assigned operation.
+REPLACE: Choose a recognizable alternative that serves a compatible scene role and fits the old object's footprint, orientation, support/contact points and local editable region. Conditional examples: replace a standalone dining chair with another dining-chair design, or a freestanding flower pot with a different pot design. A same-category replacement must change visible design/form, not merely color or material (that is attribute). Avoid unrelated category swaps, blocked access, floating objects, and replacements needing changes to surrounding furniture, people, hands, supports or shadows outside the editable region. Do not demand large shape expansion beyond the old mask and narrow collar.
+ATTRIBUTE: Prefer a plausible product color, paint finish, fabric color, or manufactured material variant appropriate to this particular object and scene. Use a visibly different but credible value; bright colors are allowed where conventional, not as a universal default. Preserve unrequested markings and component boundaries; do not treat mixed-material objects as a uniform painted blob. Use material only when the same geometry can plausibly be manufactured in that material and appearance alone conveys it. Avoid implausible metallic/glass/wood transformations of skin, food, foliage or flexible fabric. Do not change thickness or construction. Change transparency only for an explicit opacity request; tint preserves it. If a natural surface change cannot be isolated by this mask, skip it; never switch an assigned operation. Do not choose a value already present.
+Keep ref_phrase grounded in the SOURCE appearance and target identity. Keep payload concise and concrete; put rationale in evidence, not in the benchmark instruction. Ref and no-ref must request identical content; the mask supplies the instance selector, not missing edit semantics.
+For remove, choose a self-contained target or an explicitly named removable part with a resolved execution region; preserve the remaining host. For replace, the source selector or resolved part region must identify the complete visible old identity. For add, use a sufficiently large, stable host and a clearly visible attached item; avoid tiny stickers, droplets, bells, or other changes that will be below the generation resolution. For repeated same-category instances, ground every positional phrase (leftmost, rightmost, far right, to the right of center, and similar) against the selected object_id and visible mask overlay; never assign a phrase to a neighboring instance or reuse contradictory superlatives for different masks. Return JSON only: {{\"skipped_objects\":[{{\"object_id\":...,\"reason\":...}}],\"units\":[{{\"object_id\":...,\"operation\":...,\"ref_phrase\":...,\"scope\":...,\"payload\":...,\"attribute_kind\":null,\"target_part\":null,\"remove_mode\":\"whole\",\"placement\":null,\"attributes\":[],\"qualifier\":\"\",\"evidence\":...}}]}}.
 Difficulty evidence: {json.dumps(difficulty, ensure_ascii=False)}
 Selected candidates: {json.dumps(selected, ensure_ascii=False)}"""
+
+    if required_operation is not None:
+        prompt = prompt.replace("Choose exactly one suitable operation for each accepted object from add, replace, remove, attribute", "Use only the assigned operation for every accepted object")
+        prompt = prompt.replace("Prefer different operation types when the mask is eligible, but never force an unsuitable operation merely to balance a scene;", "Reject targets unsuitable for the assigned operation;")
+    return prompt

@@ -37,7 +37,7 @@ def _objects(raw: dict[str, Any]) -> list[CandidateObject]:
             bbox=value.get("bbox", value.get("box")),
             area_fraction=value.get("area_fraction"),
             parent_id=value.get("parent_id"),
-            metadata={k: v for k, v in value.items() if k not in {"object_id", "id", "annotation_id", "category", "label", "name", "description", "caption", "mask_path", "mask", "rle", "segmentation", "bbox", "box", "area_fraction", "parent_id"}},
+            metadata={**(value.get("metadata") or {}), **{k: v for k, v in value.items() if k not in {"metadata","object_id", "id", "annotation_id", "category", "label", "name", "description", "caption", "mask_path", "mask", "rle", "segmentation", "bbox", "box", "area_fraction", "parent_id"}}},
         ))
     return result
 
@@ -53,6 +53,9 @@ def candidate_from_dict(raw: dict[str, Any], base_dir: str | Path | None = None)
         for obj in objects:
             if obj.mask_path and not Path(obj.mask_path).is_absolute():
                 obj.mask_path = str((base / obj.mask_path).resolve())
+            for key in ('execution_mask_path', 'protected_mask_path'):
+                if obj.metadata.get(key) and not Path(obj.metadata[key]).is_absolute():
+                    obj.metadata[key] = str((base / obj.metadata[key]).resolve())
     return Candidate(
         source_id=str(raw.get("source_id", raw.get("image_id", raw.get("id", "")))),
         image_path=image,

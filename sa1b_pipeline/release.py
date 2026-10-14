@@ -26,6 +26,7 @@ def _semantic_pass(row: dict[str, Any]) -> bool:
         and audit.get("target_done") is True
         and audit.get("non_target_preserved") is True
         and audit.get("natural") is True
+        and (not row.get('operation_audit_required') or audit.get('operation_correct') is True)
     )
 
 
@@ -51,9 +52,34 @@ def release_rows(
     for row in rows:
         key = (str(row.get("case_id")), str(row.get("unit_id")))
         review = manual_review.get(key, {})
+        # Flattened worker manifests may put the unit id into ``case_id``
+        # even though all units share one source image.  Accept review files
+        # keyed by the source id as well.
+        if not review and row.get("source_id"):
+            unit_id = str(row.get("unit_id"))
+            source_id = str(row["source_id"])
+            review = (manual_review.get((source_id, unit_id), {}) or
+                      manual_review.get((f"sa1b-{source_id}", unit_id), {}))
         reasons: list[str] = []
+        if row.get('benchmark_only'):
+            reasons.append('benchmark_only_load_test')
         if row.get("decision") == "fail":
-            reasons.append("deterministic_check_failed")
+            failure_reasons = set(str(x) for x in (row.get("failure_reasons") or []))
+            # ``validate`` uses the same row decision for deterministic and
+            # semantic rejection.  Keep the release report honest about
+            # which gate actually rejected the pair instead of labelling
+            # every semantic failure as a deterministic failure.
+            deterministic_reasons = {
+                "size_mismatch", "support_leakage", "remove_mask_change_too_weak",
+                "no_visible_target_change",
+            }
+            if failure_reasons & deterministic_reasons:
+                reasons.append("deterministic_check_failed")
+            elif any("semantic" in reason or "malformed_mllm" in reason
+                     for reason in failure_reasons):
+                reasons.append("semantic_audit_failed")
+            else:
+                reasons.append("validation_failed")
         if review.get("status") != "manual_pass":
             reasons.append("manual_review_not_pass")
         if require_semantic and not _semantic_pass(row):
@@ -67,7 +93,9 @@ def release_rows(
 
     by_case: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in accepted:
-        by_case[str(row["case_id"])].append(row)
+        # Enforce the multi-target invariant per source image, even when a
+        # generation worker used a unit-specific case id.
+        by_case[str(row.get("source_id") or row["case_id"])].append(row)
     released: list[dict[str, Any]] = []
     dropped_cases: dict[str, str] = {}
     for case_id, case_rows in sorted(by_case.items()):
@@ -84,8 +112,8 @@ def release_rows(
         "row_gate_pass": len(accepted),
         "released_rows": len(released),
         "rejected_rows": len(rows) - len(accepted),
-        "input_cases": len({str(row.get("case_id")) for row in rows}),
-        "released_cases": len({str(row.get("case_id")) for row in released}),
+        "input_cases": len({str(row.get("source_id") or row.get("case_id")) for row in rows}),
+        "released_cases": len({str(row.get("source_id") or row.get("case_id")) for row in released}),
         "dropped_cases": dropped_cases,
         "min_targets": min_targets,
         "max_targets": max_targets,

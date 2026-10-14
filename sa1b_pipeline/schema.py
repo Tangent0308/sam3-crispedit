@@ -58,6 +58,24 @@ class EditUnit:
     completion_requirement: str = ""
     preserve: list[str] = field(default_factory=list)
     mllm_evidence: str = ""
+    # ``mask_path`` always points to a source-image SA-1B region.  For add
+    # this is the host/attachment anchor; for the other operations it is the
+    # visible target being edited.  Keeping the role explicit prevents later
+    # consumers from treating an add anchor as a pixel-accurate change mask.
+    mask_role: str = "target"
+    mask_semantics: dict[str, Any] = field(default_factory=dict)
+    support_policy: str = "target_only"
+    edit_surface: str | None = None
+    source_color: str | None = None
+    # Construction-only fields, never substitute these for the benchmark mask.
+    execution_mask_path: str | None = None
+    protected_mask_path: str | None = None
+    surface_type: str | None = None
+    target_rgb: list[float] | None = None
+
+    instruction_protocol_version: str | None = None
+    instruction_spec: dict[str, Any] = field(default_factory=dict)
+    instruction_length_advice: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -91,14 +109,29 @@ def validate_unit(unit: EditUnit) -> None:
         raise ValueError("no-ref units require a point, box, or mask locator")
     if not unit.mask_path:
         raise ValueError("each unit needs an immutable source mask")
+    expected_role = "anchor" if unit.operation == "add" else "target"
+    if unit.mask_role not in {"anchor", "target"}:
+        raise ValueError("mask_role must be anchor or target")
+    if unit.mask_role != expected_role:
+        raise ValueError(f"{unit.operation} units require mask_role={expected_role}")
+    if unit.support_policy not in {"target_only", "target_plus_collar", "anchor_plus_attachment"}:
+        raise ValueError("unknown support_policy")
     if len(unit.bbox) != 4 or len(unit.point) != 2:
         raise ValueError("invalid unit geometry")
     if not unit.ref_phrase.strip() or not unit.scope.strip():
         raise ValueError("ref_phrase and scope are required")
-    words = unit.instruction_ref.split()
-    no_words = unit.instruction_noref.split()
-    if not 4 <= len(words) <= 26 or not 4 <= len(no_words) <= 16:
-        raise ValueError("instruction length is outside the benchmark contract")
+    if not unit.instruction_ref.strip() or not unit.instruction_noref.strip():
+        raise ValueError('instructions must be nonempty')
+    if unit.instruction_spec or unit.instruction_protocol_version:
+        from .instruction_protocol import VERSION, validate_pair
+        if unit.instruction_protocol_version != VERSION or unit.instruction_spec.get('operation') != unit.operation:
+            raise ValueError('instruction protocol operation/version mismatch')
+        if unit.instruction_spec.get('ref') != unit.ref_phrase or unit.instruction_spec.get('scope') != unit.scope:
+            raise ValueError('instruction selection mismatch')
+        validate_pair(unit.instruction_spec, unit.instruction_ref, unit.instruction_noref)
+        from .instruction_protocol import mask_contract
+        if unit.mask_semantics and unit.mask_semantics != mask_contract(unit.instruction_spec):
+            raise ValueError("source mask semantics differ from instruction protocol")
 
 
 def validate_case(case: SelectionCase, min_units: int = 2, max_units: int = 5,

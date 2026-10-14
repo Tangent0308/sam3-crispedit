@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from .schema import EditUnit
+from .instruction_protocol import VERSION, make_spec, render, validate_pair, length_advice, needs_local_execution, mask_contract
 
 
 def _clean(value: Any) -> str:
@@ -21,11 +22,9 @@ def _lower_article(value: str) -> str:
 
 def _scope_phrase(raw_scope: str, category: str) -> str:
     """Return the short noun phrase used by v2 no-ref instructions."""
-    category = _clean(category)
-    if category and category.lower() not in {"object", "thing", "part", "unknown", "item"}:
-        # Dense SA-1B categories sometimes contain comma-separated aliases.
-        return _lower_article(category.split(",", 1)[0].strip())
     value = _clean(raw_scope)
+    if not value:
+        value = _clean(category).split(',', 1)[0]
     value = re.sub(r"^(?:the|a|an)\s+", "", value, flags=re.I)
     value = re.sub(r"^(?:entire|whole|visible|selected)\s+", "", value, flags=re.I)
     return _lower_article(value or "object")
@@ -51,17 +50,8 @@ def _payload_for_operation(operation: str, payload: str, target: str) -> str:
 
 
 def render_instruction(operation: str, target: str, payload: str, attribute_kind: str | None = None) -> str:
-    target, payload = _clean(target), _clean(payload)
-    if operation == "add":
-        return f"Add {payload} to {target}."
-    if operation == "replace":
-        return f"Replace {target} with {payload}."
-    if operation == "remove":
-        return f"Remove {target}."
-    if operation == "attribute":
-        kind = "material" if attribute_kind == "material" else "color"
-        return f"Change the {kind} of {target} to {payload}."
-    raise ValueError(f"unknown operation: {operation}")
+    return render(make_spec(operation, _clean(target), 'object', _clean(payload),
+                            attribute_kind=attribute_kind))
 
 
 def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometry: dict[str, Any],
@@ -71,55 +61,74 @@ def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometr
         raise ValueError(f"invalid MLLM operation: {operation}")
     ref = _lower_article(_clean(raw.get("ref_phrase") or raw.get("target") or obj.get("description") or obj.get("category")))
     scope = _scope_phrase(_clean(raw.get("scope") or ""), _clean(obj.get("category") or ""))
-    payload = _payload_for_operation(operation, _clean(raw.get("payload") or raw.get("new_content")), ref)
-    if operation == "add" and not re.match(r"^(?:a|an|one|two|three)\s+", payload, flags=re.I):
-        raise ValueError("add payload must introduce a new physical item")
-    if operation == 'remove' and not payload:
-        payload = 'remove the selected target and reconstruct the revealed background'
-    if not payload:
-        raise ValueError(f"MLLM omitted payload for {obj.get('object_id')}")
-    attribute_kind = _clean(raw.get("attribute_kind")) or None
-    if operation == "attribute" and attribute_kind not in {"color", "material"}:
-        attribute_kind = "color"
-    ref_instruction = render_instruction(operation, ref, payload, attribute_kind)
-    # The benchmark contract uses type-specific region language.  Keeping the
-    # replacement phrase explicit is important: a mask must follow a complete
-    # referring phrase, never an article or a guessed scope description.
-    kind = "material" if attribute_kind == "material" else "color"
-    no_ref_instruction = {
-        "add": f"Add {payload} to the selected {scope}.",
-        "replace": f"Replace the selected {scope} with {payload}.",
-        "remove": f"Remove the selected {scope}.",
-        "attribute": f"Change the {kind} of the selected {scope} to {payload}.",
-    }[operation]
-    object_id = str(obj.get("object_id", obj.get("id")))
+    attributes = raw.get('attributes') or []
+    attribute_kind = _clean(raw.get('attribute_kind')) or 'color'
+    payload = _payload_for_operation(operation, _clean(raw.get('payload') or raw.get('new_content')), ref)
+    if operation == 'attribute' and attribute_kind == 'text':
+        payload = str(raw.get('payload', raw.get('new_content', ''))).strip()
+    if operation == 'add' and not re.match(r'^(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|[1-9][0-9]*)\s+', payload, flags=re.I):
+        raise ValueError('add payload must introduce a new physical item')
+    part = _clean(raw.get('target_part'))
+    mode = raw.get('remove_mode') or ('part' if operation == 'remove' and part else 'whole')
+    spec = make_spec(operation, ref, scope, payload, target_part=part, remove_mode=mode,
+                     attribute_kind=attribute_kind, attributes=attributes,
+                     placement=raw.get('placement'), qualifier=raw.get('qualifier', ''))
+    execution = obj.get('metadata', {}).get('execution_mask_path')
+    # Geometry is supplied by a trusted preparation step, never a path invented
+    # by the planning VLM. A host selector alone cannot resolve a subpart.
+    if needs_local_execution(spec) and not execution:
+        raise ValueError('subpart task requires a resolved execution_mask_path in object metadata')
+    if spec['placement'].get('anchor_mode') == 'reference' and not execution:
+        raise ValueError('reference add requires a resolved execution_mask_path in object metadata')
+    if operation == 'attribute':
+        category = _clean(obj.get('category')).lower().split(',')[0].strip()
+        if category in {'person', 'people', 'man', 'woman', 'boy', 'girl', 'human', 'pedestrian'} and not part:
+            raise ValueError('attribute requires the actual surface/part mask, not a whole-person mask')
+        surface = _clean(raw.get('edit_surface')).lower()
+        if category in {'window', 'windows', 'car', 'cars', 'sedan', 'suv', 'side mirror', 'mirror'} and surface and not part:
+            raise ValueError('mixed-component target requires a separately selected surface/part mask for attribute')
+        for attr in spec['attributes']:
+            value = attr['value']
+            if attr['property'] == 'material' and re.fullmatch(
+                r'(?:(?:matte|glossy|bright|dark|light|deep)\s+)*(?:black|white|red|blue|green|grey|gray|yellow|orange|pink|purple)', value.lower()):
+                raise ValueError('material payload is only a color/finish, not a material')
+            if attr['property'] in {'color', 'tint'} and _clean(raw.get('source_color')).lower() == value.lower():
+                raise ValueError('requested color is already present in the clean source')
+        attribute_kind = spec['attributes'][0]['property'] if len(spec['attributes']) == 1 else 'multiple'
+    else:
+        attribute_kind = None
+    ref_instruction, no_ref_instruction = render(spec), render(spec, False)
     completion = {
-        "add": "The source object remains, and the added item must have the specified attachment.",
-        "replace": "The old target must be absent; do not leave fragments or add a duplicate beside it.",
-        "remove": "The old target must be absent; preserve the rest of the scene and neighboring instances.",
-        "attribute": "Change the requested appearance while retaining the selected object geometry and identity.",
+        'add': 'Keep the source anchor; realize exactly the requested count and placement relation.',
+        'replace': 'Replace only the named object or part; retain the rest of its host and scene.',
+        'remove': 'Remove exactly the named extent and contents if requested; preserve the remaining host.',
+        'attribute': 'Change exactly the requested properties; retain identity and all unrequested structure and appearance.',
     }[operation]
     return EditUnit(
-        unit_id=f"U{raw.get('unit_index', 1)}", object_id=object_id, operation=operation,
-        ref_phrase=ref, scope=scope, payload=payload,
+        unit_id=f"U{raw.get('unit_index', 1)}", object_id=str(obj.get('object_id', obj.get('id'))),
+        operation=operation, ref_phrase=ref, scope=scope, payload=payload,
         instruction_ref=ref_instruction, instruction_noref=no_ref_instruction,
-        mask_path=mask_path, bbox=[int(x) for x in geometry["bbox"]], point=[int(x) for x in geometry["point"]],
-        attribute_kind=attribute_kind, locator="mask", has_ref=True,
-        completion_requirement=ref_instruction + " " + completion,
-        preserve=list(protection), mllm_evidence=_clean(raw.get("evidence")),
+        mask_path=mask_path, bbox=[int(x) for x in geometry['bbox']], point=[int(x) for x in geometry['point']],
+        attribute_kind=attribute_kind, locator='mask', has_ref=True,
+        edit_surface=_clean(raw.get('edit_surface')) or None, source_color=_clean(raw.get('source_color')) or None,
+        completion_requirement=ref_instruction + ' ' + completion, preserve=list(protection),
+        mllm_evidence=_clean(raw.get('evidence')), mask_role=mask_contract(spec)['source_role'], mask_semantics=mask_contract(spec),
+        support_policy={'add':'anchor_plus_attachment','replace':'target_plus_collar','remove':'target_plus_collar','attribute':'target_only'}[operation],
+        execution_mask_path=execution, protected_mask_path=obj.get("metadata", {}).get("protected_mask_path"),
+        instruction_protocol_version=VERSION, instruction_spec=spec,
+        instruction_length_advice=length_advice(ref_instruction, no_ref_instruction),
     )
 
 
 def validate_instruction(unit: EditUnit) -> list[str]:
     errors = []
-    if unit.operation == "add" and not re.search(r"\bto\b", unit.instruction_ref, re.I):
-        errors.append("add_missing_attachment_relation")
-    if unit.operation == "replace" and not re.search(r"\bwith\b", unit.instruction_ref, re.I):
-        errors.append("replace_missing_new_identity")
-    if unit.operation == "attribute" and not re.search(r"\b(color|material)\b", unit.instruction_ref, re.I):
-        errors.append("attribute_missing_property")
-    if unit.instruction_ref.lower() == unit.instruction_noref.lower():
-        errors.append("ref_and_noref_are_identical")
-    if len(unit.instruction_ref.split()) > 26 or len(unit.instruction_noref.split()) > 16:
-        errors.append("instruction_too_long")
+    if unit.instruction_spec:
+        try:
+            validate_pair(unit.instruction_spec, unit.instruction_ref, unit.instruction_noref)
+            if unit.instruction_protocol_version != VERSION or unit.operation != unit.instruction_spec['operation']:
+                errors.append('instruction_protocol_mismatch')
+        except ValueError:
+            errors.append('instruction_semantic_pair_mismatch')
+    elif unit.instruction_ref.lower() == unit.instruction_noref.lower():
+        errors.append('ref_and_noref_are_identical')
     return errors

@@ -23,6 +23,16 @@ def test_region_weights_and_resolution_match_baseline():
     np.testing.assert_array_equal(weights, editable_token_weights(mask, (56, 74), 'remove'))
 
 
+def test_explicit_editable_support_disables_implicit_operation_expansion():
+    mask = np.zeros((64, 64), bool)
+    mask[24:40, 24:40] = True
+    support = np.zeros_like(mask)
+    support[20:44, 20:44] = True
+    implicit = editable_token_weights(mask, (16, 16), 'add')
+    explicit = editable_token_weights(mask, (16, 16), 'add', editable_mask=support)
+    assert explicit.sum() <= implicit.sum()
+
+
 def test_sampling_preserves_anchor_and_rejects_silently_ignored_options(monkeypatch):
     captured = {}
     inputs = ModuleType('vllm_omni.inputs.data')
