@@ -166,7 +166,16 @@ python scripts/merge_group_shards.py --kind twins --split train \
   --output "$GROUP_ROOT/final/twins_train.jsonl"
 ```
 
-评测 200 组使用相同流程，但输入换为 `eval_twin_selected.jsonl`，`--split eval`，并把输出写到 `twins_eval/rank${RANK}`；评测组完成后必须生成图片内嵌 PDF，逐组填写 `human_review.jsonl`，全部确认后才可发布。多目标的 1,500 训练组和 100 评测组必须在孪生第一批人工确认后执行；其最终选择使用严格几何模式，不能使用 `--fast-selection`。
+评测 200 组使用相同流程，但输入换为 `eval_twin_selected.jsonl`，`--split eval`，并把输出写到 `twins_eval/rank${RANK}`；评测组完成后必须生成图片内嵌 PDF，逐组填写 `human_review.jsonl`，全部确认后才可发布。多目标的 1,500 训练组和 100 评测组必须在孪生第一批人工确认后执行。当前选择文件已经完成并分片：
+
+```text
+$GROUP_ROOT/inputs/train_multi_selected.jsonl       # 1,500 groups
+$GROUP_ROOT/inputs/eval_multi_selected.jsonl        # 100 groups
+$GROUP_ROOT/shards/multi_train_wave1/               # 4 x 375
+$GROUP_ROOT/shards/multi_eval/                     # 4 x 25
+```
+
+选择阶段使用快速 bbox 容量池后再运行 `scripts/recheck_multi_selection.py` 做 RLE 相邻复核；快速池本身不能进入规划或发布。四机入口将 `GROUP_KIND=multi`、`GROUP_SPLIT=train`、`GROUP_SHARD_ROOT=$GROUP_ROOT/shards/multi_train_wave1`、`GROUP_SELECTION=$GROUP_ROOT/inputs/train_multi_selected.jsonl`，目标设为 1,500；评测时改用 `multi_eval` 分片、`eval_multi_selected.jsonl` 和 `GROUP_SPLIT=eval`。多目标每组仍只做一次规划调用，随后按 `generation_order` 链式生图，组级生成/27B 审核/人工 ledger 全部通过后才可发布。
 
 生图阶段追加 `--editor-model ... --audit-model ... --publish`，并将 `--split eval` 指向
 `inputs/eval_candidates.jsonl` 生成 200 组评测；评测组必须全部通过人工 ledger 后才可发布。多目标第一批在孪生第一批训练侧确认后执行，命令把 `--kind twins` 改为 `--kind multi`，目标设为 1,500，并使用同一个 source-isolation reservation。每个组一条 planning call，生成和审核 checkpoint 可从同一独立根目录恢复；不要把失败组缩减成较少目标数。
