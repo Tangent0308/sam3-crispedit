@@ -10,7 +10,7 @@
 /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014
 ```
 
-写本文时的运行快照是首个 wave 正在规划阶段：每个 rank 已加载完 131 个规划模型 shard，首个 wave 的单个规划副本已完成约 810 个 mask 调用，首轮候选约 64 张源图；自动通过数尚未增加，因为该 wave 还未进入生图审核。实时状态以共享目录中的 `nodes/node*/progress.json`、`nodes/node*/waves/*/planning_*.log` 和 `logs/progress_monitor.log` 为准。该快照会随任务继续变化。
+2026-10-14 启动修复时的断点快照：首 wave 共 22,633 个 mask，21,706 个已有完整规划记录，486 个历史中断请求结果不确定，441 个尚未提交；8 个规划副本中 7 个已完成。正式生图任务已因运行时故障停止，自动通过数仍为 0；修复后使用同一目录和入口重启，完成副本直接复用，剩余副本只提交尚未处理的 441 个 mask。实时状态以共享目录中的 `nodes/node*/progress.json`、最新失败记录和 `logs/progress_monitor_tqdm.log` 为准，启动故障及修复见第 6 节。
 
 ## 2. 源数据
 
@@ -88,13 +88,16 @@
 
 速度证据分开记录：
 
-- CUDA 12.9 新编辑环境的一条 40-step smoke：模型加载 28.3 秒，生成与保存 18.1 秒，输出尺寸 1500×2265；代表性图见下方。
+- CUDA 12.9 新编辑环境的一条 40-step smoke：模型加载 28.3 秒，生成与保存 18.1 秒，输出尺寸 1500×2265。
 - 已完成的 6 editor + 2 audit 小批量重放为 60 条原始结果约 293 秒，约 737 原始例/小时；这不含规划、冷启动和人工验收，也不是 50k 交付承诺。
 - 当前四机首 wave 冷启动包含约 23–25 分钟规划模型加载/JIT；热态规划每约 54 个 mask 需要 67–75 秒。实际全量工期要以四机持续日志为准，不能用单条生成延迟线性替代规划、审核和类别补额成本。
 
 CUDA 12.9 冒烟测试的原始 source、mask、target 和完整元数据位于正式运行根目录 `verification/cuda129_fix/`。该单例只验证运行兼容性，不并入上面的 60 条质量统计。
 
 ## 6. 运行结果和查看方式
+
+2026-10-14 09:00 UTC 的正式任务因启动故障停止，最终自动通过数仍为 0。rank 0 的编辑器触发共享盘权重加载超时，rank 1/3 的审核子进程触发 OpenCV GUI 依赖错误，rank 2 收到 SIGTERM。已有规划检查点保留；修复通过仅保留 headless OpenCV、启动子进程检查、本机权重缓存和 1800 秒初始化超时解决，恢复方法见 [四机运行指南](FOURNODE_RUN_GUIDE.md)。这是运行时故障，不应记作目标图质量不通过。
+
 
 正式运行输出结构：
 
@@ -106,13 +109,14 @@ nodes/node*/validation.jsonl          本 rank 全部结果
 final/auto_pass.jsonl                 四机合并的最终样本
 final/summary.json                    数量、类型、唯一性和完整性检查
 logs/node*.log                        Arnold rank 日志
-logs/progress_monitor.log             后台进度监控快照
+logs/progress_monitor.log             后台进度 JSON 快照
+logs/progress_monitor_tqdm.log        每 300 秒更新的可读进度
 ```
 
 ```bash
 ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014
 python -m scripts.run_production_4node --root "$ROOT" status
-tail -F "$ROOT/logs/node0.log" "$ROOT/logs/progress_monitor.log"
+tail -F "$ROOT/logs/node0.log" "$ROOT/logs/progress_monitor_tqdm.log"
 ```
 
 只有 `final/summary.json` 显示 `status=complete`、总数 50,000、四类各 12,500，才可以称为 pipeline 自动完成。人工发布前还要抽查并记录指令准确性、目标图完整性、非目标保持、自然性和 add 锚点是否正确。

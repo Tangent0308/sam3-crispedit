@@ -16,15 +16,24 @@ for role in planner editor audit; do
   lockfile="$repo/requirements/production/$role.lock.txt"
   expected=$(sha256sum "$lockfile" | cut -d' ' -f1)
   if [[ -f "$runtime/ready.sha256" ]]; then
-    [[ "$(cat "$runtime/ready.sha256")" == "$expected" ]] || { echo "Runtime $role has different pins; use a new SA1B_RUNTIME_ROOT" >&2; exit 2; }
-    "$runtime/bin/python" "$repo/scripts/production/check_runtime.py" --role "$role"
-    continue
+    if [[ "$(cat "$runtime/ready.sha256")" == "$expected" ]]; then
+      "$runtime/bin/python" "$repo/scripts/production/check_runtime.py" --role "$role"
+      continue
+    fi
+    echo "Updating $role runtime to the deployed lock; existing dataset checkpoints are retained"
+    mv "$runtime/ready.sha256" "$runtime/ready.previous.sha256"
   fi
   if [[ ! -x "$runtime/bin/python" ]]; then "$UV_BIN" venv --python 3.12.13 "$runtime"; fi
   # Sync exactly the lock: remove stale CUDA 13 packages from failed installs.
   "$UV_BIN" pip sync --python "$runtime/bin/python" --link-mode=copy \
     --index-url https://bytedpypi.byted.org/simple/ --extra-index-url https://download.pytorch.org/whl/cu129 \
     --index-strategy unsafe-best-match "$lockfile"
+  # OpenCV distributions share cv2 files. Removing the GUI wheel can remove
+  # files owned by headless too, so reinstall headless after syncing the lock.
+  opencv_pin=$(sed -n '/^opencv-python-headless==/p' "$lockfile")
+  [[ -n "$opencv_pin" ]] || { echo "Missing headless OpenCV pin" >&2; exit 2; }
+  "$UV_BIN" pip install --python "$runtime/bin/python" --no-deps --reinstall \
+    --index-url https://bytedpypi.byted.org/simple/ "$opencv_pin"
   if [[ "$role" == editor ]]; then
     omni="$SA1B_RUNTIME_ROOT/vllm-omni"
     [[ -d "$omni/.git" ]] || git clone --filter=blob:none https://github.com/vllm-project/vllm-omni.git "$omni"

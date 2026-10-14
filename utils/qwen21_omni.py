@@ -42,9 +42,12 @@ class QwenImage21OmniPipeline:
     def __init__(self, model_id: str, *, tensor_parallel_size: int = 1, **kwargs: Any):
         from vllm_omni.entrypoints.omni import Omni
         from vllm_omni.model_extras import get_model_class_name
+        from sa1b_pipeline.model_cache import resolve_model
 
         omni_kwargs = {
-            "model": model_id,
+            "model": resolve_model(model_id),
+            "init_timeout": 1800,
+            "stage_init_timeout": 1800,
             "diffusion_load_format": "dummy",
             # Qwen-Image-2.1's decode CUDA graph is keyed by dynamic prompt and
             # image shapes.  Regional editing intentionally varies both across

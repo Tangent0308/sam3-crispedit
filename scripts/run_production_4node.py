@@ -272,6 +272,9 @@ def run_node(a):
         emit(status)
     except BaseException as exc:
         atomic_json(node/'failure.json', {'error': str(exc), 'time': time.time(), 'host': socket.gethostname()})
+        previous = json.loads((node/'progress.json').read_text()) if (node/'progress.json').exists() else {}
+        atomic_json(node/'progress.json', {**previous, 'status': 'failed', 'error': str(exc),
+                                          'updated_unix': time.time()})
         raise
     finally:
         lock.close()

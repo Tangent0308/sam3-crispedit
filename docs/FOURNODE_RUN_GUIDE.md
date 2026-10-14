@@ -43,7 +43,7 @@ Shared inputs and model configurations are accessible
 
 ## 安装和启动检查
 
-`setup_runtime.sh` 为 planner/editor/audit 分别创建独立环境，并使用 `requirements/production/*.lock.txt`。编辑器固定 vLLM-Omni revision；所有角色使用 CUDA 12.9 wheel。`check_runtime.py` 在环境标记 ready 前执行 GPU matmul、vLLM RMSNorm、CUDA runtime 和编辑器 Omni 导入检查，避免 CUDA 13 wheel 混入 CUDA 12.9 任务。
+`setup_runtime.sh` 为 planner/editor/audit 分别创建独立环境，并使用 `requirements/production/*.lock.txt`。编辑器固定 vLLM-Omni revision；所有角色使用 CUDA 12.9 wheel。`check_runtime.py` 在环境标记 ready 前执行无界面 OpenCV 检查、spawn 子进程导入、GPU matmul、vLLM RMSNorm、CUDA runtime 和编辑器 Omni 导入检查，避免 CUDA 13 wheel 混入 CUDA 12.9 任务。
 
 ## 查看进度
 
@@ -51,10 +51,10 @@ Shared inputs and model configurations are accessible
 ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014
 python -m scripts.run_production_4node --root "$ROOT" status
 for n in 0 1 2 3; do tail -F "$ROOT/logs/node$n.log"; done
-tail -F "$ROOT/logs/progress_monitor.log"
+tail -F "$ROOT/logs/progress_monitor_tqdm.log"
 ```
 
-`progress.json` 的阶段依次为 `source_materialization`、`planning`、`generation_and_audit`、`complete`。planning 日志会记录模型 shard、JIT、每批 completed/accepted 和 batch_seconds；生成/审核阶段会记录队列、通过数和类别缺额。
+`progress.json` 的阶段依次为 `source_materialization`、`planning`、`model_cache`、`generation_and_audit`、`complete`。planning 日志会记录模型 shard、JIT、每批 completed/accepted 和 batch_seconds；生成/审核阶段会记录队列、通过数和类别缺额。
 
 ## 恢复规则
 
@@ -62,8 +62,20 @@ tail -F "$ROOT/logs/progress_monitor.log"
 2. 使用完全相同的 `SA1B_RUN_ROOT`、代码包、模型和四机拓扑重新提交入口；共享 rank 锁会阻止重复 owner。
 3. 已完成 wave 会跳过；已完成 planning checkpoint 会按输入 mask 数和 accepted 数校验后复用；生成 fingerprint 匹配的结果和已落盘审核结果直接恢复。
 4. 已提交但结果丢失的 planner request 会记录为 `interrupted_unknown`，不重复调用同一 mask，也不伪造拒绝结果。
-5. 配置、输入清单、代码 hash 或模型路径改变时不续跑，应创建新的运行根目录。
+5. 数据协议、输入清单、模型或生成参数改变时不混入旧运行。仅修复启动依赖、权重缓存和超时，可以在所有 rank 停止并持有共享锁时使用 `scripts/production/repair_deployment.py` 发布补丁：备份旧部署、逐项验证旧代码及 planner 快照，只更新允许的运行时文件及 `code_hashes`，保留原根目录和全部检查点。禁止手工删除 hash 检查。
 6. 最后一个 rank 结束后自动尝试合并；必要时在代码环境执行 `finalize`，并检查 `final/summary.json`。
+
+## 2026-10-14 启动修复与原地恢复
+
+本次任务的 root 始终为 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014`，直接用上方原入口重新提交四机任务，保留 `SA1B_SKIP_SETUP=0`。无需重新 prepare，也无需换目录。
+
+- 审核 lock 曾同时安装 `opencv-python` 与 `opencv-python-headless`，二者覆盖同一 `cv2` 目录，子进程报 `libxcb.so.1`。修复为只保留 headless；旧环境 lock 变化时自动同步，并重新安装 headless 修复共享文件。
+- 编辑器从共享盘并发读权重，触发 Omni 默认 600 秒启动超时。`model_cache.py` 在启动 GPU worker 前将编辑、审核权重各复制一份到节点本地盘，按文件 SHA-256 校验、断点复用；约需 83 GiB，建议预留 100 GiB。Omni 初始化及 stage 超时均设为 1800 秒。缓存阶段日志有字节进度，复制不会占用模型初始化的超时额度。
+- 数据记录和生成 fingerprint 继续使用原模型路径，只有模型加载使用本地副本；步数、seed、指令和审核门槛保持原设置。
+- 已完成的 planner 副本直接复用；未完成副本只处理未提交 mask。已提交但未落盘结果的 mask 标记 `interrupted_unknown`，不会重复调用；后续候选补足最终配额。已生成图按 fingerprint 复用，已审核结果从共享 `results/` 重建计数及本地队列。
+- 失败时同步写入 `progress.json.status=failed`，避免界面继续显示 running。后台监控每 300 秒写日志；聊天窗口不具备后台日志自动推送能力。
+
+验证记录位于运行根目录 `verification/startup_repair/`：229 项自动测试通过，实际 GPU 运行 4 条（四类各一条），全部完成生成和审核，其中 3 条自动通过、1 条由质量审核拒绝；4 张生成图的恢复验证未再次调用生图，图片哈希不变。编辑器加载 27.4 秒、4 条生成与保存 84.8 秒；审核权重加载 12.7 秒（不含初始化和预热）。这些结果用于验证启动与恢复，不计入正式 50k 配额，也不能用于估计长期通过率。
 
 ## 故障处理
 
