@@ -92,3 +92,41 @@ wc -l "$ROOT/final/auto_pass.jsonl"
 ```
 
 完成必须同时满足总数 50,000、四类各 12,500、case ID 和 source mask 唯一、所有图片字段可解析、每条关键审核字段为真。自动完成不等于人工质量验收；训练发布前按 [PIPELINE.md](PIPELINE.md) 的质量项抽查和记录人工结论。
+
+## 分组数据的独立运行
+
+孪生/多目标任务不能使用 50k 的 `SA1B_RUN_ROOT`、部署包或队列数据库。先创建独立目录并预留评测源图：
+
+```bash
+GROUP_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014
+SOURCE_ROOT=/mnt/hdfs/sg_byte_ttlive_strategy_llm/user/haobo.yuan/datasets
+python scripts/prepare_group_inputs.py \
+  --frozen-root /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014 \
+  --benchmark-exclusion /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014/inputs/benchmark_exclusion.jsonl \
+  --source-root "$SOURCE_ROOT" --output-root "$GROUP_ROOT" \
+  --eval-count 200 --train-limit 8000
+```
+
+如果历史训练清单已知，应显式加入评测排除注册表（每个清单一个参数），例如：
+
+```bash
+  --skip-discovery \
+  --existing-manifest /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTokEdit_Cleaned_20261009/manifest.jsonl \
+  --existing-manifest /mnt/bn/strategy-mllm-train/user/tanyue/datasets/SAMTok_Derived_Edit_Labeling/combined/manifest.jsonl
+```
+
+缺失的训练源会以 `--materialize-workers` 路并发读取；默认 8 路。评测预留只在新根目录首次创建，恢复时复用已有 `inputs/eval_reservation.json`。
+
+孪生第一批使用四类配额各约 1,250 组；下面命令先只做规划，确认规划质量后再启动编辑器和 27B 审核：
+
+```bash
+python scripts/run_group_pipeline.py --kind twins \
+  --manifest "$GROUP_ROOT/inputs/train_candidates.jsonl" \
+  --output-root "$GROUP_ROOT/twins_train_wave1" --target 5000 --split train \
+  --reservation "$GROUP_ROOT/inputs/eval_reservation.json" \
+  --planner-model /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8 \
+  --planner-backend vllm --planner-tp 4 --planner-batch-size 8 --plan-only
+```
+
+生图阶段追加 `--editor-model ... --audit-model ... --publish`，并将 `--split eval` 指向
+`inputs/eval_candidates.jsonl` 生成 200 组评测；评测组必须全部通过人工 ledger 后才可发布。多目标第一批在孪生第一批训练侧确认后执行，命令把 `--kind twins` 改为 `--kind multi`，目标设为 1,500，并使用同一个 source-isolation reservation。每个组一条 planning call，生成和审核 checkpoint 可从同一独立根目录恢复；不要把失败组缩减成较少目标数。

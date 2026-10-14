@@ -69,10 +69,19 @@ def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometr
     if operation == 'add' and not re.match(r'^(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|[1-9][0-9]*)\s+', payload, flags=re.I):
         raise ValueError('add payload must introduce a new physical item')
     part = _clean(raw.get('target_part'))
+    # Some planners use ``target_part`` for an add host's attachment site
+    # even though protocol 1.0 stores that information under placement.site.
+    # Promote this equivalent representation before applying executability
+    # gates; the add mask remains the host anchor and no extra region is
+    # invented. A genuine add subpart mask is therefore never required.
+    placement_raw = raw.get('placement')
+    if operation == 'add' and part:
+        placement_raw = {**(placement_raw if isinstance(placement_raw, dict) else {}), 'site': part}
+        part = ''
     mode = raw.get('remove_mode') or ('part' if operation == 'remove' and part else 'whole')
     spec = make_spec(operation, ref, scope, payload, target_part=part, remove_mode=mode,
                      attribute_kind=attribute_kind, attributes=attributes,
-                     placement=raw.get('placement'), qualifier=raw.get('qualifier', ''))
+                     placement=placement_raw, qualifier=raw.get('qualifier', ''))
     execution = obj.get('metadata', {}).get('execution_mask_path')
     # Geometry is supplied by a trusted preparation step, never a path invented
     # by the planning VLM. A host selector alone cannot resolve a subpart.
