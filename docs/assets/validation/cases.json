@@ -1,0 +1,82 @@
+[
+  {
+    "operation": "add",
+    "case_id": "sa1b-sa_3365528-mask-5feceb66ffc8",
+    "unit_id": "U1",
+    "instruction": "Add a small amber warning beacon on the top of the vertical mast of the drilling rig with the tall vertical mast on the right.",
+    "figure": "assets/validation/add_sa_3365528.jpg",
+    "source_image": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/samtok_edit_benchmark_v2/sa1b_source_selection/candidates/sa_3365528/image.jpg",
+    "target_image": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/full30_concise2_20261013/generation/qwen_0/sa1b-sa_3365528-mask-5feceb66ffc8--U1.png",
+    "source_mask": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/full30_concise2_20261013/planner_0/think_256/views/job-0009/ceb8c2eb64a85c6a67e44b24e9124346c19ad5b47c41c276a5e99eb45cea8571/source_mask.png",
+    "mask_size": [
+      2256,
+      1500
+    ],
+    "crop_box": [
+      1477,
+      66,
+      2155,
+      1309
+    ]
+  },
+  {
+    "operation": "replace",
+    "case_id": "sa1b-sa_10771932-mask-6b86b273ff34",
+    "unit_id": "U1",
+    "instruction": "Replace the rear wheel of the left bicycle with a solid black carbon disc wheel.",
+    "figure": "assets/validation/replace_sa_10771932.jpg",
+    "source_image": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/samtok_edit_benchmark_v2/sa1b_source_selection/candidates/sa_10771932/image.jpg",
+    "target_image": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/full30_concise2_20261013/generation/qwen_1/sa1b-sa_10771932-mask-6b86b273ff34--U1.png",
+    "source_mask": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/full30_concise2_20261013/planner_1/think_256/views/job-0016/a90f744adb482d63301470b7fd515507682870ab124a5de9a86c83e875e304e9/source_mask.png",
+    "mask_size": [
+      2250,
+      1500
+    ],
+    "crop_box": [
+      155,
+      798,
+      563,
+      1206
+    ]
+  },
+  {
+    "operation": "remove",
+    "case_id": "sa1b-sa_10803169-mask-5feceb66ffc8",
+    "unit_id": "U1",
+    "instruction": "Remove the pink and white Formula 1 race car on the track.",
+    "figure": "assets/validation/remove_sa_10803169.jpg",
+    "source_image": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/samtok_edit_benchmark_v2/sa1b_source_selection/candidates/sa_10803169/image.jpg",
+    "target_image": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/full30_concise2_20261013/generation/qwen_2/sa1b-sa_10803169-mask-5feceb66ffc8--U1.png",
+    "source_mask": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/full30_concise2_20261013/planner_1/think_256/views/job-0006/1f350c20bb95a149a6fd4ca88a9444c096b09979a78d8a4b08b84e8a535ea212/source_mask.png",
+    "mask_size": [
+      2250,
+      1500
+    ],
+    "crop_box": [
+      1006,
+      486,
+      1916,
+      1096
+    ]
+  },
+  {
+    "operation": "attribute",
+    "case_id": "sa1b-sa_5563395-mask-5feceb66ffc8",
+    "unit_id": "U1",
+    "instruction": "Change the color of the white plastic handle on top of the grill lid to matte black.",
+    "figure": "assets/validation/attribute_sa_5563395.jpg",
+    "source_image": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/samtok_edit_benchmark_v2/sa1b_source_selection/candidates/sa_5563395/image.jpg",
+    "target_image": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/full30_concise2_20261013/generation/qwen_0/sa1b-sa_5563395-mask-5feceb66ffc8--U1.png",
+    "source_mask": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/full30_concise2_20261013/planner_0/think_256/views/job-0012/29089fd774a03728a1128e75c82fd78141a864a7cf76fe5400b0c0ad6ad842e8/source_mask.png",
+    "mask_size": [
+      2250,
+      1500
+    ],
+    "crop_box": [
+      743,
+      145,
+      1331,
+      438
+    ]
+  }
+]
