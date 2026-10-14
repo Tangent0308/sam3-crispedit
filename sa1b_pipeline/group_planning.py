@@ -165,7 +165,7 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
     if any(u.instruction_noref != no_ref for u in units):
         raise ValueError("shared spec did not render one no-ref instruction")
     member_rows = []
-    for u in units:
+    for u, geom in zip(units, geometry):
         member_rows.append({"unit_id": u.unit_id, "object_id": u.object_id, "ref": u.ref_phrase,
                             "instruction": u.instruction_ref, "instruction_noref": no_ref,
                             "instruction_spec": u.instruction_spec, "mask": u.mask_path,

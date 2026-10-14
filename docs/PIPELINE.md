@@ -142,7 +142,7 @@ tail -F "$ROOT/logs/node0.log" "$ROOT/logs/progress_monitor_tqdm.log"
 ### 7.2 代码路径和数据流
 
 1. `scripts/prepare_group_inputs.py` 加载 benchmark exclusion、50k reservoir 和源注册表，调用 `sa1b_pipeline.source_isolation` 先预留 eval，再调用 `production_sources.materialize` 将 image/dense record 物化到新根目录。正式运行应对每个已有训练清单重复传入 `--existing-manifest PATH`；`--skip-discovery` 只适合已显式列全清单的运行，不能据此宣称与所有历史训练集隔离。
-2. `sa1b_pipeline.group_selection` 对同类孪生候选执行类别、面积比、mask 间隔、宿主关系和每源最多两组约束；多目标候选先找 support gap 不超过较小目标短边 10% 的相邻对，再按 2/3/4/5 目标配额补充不冲突目标。这里不做语义 fallback。
+2. `sa1b_pipeline.group_selection` 对同类孪生候选执行类别、面积比、mask 间隔、宿主关系和每源最多两组约束，并按 `--twin-three-member-fraction` 预留约 15% 的三实例组；对 replace/remove 会提前过滤别名列表和文字/阴影等需要额外执行区域的候选。多目标默认使用 `strict_geometry=True`，先用 bbox 下界缩小候选，再在局部联合 bbox 上计算精确 mask gap 和冲突；按 2/3/4/5 目标配额补充不冲突目标。`--fast-selection` 只用于容量估计，使用 bbox 近邻并明确标记 `geometry_exact=false`，不能进入最终数据。这里不做语义 fallback。
 3. `sa1b_pipeline.group_planning` 为每组生成一张全图多色标注和一张成员 crop contact sheet；规划模型每组一次请求返回共享结构化 spec（孪生）或每目标 spec（多目标）和 refs。`scripts/run_group_pipeline.py` 会把未完成组按 `--planner-batch-size` 批量提交 vLLM，同时逐组落盘 checkpoint，避免批处理牺牲恢复能力。`build_twin_group`/`build_multi_group` 通过既有 `instructions.build_unit` 渲染 protocol 1.0 文本，拒绝 operation、ref、payload 或 no-ref 不一致。
 4. `sa1b_pipeline.group_generation` 复用既有 Qwen-Image-2.1 regional crop、区域权重和 paste-back。孪生成员各自在同一 source/seed 上独立生成；多目标按 `generation_order` 链式生成。每一步写出 input/output、support mask、generation context 和确定性检查。
 5. `sa1b_pipeline.group_audit` 接入 27B，对成员完成度、非目标保持、唯一指代、可比性、相邻串扰和整图自然性做组级 all-or-nothing 审核。`scripts/review_group_data.py` 生成图片内嵌 PDF 和人工 ledger；人工复核未完成时 `release.json.published` 必须为 false。
@@ -151,7 +151,10 @@ tail -F "$ROOT/logs/node0.log" "$ROOT/logs/progress_monitor_tqdm.log"
 
 孪生最终文件为 `final/twins_train.jsonl`、`final/twins_eval.jsonl`；多目标最终文件为 `final/multi_train.jsonl`、`final/multi_eval.jsonl`。每条记录都包含 `source_provenance`、原图路径、结构化 spec、原始 mask/bbox/真实 interior point、support mask、目标图、seed、generation context、deterministic/semantic audit 和组级 checks。多目标额外包含每一步的 `step_input_image`、`step_output_image`、`generation_order`、`adjacent_pairs` 与最终 `joint_target`。
 
-当前代码和测试已完成，首批源图物化与评测预留正在独立目录中执行；规划、生图、27B 审核和人工 PDF 复核完成后才会写入 `final/`。规划拒绝、生成失败、组级审核失败都保留在 checkpoint 中，不能把单个成员降级为普通单目标样本，也不能用自动审核结果代替人工签收。
+当前独立输入根目录已经完成源隔离和物化：训练候选 15,994 张、评测候选 1,199 张，评测 reservation 1,200 条（含 benchmark、50k 冻结目录和两个历史训练清单的 ID/哈希排除）。孪生选择文件已经按四类各 1,250 组落盘：`inputs/train_twin_selected.jsonl` 5,000 行、`inputs/eval_twin_selected.jsonl` 200 行；训练侧的成员数为 4,248 个双成员组和 752 个三成员组，scope 为 object 3,000、不同宿主部件 1,500、同宿主部件 500，最小成员面积分布为 30% / 40% / 30%，并通过每源最多两组及 train/eval 不重叠复核。规划、生图、27B 审核和人工 PDF 复核完成后才会写入 `final/`。规划拒绝、生成失败、组级审核失败都保留在 checkpoint 中，不能把单个成员降级为普通单目标样本，也不能用自动审核结果代替人工签收。
+
+多目标容量审计的 bbox 快速模式在 1,199 个评测候选上可以构造 100 组，并得到 2/3/4/5 目标配额 20/30/25/25；随后精确 mask 复核只有 53/100 通过，因此快速模式只用于估算候选供给，最终选择必须使用严格几何模式。审计记录位于：
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014/verification/multi_selection_capacity_fast.json`。
 
 ### 7.4 规划/生图小批量验证（2026-10-14）
 

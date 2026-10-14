@@ -20,16 +20,27 @@ TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. The sourc
 MULTI_GROUP_PROMPT = '''You are auditing a joint multi-target edit group. The original scene, each chain step, and the final result are provided. Check that each original ref identifies one target, every assigned operation is completed in its step and remains correct later, adjacent targets do not bleed into each other, and the final image is natural. Return JSON only: {"decision":"pass|fail","unique_refs":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
 
-def _crop_pair(path_a: str, path_b: str, out: Path) -> str:
-    a = Image.open(path_a).convert("RGB")
-    b = Image.open(path_b).convert("RGB")
-    size = (min(768, max(a.width, b.width)), min(768, max(a.height, b.height)))
-    a.thumbnail(size, Image.Resampling.LANCZOS); b.thumbnail(size, Image.Resampling.LANCZOS)
-    panel = Image.new("RGB", (max(a.width, b.width) * 2, max(a.height, b.height) + 32), "white")
-    ImageDraw.Draw(panel).text((4, 4), "MEMBER A", fill="black")
-    ImageDraw.Draw(panel).text((panel.width // 2 + 4, 4), "MEMBER B", fill="black")
-    panel.paste(a, ((panel.width // 2 - a.width) // 2, 32))
-    panel.paste(b, (panel.width // 2 + (panel.width // 2 - b.width) // 2, 32))
+def _member_comparison(paths: list[str], out: Path) -> str:
+    """Pack every twin member panel into one audit image.
+
+    The 27B adapter accepts at most three image inputs. Passing the source and
+    one tiled comparison therefore keeps all two/three members visible instead
+    of silently dropping the third member from a triple group.
+    """
+    panels = [Image.open(path).convert("RGB") for path in paths]
+    tile_w, tile_h = 768, 520
+    tiles = []
+    for index, panel in enumerate(panels, 1):
+        panel.thumbnail((tile_w, tile_h - 28), Image.Resampling.LANCZOS)
+        tile = Image.new("RGB", (tile_w, tile_h), "white")
+        ImageDraw.Draw(tile).text((8, 6), f"MEMBER {index}", fill="black")
+        tile.paste(panel, ((tile_w - panel.width) // 2, 28 + (tile_h - 28 - panel.height) // 2))
+        tiles.append(tile)
+    columns = min(2, max(1, len(tiles)))
+    rows = (len(tiles) + columns - 1) // columns
+    panel = Image.new("RGB", (columns * tile_w, rows * tile_h), (235, 235, 235))
+    for index, tile in enumerate(tiles):
+        panel.paste(tile, ((index % columns) * tile_w, (index // columns) * tile_h))
     out.parent.mkdir(parents=True, exist_ok=True)
     panel.save(out, quality=94, subsampling=0)
     return str(out)
@@ -46,20 +57,21 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
                    "instruction": member["instruction"], "instruction_spec": member["instruction_spec"],
                    "support_mask": member["support_mask"]}
             rows.append(_target_panel(row, panel_dir))
-        comparison = _crop_pair(group["members"][0]["edited_image"], group["members"][1]["edited_image"],
-                                panel_dir / f"{group['twin_id']}_comparison.jpg")
+        comparison = _member_comparison([m["edited_image"] for m in group["members"]],
+                                        panel_dir / f"{group['twin_id']}_comparison.jpg")
         refs.append(group)
-        jobs.append({"job_id": group["twin_id"], "images": [group["source_image"], *rows, comparison][:3],
+        jobs.append({"job_id": group["twin_id"], "images": [group["source_image"], comparison],
                      "prompt": TWIN_GROUP_PROMPT})
-    # The auditor accepts at most three images per request. The source plus two
-    # target panels is sufficient; the comparison is retained in the on-disk
-    # audit bundle and used in a second call when there are two members.
+    # The source plus one tiled comparison stays within the three-image limit
+    # while showing every member, including optional three-member groups.
     results = []
     for group, job in zip(refs, jobs):
         result = model.call_batch([job])[0]
         audit = result["semantic_audit"]
         group.setdefault("group_checks", {})["semantic_audit"] = audit
         group["group_checks"]["semantic_audit_pass"] = audit.get("decision") == "pass"
+        for member in group.get("members", []):
+            member["semantic_audit"] = audit
         results.append(group)
     return results
 
@@ -69,15 +81,20 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
     results = []
     for group in groups:
         images = [group["source_image"]]
+        comparison_paths = []
         for member in group["units"]:
             if member.get("step_output_image"):
-                images.append(member["step_output_image"])
+                comparison_paths.append(member["step_output_image"])
         if group.get("joint_target") and group["joint_target"] not in images:
-            images.append(group["joint_target"])
+            comparison_paths.append(group["joint_target"])
+        if comparison_paths:
+            images.append(_member_comparison(comparison_paths, panel_dir / f"{group['multi_id']}_comparison.jpg"))
         result = model.call_batch([{"job_id": group["multi_id"], "images": images[:3],
                                     "prompt": MULTI_GROUP_PROMPT}])[0]
         audit = result["semantic_audit"]
         group["joint_audit"]["semantic_audit"] = audit
         group["joint_audit"]["semantic_audit_pass"] = audit.get("decision") == "pass"
+        for member in group.get("units", []):
+            member["semantic_audit"] = audit
         results.append(group)
     return results
