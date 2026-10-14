@@ -120,3 +120,50 @@ tail -F "$ROOT/logs/node0.log" "$ROOT/logs/progress_monitor_tqdm.log"
 ```
 
 只有 `final/summary.json` 显示 `status=complete`、总数 50,000、四类各 12,500，才可以称为 pipeline 自动完成。人工发布前还要抽查并记录指令准确性、目标图完整性、非目标保持、自然性和 add 锚点是否正确。
+
+## 7. 分组数据扩展
+
+分组数据是 50k 单目标管线的独立补充，不修改或复用 50k 的运行检查点。需求分为两类：
+
+| 数据 | 训练规模 | 第一批 | 评测 | 组内约束 |
+| --- | ---: | ---: | ---: | --- |
+| 反事实孪生 | 15,000 组 | 5,000 组 | 200 组 | 同源图 2–3 个同类实例，共用一条 no-ref 指令和 payload，只替换 ref/mask |
+| 紧邻多目标 | 5,000 组 | 1,500 组 | 100 组 | 每组 2–5 个原图目标，至少一对相邻，按 source→step 链式生成 |
+
+评测源图必须先于训练源图预留，并同时排除 benchmark 的 200 张图、50k 冻结 reservoir 和已有训练清单中的 source ID 与原图字节哈希。准备脚本将证据写入独立根目录的 `inputs/eval_reservation.json` 和 `inputs/manifest.json`；训练导出前再次执行 `assert_no_eval_leakage`。50k 根目录
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014` 只读，不能作为新任务的输出目录。
+
+### 7.1 组级协议
+
+组内保留现有 instruction protocol 1.0 和 mask semantics 1.1。孪生组共用 operation、scope、payload、attributes、placement 和 no-ref 文本；每个成员仅有自己的 ref、源 mask、support mask、目标图和审核结果。ref 必须在原图中唯一地区分组内实例，不能写 mask、颜色标注或 crop。add 的 source mask 是直接承载物/附着区域，只有直接附着不自然时才使用近邻 reference anchor；anchor 不是新增物体的输出 mask。
+
+多目标组的每个 instruction 都基于原图书写；不引用前一步新生成的物体。2–4 个目标的 operation 不重复，5 个目标必须包含四类并只重复一类。默认顺序为 `remove → replace → attribute → add`，但实际使用规划模型返回的合法顺序。每个步骤使用同一个 seed，在上一步输出图上调用 Qwen-Image-2.1，再使用原图 mask 几何和 bounded support 贴回。
+
+### 7.2 代码路径和数据流
+
+1. `scripts/prepare_group_inputs.py` 加载 benchmark exclusion、50k reservoir 和源注册表，调用 `sa1b_pipeline.source_isolation` 先预留 eval，再调用 `production_sources.materialize` 将 image/dense record 物化到新根目录。正式运行应对每个已有训练清单重复传入 `--existing-manifest PATH`；`--skip-discovery` 只适合已显式列全清单的运行，不能据此宣称与所有历史训练集隔离。
+2. `sa1b_pipeline.group_selection` 对同类孪生候选执行类别、面积比、mask 间隔、宿主关系和每源最多两组约束；多目标候选先找 support gap 不超过较小目标短边 10% 的相邻对，再按 2/3/4/5 目标配额补充不冲突目标。这里不做语义 fallback。
+3. `sa1b_pipeline.group_planning` 为每组生成一张全图多色标注和一张成员 crop contact sheet；规划模型每组一次请求返回共享结构化 spec（孪生）或每目标 spec（多目标）和 refs。`scripts/run_group_pipeline.py` 会把未完成组按 `--planner-batch-size` 批量提交 vLLM，同时逐组落盘 checkpoint，避免批处理牺牲恢复能力。`build_twin_group`/`build_multi_group` 通过既有 `instructions.build_unit` 渲染 protocol 1.0 文本，拒绝 operation、ref、payload 或 no-ref 不一致。
+4. `sa1b_pipeline.group_generation` 复用既有 Qwen-Image-2.1 regional crop、区域权重和 paste-back。孪生成员各自在同一 source/seed 上独立生成；多目标按 `generation_order` 链式生成。每一步写出 input/output、support mask、generation context 和确定性检查。
+5. `sa1b_pipeline.group_audit` 接入 27B，对成员完成度、非目标保持、唯一指代、可比性、相邻串扰和整图自然性做组级 all-or-nothing 审核。`scripts/review_group_data.py` 生成图片内嵌 PDF 和人工 ledger；人工复核未完成时 `release.json.published` 必须为 false。
+
+### 7.3 交付字段和状态
+
+孪生最终文件为 `final/twins_train.jsonl`、`final/twins_eval.jsonl`；多目标最终文件为 `final/multi_train.jsonl`、`final/multi_eval.jsonl`。每条记录都包含 `source_provenance`、原图路径、结构化 spec、原始 mask/bbox/真实 interior point、support mask、目标图、seed、generation context、deterministic/semantic audit 和组级 checks。多目标额外包含每一步的 `step_input_image`、`step_output_image`、`generation_order`、`adjacent_pairs` 与最终 `joint_target`。
+
+当前代码和测试已完成，首批源图物化与评测预留正在独立目录中执行；规划、生图、27B 审核和人工 PDF 复核完成后才会写入 `final/`。规划拒绝、生成失败、组级审核失败都保留在 checkpoint 中，不能把单个成员降级为普通单目标样本，也不能用自动审核结果代替人工签收。
+
+### 7.4 规划/生图小批量验证（2026-10-14）
+
+在独立目录 `sa1b_samtok_group_twins_pilot_20261014` 对 8 个孪生候选做了完整的选择与规划验证。规划模型使用 4 卡 TP，批量提交 7 个未完成组；冷启动模型权重加载约 205 秒、引擎初始化约 30 秒，热态 7 组请求约 102 秒（约 4.1 组/分钟，约 247 规划请求/小时）。8 组中 3 组通过结构化计划，5 组拒绝：2 组缺少可执行的子区域、1 组候选是视觉文字/局部、1 组模型返回不可行、1 组把阴影当作 add 锚点。后续已将阴影、反射、文字和小型穿戴部件加入 add 候选预过滤，并让批处理中单组失败只落盘 `rejected/*.json`，不丢弃同批有效结果。
+
+3 组通过规划的 6 个成员均完成 Qwen-Image-2.1 40-step 生成。编辑器单卡冷启动约 53 秒，热态每张约 15.7 秒（约 3.8 张/分钟，约 229 张/小时）；该批实际生成 6 张目标图约 94 秒，不包含加载。人工逐图复核结论为：2 个 remove twin 组的指代和目标完成度基本通过；1 个 attribute twin 组指令与 mask 正确，但两根横梁颜色变化相互串扰，组级质量失败。当前没有伪造 27B 语义审核，也没有将该训练 pilot 写入 `final/`。
+
+可视化与人工记录：
+
+- 规划/生成清单：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_twins_pilot_20261014/review_manifest.jsonl`
+- 图片内嵌人工复核 PDF：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_twins_pilot_20261014/human_review/human_review.pdf`
+- 已填写人工 ledger：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_twins_pilot_20261014/human_review/human_review.jsonl`
+- 生成图目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_twins_pilot_20261014/generated/<twin_id>/member_U*/edited.png`
+
+这些数字与单目标正式管线的吞吐需分阶段比较。此前四机正式管线热态自动通过约 4,400–4,800 个单目标样本/小时；旧单机小批量约 745 个原始样本/小时，四机约为 5.9–6.4 倍。孪生规划包含三张视觉输入的 MLLM 请求，单组还要生成两个成员，因此规划吞吐不能直接等同于单目标生图吞吐；批量请求和常驻模型进程是主要加速点。

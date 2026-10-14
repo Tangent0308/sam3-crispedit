@@ -28,3 +28,16 @@ python -m scripts.run_production_4node --root /path/to/run status
 ```
 
 正式四机入口需要 Arnold 注入 `ARNOLD_WORKER_NUM=4`、`ARNOLD_WORKER_GPU=8`、`ARNOLD_ID=0..3`，并挂载 `/mnt/bn/strategy-mllm-train`。入口会校验冻结代码包、共享源记录缓存和 CUDA 12.9 环境；不需要额外挂载原始 SG2 HDFS。完整命令、恢复和日志位置见四机指南。
+
+## 分组数据（新增）
+
+反事实孪生和紧邻多目标数据使用独立运行根目录，入口为
+`scripts/prepare_group_inputs.py` 和 `scripts/run_group_pipeline.py`。准备阶段先写入
+`eval_reservation.json`，再物化训练/评测候选；训练脚本会拒绝评测源图的 source ID
+或原图字节哈希。`sa1b_pipeline/group_selection.py` 只做几何和配额预选，
+`group_planning.py` 对每组只调用一次规划模型，`group_generation.py` 负责同 seed
+孪生生成或 source→step 链式生成，`group_audit.py` 接入 27B 语义审核。
+
+组级结果必须通过确定性检查、27B 审核和人工复核后才能发布；`--plan-only` 只产出
+规划检查点，不会伪造目标图或人工结论。完整协议、字段和交付批次见
+`docs/PIPELINE.md` 的“分组数据扩展”章节。
