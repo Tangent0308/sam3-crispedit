@@ -10,7 +10,7 @@
 /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014
 ```
 
-写本文时的运行快照是首个 wave 正在规划阶段：每个 rank 已加载完 131 个规划模型 shard，完成约 216 个 mask 规划调用，首轮候选约 64 张源图；自动通过数尚未增加，因为该 wave 还未进入生图审核。实时状态以共享目录中的 `nodes/node*/progress.json`、`nodes/node*/waves/*/planning_*.log` 和 `logs/progress_monitor.log` 为准。该快照会随任务继续变化。
+写本文时的运行快照是首个 wave 正在规划阶段：每个 rank 已加载完 131 个规划模型 shard，首个 wave 的单个规划副本已完成约 810 个 mask 调用，首轮候选约 64 张源图；自动通过数尚未增加，因为该 wave 还未进入生图审核。实时状态以共享目录中的 `nodes/node*/progress.json`、`nodes/node*/waves/*/planning_*.log` 和 `logs/progress_monitor.log` 为准。该快照会随任务继续变化。
 
 ## 2. 源数据
 
