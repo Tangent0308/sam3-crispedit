@@ -10,7 +10,7 @@
 /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014
 ```
 
-2026-10-14 启动修复时的断点快照：首 wave 共 22,633 个 mask，21,706 个已有完整规划记录，486 个历史中断请求结果不确定，441 个尚未提交；8 个规划副本中 7 个已完成。正式生图任务已因运行时故障停止，自动通过数仍为 0；修复后使用同一目录和入口重启，完成副本直接复用，剩余副本只提交尚未处理的 441 个 mask。实时状态以共享目录中的 `nodes/node*/progress.json`、最新失败记录和 `logs/progress_monitor_tqdm.log` 为准，启动故障及修复见第 6 节。
+2026-10-14 22:47 UTC 的可复核快照：规划 22,497/22,497（接受 20,119），四个 rank 正在 `generation_and_audit`，自动通过 32,007/50,000（64.01%）。任务使用原目录断点恢复，已完成结果复用，`final/` 尚未发布。实时状态以共享目录中的 `nodes/node*/progress.json`、最新失败记录和 `logs/progress_monitor_tqdm.log` 为准，启动故障及恢复方法见第 6 节。
 
 ## 2. 源数据
 
@@ -96,7 +96,7 @@ CUDA 12.9 冒烟测试的原始 source、mask、target 和完整元数据位于�
 
 ## 6. 运行结果和查看方式
 
-2026-10-14 09:00 UTC 的正式任务因启动故障停止，最终自动通过数仍为 0。rank 0 的编辑器触发共享盘权重加载超时，rank 1/3 的审核子进程触发 OpenCV GUI 依赖错误，rank 2 收到 SIGTERM。已有规划检查点保留；修复通过仅保留 headless OpenCV、启动子进程检查、本机权重缓存和 1800 秒初始化超时解决，恢复方法见 [四机运行指南](FOURNODE_RUN_GUIDE.md)。这是运行时故障，不应记作目标图质量不通过。
+正式任务曾因共享盘权重加载超时、OpenCV GUI 依赖和子进程退出而中断；修复后使用同一目录和检查点恢复，修复包括仅保留 headless OpenCV、本机权重缓存和 1800 秒初始化超时。最新快照为 32,007/50,000 自动通过，任务仍在运行，不能把当前中间状态当作最终交付。
 
 
 正式运行输出结构：
@@ -156,11 +156,24 @@ tail -F "$ROOT/logs/node0.log" "$ROOT/logs/progress_monitor_tqdm.log"
 多目标容量审计的 bbox 快速模式在 1,199 个评测候选上可以构造 100 组，并得到 2/3/4/5 目标配额 20/30/25/25；随后精确 mask 复核只有 53/100 通过，因此快速模式只用于估算候选供给，最终选择必须使用严格几何模式。审计记录位于：
 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014/verification/multi_selection_capacity_fast.json`。
 
+当前已完成的最终选择使用“快速容量池 + RLE 相邻复核”两阶段流程：快速阶段只扩大候选池，不进入数据发布；`scripts/recheck_multi_selection.py` 对预选 pair 的 RLE mask 在局部联合 crop 上复核相邻性，并按目标数配额重新抽取。结果为：训练 1,500 组（2/3/4/5 目标分别 300/450/375/375），评测 100 组（20/30/25/25）；训练复核 3,668 组、通过 1,500 组（40.9%），训练源图 1,314 张、评测源图 85 张，双方源 ID 不重叠，每张源图最多 2 组。所有保留选择均有 `geometry_exact=true` 的相邻证据；生成阶段仍需重新计算 support mask 并由组级审核决定发布。
+
+选择文件和四机分片位于：
+
+```text
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014/inputs/train_multi_selected.jsonl
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014/inputs/eval_multi_selected.jsonl
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014/shards/multi_train_wave1/
+/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014/shards/multi_eval/
+```
+
 ### 7.4 规划/生图小批量验证（2026-10-14）
 
 在独立目录 `sa1b_samtok_group_twins_pilot_20261014` 对 8 个孪生候选做了完整的选择与规划验证。规划模型使用 4 卡 TP，批量提交 7 个未完成组；冷启动模型权重加载约 205 秒、引擎初始化约 30 秒，热态 7 组请求约 102 秒（约 4.1 组/分钟，约 247 规划请求/小时）。8 组中 3 组通过结构化计划，5 组拒绝：2 组缺少可执行的子区域、1 组候选是视觉文字/局部、1 组模型返回不可行、1 组把阴影当作 add 锚点。后续已将阴影、反射、文字和小型穿戴部件加入 add 候选预过滤，并让批处理中单组失败只落盘 `rejected/*.json`，不丢弃同批有效结果。
 
 3 组通过规划的 6 个成员均完成 Qwen-Image-2.1 40-step 生成。编辑器单卡冷启动约 53 秒，热态每张约 15.7 秒（约 3.8 张/分钟，约 229 张/小时）；该批实际生成 6 张目标图约 94 秒，不包含加载。人工逐图复核结论为：2 个 remove twin 组的指代和目标完成度基本通过；1 个 attribute twin 组指令与 mask 正确，但两根横梁颜色变化相互串扰，组级质量失败。当前没有伪造 27B 语义审核，也没有将该训练 pilot 写入 `final/`。
+
+多目标当前只完成候选选择和几何复核，尚未调用规划、生图、27B 审核或人工签收；因此不能把上述 1,500/100 组计作最终训练/评测数据。
 
 可视化与人工记录：
 
