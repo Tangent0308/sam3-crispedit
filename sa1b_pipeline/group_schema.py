@@ -163,7 +163,7 @@ def validate_multi_record(record: dict[str, Any], *, expected_split: str | None 
         raise ValueError("five target groups require all four operation types")
     order = record.get("generation_order")
     ids = [u.get("unit_id") for u in units]
-    if order != ids or len(set(order)) != n:
+    if not isinstance(order, list) or set(order) != set(ids) or len(set(order)) != n:
         raise ValueError("generation_order must contain every unit exactly once")
     if expected_split is not None and record.get("split") != expected_split:
         raise ValueError("unexpected split")

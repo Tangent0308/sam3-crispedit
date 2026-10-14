@@ -6,6 +6,7 @@ import json
 import os
 import pickle
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -123,15 +124,28 @@ def reserve_eval_sources(*, source_root: str | Path, output: str | Path, count: 
     rng.shuffle(eligible)
     chosen = []
     hashes = set(used_hashes)
-    for sid in eligible:
-        if len(chosen) >= count:
-            break
+    # Random-access reads are independent but can be slow on SG2 HDFS. Submit
+    # a bounded oversampled window and return only compact metadata from each
+    # worker; JPEG bytes are released before the future completes.
+    def read_key(sid: str):
         entry = {"source_id": sid, "image": images[sid], "annotation": dense[sid]}
         try:
             raw = read_record(source_root, images[sid], "sa1b_tfd_1k")["jpg"]
+            return entry, hashlib.sha256(raw).hexdigest()
         except (OSError, KeyError, ValueError, EOFError):
+            return None
+
+    window = min(len(eligible), max(count * 3, count + 64))
+    workers = min(16, max(1, window))
+    results: list[tuple[dict[str, Any], str] | None] = [None] * window
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(read_key, sid): index for index, sid in enumerate(eligible[:window])}
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    for result in results:
+        if result is None or len(chosen) >= count:
             continue
-        digest = hashlib.sha256(raw).hexdigest()
+        entry, digest = result
         if digest in hashes:
             continue
         hashes.add(digest)

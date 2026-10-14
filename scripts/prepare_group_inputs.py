@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -68,6 +69,39 @@ def main(argv=None):
     reservation_path = out / "inputs/eval_reservation.json"
     if reservation_path.exists():
         reservation = json.loads(reservation_path.read_text())
+        current_entries = list(reservation.get("entries", []))
+        if len(current_entries) < args.eval_count:
+            # Extend an existing reservation deterministically instead of
+            # silently keeping a too-small held-out pool.  The old entries
+            # remain unchanged and the new entries are sampled outside every
+            # known train/benchmark/frozen source key.
+            current_ids = {normalize_source_id(x.get("source_id")) for x in current_entries}
+            current_hashes = {str(x.get("image_sha256")) for x in current_entries if x.get("image_sha256")}
+            extension_path = out / "inputs/eval_reservation.extension.json"
+            extension = reserve_eval_sources(
+                source_root=args.source_root, output=extension_path,
+                count=args.eval_count - len(current_entries),
+                used_source_ids=used_ids | current_ids,
+                used_hashes=used_hashes | current_hashes,
+                seed=args.seed + len(current_entries),
+            )
+            merged_entries, seen = [], set()
+            for entry in current_entries + extension.get("entries", []):
+                sid = normalize_source_id(entry.get("source_id"))
+                if sid and sid not in seen:
+                    merged_entries.append(entry); seen.add(sid)
+            reservation = dict(reservation)
+            reservation["count"] = len(merged_entries)
+            reservation["reserved_ids"] = sorted(seen)
+            reservation["reserved_image_sha256"] = sorted(
+                current_hashes | set(extension.get("reserved_image_sha256", [])))
+            reservation["entries"] = merged_entries
+            reservation["extension"] = {
+                "added_count": len(extension.get("entries", [])),
+                "seed": args.seed + len(current_entries),
+            }
+            reservation_path.write_text(json.dumps(reservation, ensure_ascii=False, indent=2) + "\n")
+            extension_path.unlink(missing_ok=True)
     else:
         reservation = reserve_eval_sources(source_root=args.source_root, output=reservation_path,
                                            count=args.eval_count, used_source_ids=used_ids,
@@ -113,8 +147,17 @@ def main(argv=None):
             futures = {pool.submit(materialize, entry, out, args.source_root, exclusion): i
                        for i, entry in enumerate(missing_train)}
             ordered = [None] * len(missing_train)
+            progress_path = out / "inputs/materialize_progress.json"
+            completed = 0
+            started = time.time()
             for future in as_completed(futures):
                 ordered[futures[future]] = future.result()
+                completed += 1
+                if completed == 1 or completed % 50 == 0 or completed == len(missing_train):
+                    atomic_json(progress_path, {"stage": "train_materialization", "completed": completed,
+                                                "total": len(missing_train), "workers": workers,
+                                                "elapsed_seconds": round(time.time() - started, 2),
+                                                "updated_at": time.time()})
         for result in ordered:
             if result.get("status") == "ready":
                 train_candidates.append(result["candidate"])
@@ -129,12 +172,21 @@ def main(argv=None):
         return materialize(entry, out, args.source_root, eval_exclusion)
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [pool.submit(materialize_eval, entry) for entry in reservation["entries"]]
+        progress_path = out / "inputs/materialize_progress.json"
+        completed = 0
+        started = time.time()
         for future in as_completed(futures):
             result = future.result()
+            completed += 1
             if result.get("status") == "ready":
                 eval_candidates.append(result["candidate"])
             else:
                 eval_rejections.append(result)
+            if completed == 1 or completed % 25 == 0 or completed == len(futures):
+                atomic_json(progress_path, {"stage": "eval_materialization", "completed": completed,
+                                            "total": len(futures), "workers": 8,
+                                            "elapsed_seconds": round(time.time() - started, 2),
+                                            "updated_at": time.time()})
     write_jsonl(out / "inputs/train_candidates.jsonl", train_candidates)
     write_jsonl(out / "inputs/eval_candidates.jsonl", eval_candidates)
     atomic_json(out / "inputs/manifest.json", {

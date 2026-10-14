@@ -13,6 +13,8 @@ scripts/production/            缓存源记录、启动、运行时检查和打�
 scripts/run_balanced_planning.py  规划模型批处理入口
 scripts/run_generation_queue.py   常驻编辑器 worker
 scripts/run_audit_queue.py        批量审核 worker
+scripts/shard_group_selection.py  分组数据四 rank 确定性分片
+scripts/merge_group_shards.py     分片结果合并与硬校验
 requirements/production/       CUDA 12.9 的三套锁定运行时
 tests/                         协议、配额、恢复、缓存和生产回归测试
 docs/PIPELINE.md               当前版本说明
@@ -41,3 +43,12 @@ python -m scripts.run_production_4node --root /path/to/run status
 组级结果必须通过确定性检查、27B 审核和人工复核后才能发布；`--plan-only` 只产出
 规划检查点，不会伪造目标图或人工结论。完整协议、字段和交付批次见
 `docs/PIPELINE.md` 的“分组数据扩展”章节。
+
+当前独立输入根目录为
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014`：
+训练候选 15,994、评测候选 1,199、评测 reservation 1,200；孪生第一批已固定为
+`inputs/train_twin_selected.jsonl`（5,000 组）和
+`inputs/eval_twin_selected.jsonl`（200 组）。四机运行先用
+`shard_group_selection.py` 生成每个 rank 的 `selected_rank*.jsonl`，各 rank 使用独立
+输出目录，完成后用 `merge_group_shards.py` 合并；快速 bbox 容量模式只用于估算，最终
+数据必须经过严格 mask 几何、27B 审核和人工复核。

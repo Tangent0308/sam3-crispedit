@@ -104,7 +104,8 @@ python scripts/prepare_group_inputs.py \
   --frozen-root /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014 \
   --benchmark-exclusion /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014/inputs/benchmark_exclusion.jsonl \
   --source-root "$SOURCE_ROOT" --output-root "$GROUP_ROOT" \
-  --eval-count 200 --train-limit 8000
+  --eval-count 1200 --train-limit 16000 \
+  --materialize-missing-train --materialize-workers 32
 ```
 
 如果历史训练清单已知，应显式加入评测排除注册表（每个清单一个参数），例如：
@@ -125,8 +126,48 @@ python scripts/run_group_pipeline.py --kind twins \
   --output-root "$GROUP_ROOT/twins_train_wave1" --target 5000 --split train \
   --reservation "$GROUP_ROOT/inputs/eval_reservation.json" \
   --planner-model /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8 \
-  --planner-backend vllm --planner-tp 4 --planner-batch-size 8 --plan-only
+  --planner-backend vllm --planner-tp 4 --planner-batch-size 8 \
+  --candidate-pool-factor 12.0 --plan-only
 ```
+
+正式孪生选择已经预先固定在
+`$GROUP_ROOT/inputs/train_twin_selected.jsonl`（5,000 组）和
+`$GROUP_ROOT/inputs/eval_twin_selected.jsonl`（200 组）。四机运行时先将选择文件按 rank 分片；每个 rank 使用独立输出根目录，不能共享同一个 `planned/`、编辑队列或模型进程：
+
+```bash
+python scripts/shard_group_selection.py \
+  --selection "$GROUP_ROOT/inputs/train_twin_selected.jsonl" \
+  --output-root "$GROUP_ROOT/shards/twins_train_wave1" --world-size 4
+```
+
+每个 Arnold worker（`ARNOLD_ID=0..3`）执行同一入口，仅替换 rank：
+
+```bash
+RANK="${ARNOLD_ID:?}"
+SHARD="$GROUP_ROOT/shards/twins_train_wave1/selected_rank${RANK}.jsonl"
+RUN="$GROUP_ROOT/twins_train_wave1/rank${RANK}"
+mkdir -p "$RUN/inputs"
+cp -n "$SHARD" "$RUN/inputs/selected.jsonl"
+python scripts/run_group_pipeline.py --kind twins \
+  --manifest "$GROUP_ROOT/inputs/train_candidates.jsonl" \
+  --output-root "$RUN" --target "$(wc -l < "$SHARD")" --split train \
+  --reservation "$GROUP_ROOT/inputs/eval_reservation.json" \
+  --planner-model /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8 \
+  --planner-backend vllm --planner-tp 4 --planner-batch-size 8 \
+  --editor-model /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1 \
+  --audit-model /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B \
+  --publish
+```
+
+四个 rank 都结束后合并并做硬校验：
+
+```bash
+python scripts/merge_group_shards.py --kind twins --split train \
+  --input-root "$GROUP_ROOT/twins_train_wave1" --target 5000 \
+  --output "$GROUP_ROOT/final/twins_train.jsonl"
+```
+
+评测 200 组使用相同流程，但输入换为 `eval_twin_selected.jsonl`，`--split eval`，并把输出写到 `twins_eval/rank${RANK}`；评测组完成后必须生成图片内嵌 PDF，逐组填写 `human_review.jsonl`，全部确认后才可发布。多目标的 1,500 训练组和 100 评测组必须在孪生第一批人工确认后执行；其最终选择使用严格几何模式，不能使用 `--fast-selection`。
 
 生图阶段追加 `--editor-model ... --audit-model ... --publish`，并将 `--split eval` 指向
 `inputs/eval_candidates.jsonl` 生成 200 组评测；评测组必须全部通过人工 ledger 后才可发布。多目标第一批在孪生第一批训练侧确认后执行，命令把 `--kind twins` 改为 `--kind multi`，目标设为 1,500，并使用同一个 source-isolation reservation。每个组一条 planning call，生成和审核 checkpoint 可从同一独立根目录恢复；不要把失败组缩减成较少目标数。

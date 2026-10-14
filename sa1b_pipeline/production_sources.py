@@ -65,8 +65,18 @@ def materialize(entry, root, source_root, exclusion):
         return json.loads(marker.read_text())
     if (root/'source_cache/ready.json').exists():
         from .production_source_cache import cached_record
-        image = cached_record(root/'source_cache', entry['image'], 'sa1b_tfd_1k')
-        dense = cached_record(root/'source_cache', entry['annotation'], 'sa1b_dense_label/annotation')
+        try:
+            image = cached_record(root/'source_cache', entry['image'], 'sa1b_tfd_1k')
+        except (FileNotFoundError, KeyError, ValueError):
+            # Group eval reservations may intentionally come from outside the
+            # frozen 50k reservoir.  Keep the shared cache fast path, but use
+            # the configured SG2 random-access source when that record is not
+            # present instead of treating a valid new source as corrupt.
+            image = read_record(source_root, entry['image'], 'sa1b_tfd_1k')
+        try:
+            dense = cached_record(root/'source_cache', entry['annotation'], 'sa1b_dense_label/annotation')
+        except (FileNotFoundError, KeyError, ValueError):
+            dense = read_record(source_root, entry['annotation'], 'sa1b_dense_label/annotation')
     else:
         image = read_record(source_root, entry['image'], 'sa1b_tfd_1k')
         dense = read_record(source_root, entry['annotation'], 'sa1b_dense_label/annotation')
