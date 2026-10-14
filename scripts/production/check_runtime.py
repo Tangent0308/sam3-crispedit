@@ -8,7 +8,38 @@ from importlib import metadata
 from pathlib import Path
 
 
+def check_spawn_imports():
+    import cv2
+    import typing
+    import vllm
+
+    if Path(typing.__file__).name != 'typing.py':
+        raise RuntimeError(f'stdlib typing shadowed: {typing.__file__}')
+    if not any('GUI:' in line and 'NONE' in line for line in cv2.getBuildInformation().splitlines()):
+        raise RuntimeError('OpenCV must be a headless build')
+    assert vllm
+
+
 def check(role):
+    import multiprocessing
+
+    # Exercise the import order in the actual spawned engine, not just the
+    # parent where stdlib typing may already be cached in sys.modules.
+    check_spawn_imports()
+    for name in ('opencv-python', 'opencv-contrib-python', 'opencv-contrib-python-headless'):
+        try:
+            metadata.distribution(name)
+        except metadata.PackageNotFoundError:
+            continue
+        raise RuntimeError(f'Conflicting OpenCV distribution installed: {name}')
+    child = multiprocessing.get_context('spawn').Process(target=check_spawn_imports)
+    child.start()
+    child.join(90)
+    if child.is_alive():
+        child.kill()
+        child.join()
+    if child.exitcode != 0:
+        raise RuntimeError(f'spawn import preflight failed: {child.exitcode}')
     import torch
     import transformers
     import vllm
@@ -37,7 +68,7 @@ def check(role):
     print(json.dumps({'role': role, 'torch': torch.__version__, 'cuda': torch.version.cuda,
                       'vllm': vllm.__version__, 'vllm_wheel': wheel, 'transformers': transformers.__version__,
                       'gpu': torch.cuda.get_device_name(), 'cuda_libraries': libraries,
-                      'matmul': 'pass', 'vllm_rms_norm': 'pass'}, ensure_ascii=False), flush=True)
+                      'matmul': 'pass', 'vllm_rms_norm': 'pass', 'headless_spawn_import': 'pass'}, ensure_ascii=False), flush=True)
 
 
 def main():

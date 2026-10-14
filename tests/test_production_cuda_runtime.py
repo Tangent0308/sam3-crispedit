@@ -13,6 +13,7 @@ def test_every_role_pins_cuda129_wheel():
         assert 'torch==2.13.0+cu129' in rows
         assert 'nvidia-cuda-runtime-cu12==12.9.79' in rows
         assert not any(r.startswith('nvidia-cuda-runtime==') for r in rows)
+        assert [r for r in rows if r.startswith('opencv-')] == ['opencv-python-headless==5.0.0.93']
 
 
 def test_child_library_path_does_not_add_legacy_cuda13(tmp_path, monkeypatch):

@@ -84,6 +84,11 @@ def run_generation(manifest, root, local_root, targets, config, progress):
     processes = []
     try:
         if not balance.exhausted:
+            from .model_cache import stage_model
+            # One verified copy per node before launching eight model loaders.
+            # Keep canonical model paths in contracts and generation fingerprints.
+            local_models = {config[key]: stage_model(config[key], local_root/'models', progress)
+                            for key in ('editor_model', 'audit_model')}
             for role, count in [('generate', 6), ('audit', 2)]:
                 for i in range(count):
                     gpu = config['devices'][i if role == 'generate' else i+6]
@@ -98,7 +103,9 @@ def run_generation(manifest, root, local_root, targets, config, progress):
                                    '--check-operation', '--model', config['audit_model'],
                                    '--result-dir', str(root/'results'), '--metrics', str(root/f'audit_{i}.json')]
                     log = (root/f'{role}_{i}.log').open('a')
-                    proc = subprocess.Popen(command, cwd=REPO, env=runtime_env(python, gpu),
+                    env = runtime_env(python, gpu)
+                    env['SA1B_LOCAL_MODEL_MAP'] = json.dumps(local_models)
+                    proc = subprocess.Popen(command, cwd=REPO, env=env,
                                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                     processes.append((proc, log))
         last_log = 0

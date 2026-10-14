@@ -29,6 +29,8 @@ class VLLMAuditor:
                  gpu_memory_utilization=.88, max_tokens=512, cache_inputs=True, check_operation=False):
         from transformers import AutoProcessor
         from vllm import LLM, SamplingParams
+        from .model_cache import resolve_model
+        model_id = resolve_model(model_id)
         if batch_size < 1:
             raise ValueError('batch_size must be positive')
         self.processor = AutoProcessor.from_pretrained(model_id)
