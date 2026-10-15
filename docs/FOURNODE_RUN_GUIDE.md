@@ -98,7 +98,7 @@ wc -l "$ROOT/final/auto_pass.jsonl"
 孪生/多目标任务不能使用 50k 的 `SA1B_RUN_ROOT`、部署包或队列数据库。先创建独立目录并预留评测源图：
 
 ```bash
-GROUP_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014
+GROUP_INPUT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014
 SOURCE_ROOT=/mnt/hdfs/sg_byte_ttlive_strategy_llm/user/haobo.yuan/datasets
 python scripts/prepare_group_inputs.py \
   --frozen-root /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014 \
@@ -122,9 +122,9 @@ python scripts/prepare_group_inputs.py \
 
 ```bash
 python scripts/run_group_pipeline.py --kind twins \
-  --manifest "$GROUP_ROOT/inputs/train_candidates.jsonl" \
-  --output-root "$GROUP_ROOT/twins_train_wave1" --target 5000 --split train \
-  --reservation "$GROUP_ROOT/inputs/eval_reservation.json" \
+  --manifest "$GROUP_INPUT_ROOT/inputs/train_candidates.jsonl" \
+  --output-root "$GROUP_INPUT_ROOT/twins_train_wave1" --target 5000 --split train \
+  --reservation "$GROUP_INPUT_ROOT/inputs/eval_reservation.json" \
   --planner-model /mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8 \
   --planner-backend vllm --planner-tp 4 --planner-batch-size 8 \
   --candidate-pool-factor 12.0 --plan-only
@@ -132,13 +132,14 @@ python scripts/run_group_pipeline.py --kind twins \
 
 Flash-Next 仍是待验证的规划/审核候选，不代表已经达到正式发布质量。当前适配根据本地 `config.json` 的 `Qwen4ExpForConditionalGeneration` 自动启用 Triton MoE、Engram CPU offload；四卡使用 TP4，八卡使用 TEP8。它需要支持该架构的运行时；`requirements/mllm-vllm-cu129.txt` 中的旧 27B 环境不能直接视作已验证兼容。本机实验复用 `/tmp/sa1b-next-runtime/bin/python`（vLLM 0.31.1rc1.dev296、CUDA 12.9）及已下载的节点缓存。审核切换模型时同时指定 `--audit-tp 4`，默认仍为 1。每种模型/输入变体必须使用新的输出根目录，避免复用另一模型的计划缓存。
 
-正式孪生选择已经预先固定在
-`$GROUP_ROOT/inputs/train_twin_selected.jsonl`（5,000 组）和
-`$GROUP_ROOT/inputs/eval_twin_pairs_selected.jsonl`（200 组）。四机运行时先将选择文件按 rank 分片；每个 rank 使用独立输出根目录，不能共享同一个 `planned/`、编辑队列或模型进程：
+正式 wave1 选择已经固定在独立根目录
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_twins_flashnext_wave1_20261015/inputs/selected.jsonl`（5,000 组），四个分片位于同目录的 `shards/twins_train_wave1/`。这份清单已完成四类、scope、面积比和评测排除校验，不要重新选择或覆盖它：
 
 ```bash
+export GROUP_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_twins_flashnext_wave1_20261015
+export GROUP_INPUT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014
 python scripts/shard_group_selection.py \
-  --selection "$GROUP_ROOT/inputs/train_twin_selected.jsonl" \
+  --selection "$GROUP_ROOT/inputs/selected.jsonl" \
   --output-root "$GROUP_ROOT/shards/twins_train_wave1" --world-size 4
 ```
 
@@ -150,17 +151,15 @@ checkpoint，并把日志写到 rank 独立目录。示例环境变量如下：
 export GROUP_ROOT="$GROUP_ROOT"
 export GROUP_KIND=twins GROUP_SPLIT=train
 export GROUP_SHARD_ROOT="$GROUP_ROOT/shards/twins_train_wave1"
-export GROUP_SELECTION="$GROUP_ROOT/inputs/train_twin_selected.jsonl"
-export GROUP_MANIFEST="$GROUP_ROOT/inputs/train_candidates.jsonl"
-export GROUP_RESERVATION="$GROUP_ROOT/inputs/eval_reservation.json"
+export GROUP_SELECTION="$GROUP_ROOT/inputs/selected.jsonl"
+export GROUP_MANIFEST="$GROUP_INPUT_ROOT/inputs/train_candidates.jsonl"
+export GROUP_RESERVATION="$GROUP_INPUT_ROOT/inputs/eval_reservation.json"
 export GROUP_PLANNER_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8
 export GROUP_EDITOR_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1
 export GROUP_AUDIT_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B
 export GROUP_PLANNER_TP=4 GROUP_MAX_NEW_TOKENS=1200 GROUP_AUDIT_TP=1
 # The entry automatically enables clean binary/outline crops, full-scene localization,
-# and the grounded group-audit prompt. Only set this after the PDF has been reviewed and the ledger is filled.
-export GROUP_HUMAN_REVIEW="$GROUP_ROOT/review/twins_train_human_review.jsonl"
-export GROUP_PUBLISH=1
+# and the grounded group-audit prompt. Leave GROUP_PUBLISH unset until the PDF ledger is complete.
 bash scripts/group_4node_entry.sh
 ```
 
