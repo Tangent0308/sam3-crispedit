@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from .geometry import load_mask
 from .group_geometry import adjacent_pairs, twin_pair_gate, object_features, precise_point
@@ -78,10 +78,10 @@ def _overlay(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.
     return canvas
 
 
-def _crop_sheet(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.ndarray]) -> Image.Image:
+def _crop_sheet(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.ndarray], *, locator_outline: bool = False) -> Image.Image:
     """Aligned clean crop and binary locator; never tint source appearance."""
     width, height, header = 512, 320, 32
-    sheet = Image.new("RGB", (width * 2, (height + header) * len(objects)), (35, 35, 35))
+    sheet = Image.new("RGB", (width * (3 if locator_outline else 2), (height + header) * len(objects)), (35, 35, 35))
     draw = ImageDraw.Draw(sheet)
     for index, (obj, mask) in enumerate(zip(objects, masks)):
         ys, xs = np.where(mask)
@@ -102,17 +102,29 @@ def _crop_sheet(source: Image.Image, objects: list[dict[str, Any]], masks: list[
             resized = tile.resize(size, Image.Resampling.LANCZOS if column == 0 else Image.Resampling.NEAREST)
             sheet.paste(resized, (column * width + (width - size[0]) // 2,
                                  top + header + (height - size[1]) // 2))
+        if locator_outline:
+            # The optional third column adds a contour outside the selector;
+            # the first column remains the untouched appearance reference.
+            photo = clean.resize(size, Image.Resampling.LANCZOS)
+            binary = locator.convert("L").resize(size, Image.Resampling.NEAREST)
+            expanded = np.asarray(binary.filter(ImageFilter.MaxFilter(7))) > 0
+            inside = np.asarray(binary) > 0
+            arr = np.asarray(photo).copy()
+            arr[expanded & ~inside] = (255, 220, 30)
+            draw.text((2 * width + 8, top + 8), f"U{index+1} - OUTSIDE CONTOUR: LOCATION ONLY", fill="white")
+            sheet.paste(Image.fromarray(arr), (2 * width + (width-size[0])//2,
+                                              top+header+(height-size[1])//2))
     return sheet
 
 
 def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], directory: str | Path,
-                *, image_size: tuple[int, int] | None = None) -> tuple[list[str], list[str], str]:
+                *, image_size: tuple[int, int] | None = None, locator_outline: bool = False) -> tuple[list[str], list[str], str]:
     """Build two stable images plus binary mask files for a single group call."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     source = Image.open(candidate["image_path"]).convert("RGB")
     masks = [load_mask(obj, source.size) for obj in objects]
-    key = json.dumps({"version": "clean-binary-v2",
+    key = json.dumps({"version": "clean-binary-outline-v3" if locator_outline else "clean-binary-v2",
                       "source": hashlib.sha256(source.tobytes()).hexdigest(),
                       "ids": [o.get("object_id") for o in objects],
                       "masks": [hashlib.sha256(mask.tobytes()).hexdigest() for mask in masks]}, sort_keys=True)
@@ -130,7 +142,7 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
     if not marked.exists():
         _overlay(source, objects, masks).save(marked, compress_level=1)
     if not sheet.exists():
-        _crop_sheet(source, objects, masks).save(sheet, compress_level=1)
+        _crop_sheet(source, objects, masks, locator_outline=locator_outline).save(sheet, compress_level=1)
     for obj, mask in zip(objects, masks):
         path = root / f"mask_{obj['object_id']}.png"
         if not path.exists():

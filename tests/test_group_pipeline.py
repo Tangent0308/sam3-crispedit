@@ -415,3 +415,20 @@ def test_review_pdf_includes_fifth_step_and_preserves_decisions(tmp_path):
     assert [r["unit_id"] for r in index] == group["generation_order"]
     assert all(Path(r["image"]).is_file() for r in index)
     assert json.loads((out / "human_review.jsonl").read_text()) == decision
+
+
+def test_optional_contour_keeps_clean_pixels_and_stays_outside_mask(tmp_path):
+    image, objects = _source(tmp_path)
+    candidate = {"source_id": "s", "image_path": str(image), "objects": objects}
+    base, _, base_digest = group_views(candidate, objects, tmp_path / "views")
+    outlined, _, outline_digest = group_views(candidate, objects, tmp_path / "views", locator_outline=True)
+    before = np.asarray(Image.open(base[1]))
+    after = np.asarray(Image.open(outlined[1]))
+    assert np.array_equal(before, after[:, :1024])
+    assert base_digest != outline_digest
+    for top in (32, 384):
+        mask = np.asarray(Image.open(outlined[1]))[top:top+320,512:1024,0] == 255
+        clean = after[top:top+320,:512]
+        guided = after[top:top+320,1024:]
+        assert np.array_equal(clean[mask], guided[mask])
+        assert np.any(clean[~mask] != guided[~mask])

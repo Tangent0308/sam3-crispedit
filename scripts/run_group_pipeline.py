@@ -374,6 +374,8 @@ def main(argv=None):
     p.add_argument("--audit-batch-size", type=int, default=4)
     p.add_argument("--human-review", type=Path,
                    help="JSONL ledger with explicit human decisions; required for --publish")
+    p.add_argument("--outline-planning-crops", action="store_true",
+                   help="append an outside-contour locator column beside clean crop and binary mask")
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--generate-only", action="store_true",
                    help="persist generated groups without loading the audit model")
@@ -462,7 +464,8 @@ def main(argv=None):
             if path.exists():
                 planned.append(json.loads(path.read_text())); continue
             objects = selection["objects"]
-            views, mask_paths, view_digest = group_views(selection["candidate"], objects, root / "planning_views")
+            views, mask_paths, view_digest = group_views(selection["candidate"], objects, root / "planning_views",
+                                                          locator_outline=args.outline_planning_crops)
             geometries = _geometry(mask_paths)
             if planner is None:
                 # Generation-only resume is allowed: selections rejected by a
@@ -483,6 +486,9 @@ def main(argv=None):
                     continue
                 op = selection["operation"]
                 prompt = twin_prompt(op, objects)
+                if args.outline_planning_crops:
+                    prompt += "\nImage 2 has THREE aligned columns per row: clean source, binary mask, and source with a yellow contour OUTSIDE the mask. Use the contour to identify the exact object, but read colors from column 1 only. Do not confuse an arch with a light inside it or a whole wheel with its rim. When front/rear or body-left/right is uncertain, prefer concise image-left/image-right references. A placement site must be a subregion (e.g. top edge), not repeat the host noun; use site=empty for on/in the host itself. A green stripe changed to a red stripe is attribute, not replace; reject if no genuine new design fits."
+
             else:
                 assignments = {str(obj["object_id"]): op for obj, op in zip(objects, selection["operations"])}
                 order = [f"U{i+1}" for i in range(len(objects))]
