@@ -60,7 +60,7 @@ tail -F "$ROOT/logs/progress_monitor_tqdm.log"
 
 1. 先确保旧 Arnold 任务的四个 rank 已退出，避免同一 rank 并行写共享检查点。
 2. 使用完全相同的 `SA1B_RUN_ROOT`、代码包、模型和四机拓扑重新提交入口；共享 rank 锁会阻止重复 owner。
-3. 已完成 wave 会跳过；已完成 planning checkpoint 会按输入 mask 数和 accepted 数校验后复用；生成 fingerprint 匹配的结果和已落盘审核结果直接恢复。
+3. 已完成 wave 会跳过；已完成 planning checkpoint 会按输入 mask 数和 accepted 数校验后复用；生成 fingerprint 匹配的结果和已落盘审核结果直接恢复。 分组规划还会按 planner batch（默认 8）逐组原子落盘，rank 被回收时不重复已解析的 MLLM 结果。
 4. 已提交但结果丢失的 planner request 会记录为 `interrupted_unknown`，不重复调用同一 mask，也不伪造拒绝结果。
 5. 数据协议、输入清单、模型或生成参数改变时不混入旧运行。仅修复启动依赖、权重缓存和超时，可以在所有 rank 停止并持有共享锁时使用 `scripts/production/repair_deployment.py` 发布补丁：备份旧部署、逐项验证旧代码及 planner 快照，只更新允许的运行时文件及 `code_hashes`，保留原根目录和全部检查点。禁止手工删除 hash 检查。
 6. 最后一个 rank 结束后自动尝试合并；必要时在代码环境执行 `finalize`，并检查 `final/summary.json`。

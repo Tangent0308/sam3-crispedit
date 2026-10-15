@@ -90,4 +90,6 @@ Flash-Next 审核实验增加同模型 paired prompt 对照：baseline 保持原
 
 2026-10-15：Flash-Next 审核 paired prompt 完成。12 组既有结果的 baseline 完整组级通过 6/12，加入白色 mask、黑色孔洞、全图 ref、add 接触面和 remove/replace 语义核验顺序后的 grounded 仍为 6/12，但语义字段通过由 7/12 提升到 8/12；请求墙钟由 415.25 秒降至 356.51 秒（模型加载 186.86 秒另计）。因此将 grounded 核验顺序并入默认组级 prompt，但仍要求人工视觉复核；当前推荐 Flash-Next 做规划、grounded 审核作为候选，不将自动通过直接发布。
 
+2026-10-15：分组规划改为按 planner batch（默认 8）调用，并在每个响应解析后原子保存 group plan；此前整片 1,250 组只有批次结束才写入计划，rank 被回收会重复已完成请求。该修复不改变选择、协议、模型或生成参数，测试保持 265 passed。
+
 2026-10-15：重建正式孪生 wave1 选择。新根目录 `sa1b_samtok_twins_flashnext_wave1_20261015` 产出 5,000 组清单并分成四个 1,250 组 shard；四类各 1,250，双/三成员 4,248/752，scope 3,000/1,500/500，面积桶 1,501/2,000/1,499。3,313 个源图每源最多两组，source ID 和 image SHA256 均与评测 reservation 零交集，成员面积比最大 2.998。该清单仅代表选择完成，尚未生成、审核或发布。
