@@ -22,6 +22,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 from sa1b_pipeline.geometry import load_mask, mask_geometry
 from sa1b_pipeline.group_generation import generate_multi_group, generate_twin_group
 from sa1b_pipeline.group_geometry import normalized_category
@@ -383,6 +385,8 @@ def main(argv=None):
                    help="JSONL ledger with explicit human decisions; required for --publish")
     p.add_argument("--outline-planning-crops", action="store_true",
                    help="append an outside-contour locator column beside clean crop and binary mask")
+    p.add_argument("--locate-planning-scene", action="store_true",
+                   help="experimental full-scene outside contours and unit tags for crop-to-scene grounding")
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--generate-only", action="store_true",
                    help="persist generated groups without loading the audit model")
@@ -472,7 +476,8 @@ def main(argv=None):
                 planned.append(json.loads(path.read_text())); continue
             objects = selection["objects"]
             views, mask_paths, view_digest = group_views(selection["candidate"], objects, root / "planning_views",
-                                                          locator_outline=args.outline_planning_crops)
+                                                          locator_outline=args.outline_planning_crops,
+                                                          locate_in_scene=args.locate_planning_scene)
             geometries = _geometry(mask_paths)
             if planner is None:
                 # Generation-only resume is allowed: selections rejected by a
@@ -500,6 +505,21 @@ def main(argv=None):
                 assignments = {str(obj["object_id"]): op for obj, op in zip(objects, selection["operations"])}
                 order = [f"U{i+1}" for i in range(len(objects))]
                 prompt = multi_prompt(assignments, objects, order)
+            if args.locate_planning_scene:
+                prompt = prompt.replace("Image 1 is the clean original scene.",
+                    "Image 1 is the original scene with yellow outside contours and U1/U2/U3 tags for localization only. "
+                    "Read appearance from the clean crops in image 2; never name the yellow contour or tags in a ref.")
+                with Image.open(selection['candidate']['image_path']) as source:
+                    width, height = source.size
+                locations = [{"unit_id": f"U{i+1}", "object_id": str(obj['object_id']),
+                              "bbox_xyxy_percent": [round(100 * v / (width if j % 2 == 0 else height), 1)
+                                                    for j, v in enumerate(geom['bbox'])]}
+                             for i, (obj, geom) in enumerate(zip(objects, geometries))]
+                prompt += ("\nFull-image locations (0=left/top, 100=right/bottom): " + json.dumps(locations)
+                           + "\nMatch each crop to its tagged location before writing refs. Left/right refer to the ORIGINAL image, "
+                           "never to the crop or row order. Distinguish the target from ALL similar instances in the full scene, "
+                           "not just the selected members. If multiple similar objects share one side, use a verified ordinal "
+                           "or a short unique host relation. Do not output coordinates, unit IDs or annotation terms.")
             pending.append({"index": index, "selection": selection, "gid": gid, "path": path,
                             "objects": objects, "views": views, "mask_paths": mask_paths,
                             "geometries": geometries, "view_digest": view_digest,

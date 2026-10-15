@@ -117,14 +117,48 @@ def _crop_sheet(source: Image.Image, objects: list[dict[str, Any]], masks: list[
     return sheet
 
 
+def _located_scene(source: Image.Image, masks: list[np.ndarray]) -> Image.Image:
+    """Link crop IDs to the full scene without tinting selected pixels."""
+    canvas = source.convert("RGB").copy()
+    canvas.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
+    scaled = [np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize(
+        canvas.size, Image.Resampling.NEAREST)) > 0 for mask in masks]
+    union = np.logical_or.reduce(scaled)
+    array = np.asarray(canvas).copy()
+    for mask in scaled:
+        expanded = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).filter(ImageFilter.MaxFilter(5))) > 0
+        array[expanded & ~union] = (255, 220, 30)
+    canvas = Image.fromarray(array)
+    draw = ImageDraw.Draw(canvas)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 22)
+    except OSError:
+        font = ImageFont.load_default()
+    for index, mask in enumerate(scaled, 1):
+        ys, xs = np.where(mask)
+        if not len(xs):
+            continue
+        x0, y0, x1, y1 = int(xs.min()), int(ys.min()), int(xs.max()+1), int(ys.max()+1)
+        # Place each tag outside all selectors, not over a neighboring target.
+        for x, y in ((x0, y0-30), (x1+4, y0), (x0, y1+4), (x0-60, y0)):
+            if x >= 0 and y >= 0 and x+56 <= canvas.width and y+28 <= canvas.height \
+                    and not union[y:y+28,x:x+56].any():
+                draw.rectangle((x, y, x+55, y+27), fill="black")
+                draw.text((x+4, y+1), f"U{index}", font=font, fill=(255,220,30))
+                break
+    return canvas
+
+
 def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], directory: str | Path,
-                *, image_size: tuple[int, int] | None = None, locator_outline: bool = False) -> tuple[list[str], list[str], str]:
+                *, image_size: tuple[int, int] | None = None, locator_outline: bool = False,
+                locate_in_scene: bool = False) -> tuple[list[str], list[str], str]:
     """Build two stable images plus binary mask files for a single group call."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     source = Image.open(candidate["image_path"]).convert("RGB")
     masks = [load_mask(obj, source.size) for obj in objects]
     key = json.dumps({"version": "clean-binary-outline-v3" if locator_outline else "clean-binary-v2",
+                      **({"scene_locator_version": 1} if locate_in_scene else {}),
                       "source": hashlib.sha256(source.tobytes()).hexdigest(),
                       "ids": [o.get("object_id") for o in objects],
                       "masks": [hashlib.sha256(mask.tobytes()).hexdigest() for mask in masks]}, sort_keys=True)
@@ -148,6 +182,11 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
         if not path.exists():
             Image.fromarray((mask.astype(np.uint8) * 255), mode="L").save(path, compress_level=1)
         mask_paths.append(str(path))
+    if locate_in_scene:
+        located = root / "located_scene.png"
+        if not located.exists():
+            _located_scene(source, masks).save(located, compress_level=1)
+        full = located
     return [str(full), str(sheet)], mask_paths, digest
 
 

@@ -518,3 +518,18 @@ def test_render_resume_rejects_unverified_legacy_image(tmp_path):
         config = {}
     with pytest.raises(ValueError, match="no verifiable"):
         _render_member(str(image), {"mask_path": str(objects[0]["mask_path"])}, image, Editor(), 0)
+
+
+def test_scene_locator_preserves_selected_pixels_and_crop_alignment(tmp_path):
+    image, objects = _source(tmp_path)
+    candidate = {"source_id": "s", "image_path": str(image)}
+    plain, masks, old_digest = group_views(candidate, objects, tmp_path / "views")
+    located, _, new_digest = group_views(candidate, objects, tmp_path / "views", locate_in_scene=True)
+    assert old_digest != new_digest
+    assert len(located) == 2
+    assert Image.open(plain[1]).tobytes() == Image.open(located[1]).tobytes()
+    before = np.asarray(Image.open(plain[0]))
+    after = np.asarray(Image.open(located[0]))
+    union = np.logical_or.reduce([np.asarray(Image.open(p)) > 0 for p in masks])
+    assert np.array_equal(before[union], after[union])
+    assert np.any(before[~union] != after[~union])
