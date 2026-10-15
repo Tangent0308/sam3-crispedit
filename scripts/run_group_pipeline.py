@@ -375,6 +375,10 @@ def main(argv=None):
     p.add_argument("--human-review", type=Path,
                    help="JSONL ledger with explicit human decisions; required for --publish")
     p.add_argument("--plan-only", action="store_true")
+    p.add_argument("--generate-only", action="store_true",
+                   help="persist generated groups without loading the audit model")
+    p.add_argument("--audit-only", action="store_true",
+                   help="audit existing generated.jsonl in the audit runtime without loading planner/editor")
     p.add_argument("--selection-only", action="store_true",
                    help="select and persist grouped inputs without loading a planner model")
     p.add_argument("--publish", action="store_true")
@@ -386,6 +390,12 @@ def main(argv=None):
     p.add_argument("--fast-selection", action="store_true",
                    help="use bbox-only multi-target capacity selection; exact geometry remains a release gate")
     args = p.parse_args(argv)
+    if sum((args.plan_only, args.selection_only, args.generate_only, args.audit_only)) > 1:
+        p.error("selection/plan/generate/audit-only modes are mutually exclusive")
+    if args.audit_only and (not args.audit_model or args.planner_model or args.editor_model):
+        p.error("--audit-only requires --audit-model and no planner/editor model")
+    if args.publish and (args.plan_only or args.selection_only or args.generate_only):
+        p.error("publication requires the audit stage")
     if args.target < 1:
         p.error("--target must be positive")
     root = args.output_root.resolve(); root.mkdir(parents=True, exist_ok=True)
@@ -462,6 +472,15 @@ def main(argv=None):
                     raise RuntimeError("planner model is required to create new group plans")
                 continue
             if args.kind == "twins":
+                areas = [g["area_fraction"] for g in geometries]
+                if min(areas) <= 0 or max(areas) > 3 * min(areas):
+                    rejection = {"group_id": gid, "status": "preplan_rejected",
+                                 "reason": "twin exact mask area ratio exceeds 3",
+                                 "area_fractions": areas, "selection": selection}
+                    atomic_json(root / "rejected" / f"{gid}.json", rejection)
+                    print(json.dumps({"id": gid, "status": "preplan_rejected",
+                                      "reason": rejection["reason"]}), flush=True)
+                    continue
                 op = selection["operation"]
                 prompt = twin_prompt(op, objects)
             else:
@@ -512,31 +531,43 @@ def main(argv=None):
     if args.plan_only:
         print(json.dumps({"status": "planned", "groups": len(planned), "root": str(root)}, ensure_ascii=False))
         return 0
-    editor = _editor(args)
-    if editor is None:
-        raise RuntimeError("--editor-model is required unless --plan-only is set")
-    generated = []
-    try:
-        for index, group in enumerate(planned):
-            out = root / "generated" / (group.get("twin_id") or group.get("multi_id"))
-            if args.kind == "twins":
-                group = generate_twin_group(group, out, editor, seed=0)
-                checks = group.get("group_checks", {})
-                if (not checks.get("deterministic", {}).get("pass")
-                        or not checks.get("cross_target_preservation", {}).get("pass")
-                        or not checks.get("support_gap", {}).get("pass")):
-                    continue
-                generated.append(group)
-            else:
-                group = generate_multi_group(group, out, editor, seed=0)
-                joint = group.get("joint_audit", {})
-                if not all(x.get("decision") != "fail" for x in joint.get("steps", [])) or joint.get("outside_union_support_fraction", 1.0) > 0.02:
-                    continue
-                generated.append(group)
-            print(json.dumps({"generated": index + 1, "accepted": len(generated), "total": len(planned)}, ensure_ascii=False), flush=True)
-    finally:
-        if hasattr(editor, "pipe"):
-            editor.pipe.close()
+    generated_path = root / "generated.jsonl"
+    if args.audit_only:
+        if not generated_path.is_file():
+            raise RuntimeError("--audit-only requires generated.jsonl from the completed generation stage")
+        generated = [json.loads(line) for line in generated_path.read_text().splitlines() if line.strip()]
+    else:
+        editor = _editor(args)
+        if editor is None:
+            raise RuntimeError("--editor-model is required unless --plan-only is set")
+        generated = []
+        try:
+            for index, group in enumerate(planned):
+                out = root / "generated" / (group.get("twin_id") or group.get("multi_id"))
+                if args.kind == "twins":
+                    group = generate_twin_group(group, out, editor, seed=0)
+                    checks = group.get("group_checks", {})
+                    accepted = bool(checks.get("deterministic", {}).get("pass")
+                                    and checks.get("cross_target_preservation", {}).get("pass")
+                                    and checks.get("support_gap", {}).get("pass"))
+                else:
+                    group = generate_multi_group(group, out, editor, seed=0)
+                    joint = group.get("joint_audit", {})
+                    accepted = (all(x.get("decision") != "fail" for x in joint.get("steps", []))
+                                and joint.get("outside_union_support_fraction", 1.0) <= 0.02)
+                # Preserve rejected groups too, including the exact gates that failed.
+                atomic_json(out / "group.json", group)
+                if accepted:
+                    generated.append(group)
+                print(json.dumps({"generated": index + 1, "accepted": len(generated), "total": len(planned)}, ensure_ascii=False), flush=True)
+        finally:
+            if hasattr(editor, "pipe"):
+                editor.pipe.close()
+        write_jsonl(generated_path, generated)
+    if args.generate_only:
+        print(json.dumps({"status": "generated_pending_audit", "groups": len(generated),
+                          "manifest": str(generated_path)}, ensure_ascii=False))
+        return 0
     auditor = _auditor(args)
     try:
         if auditor is not None and generated:
@@ -547,6 +578,7 @@ def main(argv=None):
     finally:
         if auditor is not None:
             auditor.close()
+    write_jsonl(root / "audited.jsonl", generated)
     final = []
     final_counts = Counter()
     final_quota = _quota(args.target) if args.kind == "twins" else None
@@ -556,7 +588,12 @@ def main(argv=None):
             deterministic = group.get("group_checks", {}).get("group_pass", False)
             if not (deterministic and semantic):
                 continue
-            validate_twin_record(group)
+            try:
+                validate_twin_record(group)
+            except (ValueError, TypeError, KeyError) as exc:
+                atomic_json(root / "rejected" / f"{group['twin_id']}_release.json",
+                            {"group_id": group["twin_id"], "stage": "release", "reason": str(exc)})
+                continue
             if final_quota is not None and final_counts[group["operation"]] >= final_quota[group["operation"]]:
                 continue
             final_counts[group["operation"]] += 1

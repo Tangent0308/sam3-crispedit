@@ -327,3 +327,91 @@ def test_multi_step_audit_compares_each_actual_input_and_output(tmp_path):
                 results.append({"job_id": job["job_id"], "semantic_audit": audit})
             return results
     assert audit_multi_groups([group], Model(), tmp_path / "audit")[0]["joint_audit"]["pass"]
+
+
+def test_twin_noop_uses_source_fields_and_word_boundaries(tmp_path):
+    image, objects = _source(tmp_path)
+    for obj in objects:
+        obj["category"] = "bag,backpack"
+    geometry = [{"bbox": [1, 1, 20, 20], "point": [5, 5], "area_fraction": .05}] * 2
+    plan = {"feasible": True, "operation": "attribute", "scope": "backpack", "payload": "",
+            "attributes": [{"property": "color", "value": "red"}],
+            "members": [{"object_id": str(i), "ref_phrase": f"the backpack on the {side}",
+                         "source_color": "grey", "evidence": "Partially obscured; can become red."}
+                        for i, side in enumerate(("left", "right"))]}
+    group = build_twin_group({"source_id": "s", "image_path": str(image)}, objects, plan,
+                            [o["mask_path"] for o in objects], split="train", scope_level="object",
+                            group_id="tw", geometry=geometry, assigned_operation="attribute")
+    assert "selected backpack" in group["instruction_noref"]
+    import pytest
+    plan["members"][0]["source_color"] = "red"
+    with pytest.raises(ValueError, match="already present"):
+        build_twin_group({}, objects, plan, [], split="train", scope_level="object",
+                         group_id="tw", geometry=geometry)
+
+
+def test_audit_only_preserves_generated_checkpoint_without_loading_editor(tmp_path, monkeypatch):
+    import json
+    import scripts.run_group_pipeline as runner
+    image, objects = _source(tmp_path)
+    root = tmp_path / "run"
+    (root / "inputs").mkdir(parents=True)
+    candidate = {"source_id": "s", "image_path": str(image), "objects": objects}
+    selection = {"candidate": candidate, "objects": objects, "operation": "remove",
+                 "scope_level": "object", "gate": {}}
+    (root / "inputs/selected.jsonl").write_text(json.dumps(selection) + "\n")
+    # Audit rejection remains available for diagnosis; it never enters final.
+    group = {"twin_id": "tw", "group_checks": {"group_pass": False}}
+    (root / "generated.jsonl").write_text(json.dumps(group) + "\n")
+    before = (root / "generated.jsonl").read_bytes()
+    monkeypatch.setattr(runner, "_candidate_rows", lambda *a: [candidate])
+    def forbidden(*a):
+        raise AssertionError("audit-only loaded editor")
+    monkeypatch.setattr(runner, "_editor", forbidden)
+    class Auditor:
+        def close(self):
+            pass
+    monkeypatch.setattr(runner, "_auditor", lambda *a: Auditor())
+    monkeypatch.setattr(runner, "audit_twin_groups", lambda groups, *a: groups)
+    runner.main(["--kind", "twins", "--manifest", str(tmp_path / "manifest.jsonl"),
+                 "--output-root", str(root), "--target", "1", "--audit-only", "--audit-model", "fake"])
+    assert (root / "generated.jsonl").read_bytes() == before
+    assert json.loads((root / "audited.jsonl").read_text())["twin_id"] == "tw"
+    assert (root / "final/twins_train.jsonl").read_text() == ""
+    assert not json.loads((root / "release.json").read_text())["published"]
+
+
+def test_exact_twin_area_ratio_rejects_bbox_only_false_positive(tmp_path):
+    import pytest
+    image, objects = _source(tmp_path)
+    plan = {"feasible": True, "operation": "remove", "scope": "backpack", "payload": "",
+            "members": [{"object_id": str(i), "ref_phrase": f"the {side} backpack"}
+                        for i, side in enumerate(("left", "right"))]}
+    geometry = [{"bbox": [1, 1, 20, 20], "point": [5, 5], "area_fraction": area}
+                for area in (.12, .02)]
+    with pytest.raises(ValueError, match="exact mask area ratio"):
+        build_twin_group({"source_id": "s", "image_path": str(image)}, objects, plan,
+                         [o["mask_path"] for o in objects], split="train", scope_level="object",
+                         group_id="tw", geometry=geometry)
+
+
+def test_review_pdf_includes_fifth_step_and_preserves_decisions(tmp_path):
+    import json
+    from scripts.review_group_data import main
+    image, objects = _source(tmp_path)
+    units = [{"unit_id": f"U{i}", "ref": "the backpack", "instruction": "Remove the backpack.",
+              "mask": objects[0]["mask_path"], "step_input_image": str(image),
+              "step_output_image": str(image)} for i in range(1, 6)]
+    group = {"multi_id": "m", "source_id": "s", "source_image": str(image), "units": units,
+             "generation_order": ["U5", "U4", "U3", "U2", "U1"]}
+    manifest = tmp_path / "groups.jsonl"
+    manifest.write_text(json.dumps(group) + "\n")
+    out = tmp_path / "review"
+    out.mkdir()
+    decision = {"group_id": "m", "reviewer": "assistant", "status": "reviewed", "decision": "fail"}
+    (out / "human_review.jsonl").write_text(json.dumps(decision) + "\n")
+    main(["--manifest", str(manifest), "--kind", "multi", "--output-dir", str(out)])
+    index = json.loads((out / "page_index.json").read_text())
+    assert [r["unit_id"] for r in index] == group["generation_order"]
+    assert all(Path(r["image"]).is_file() for r in index)
+    assert json.loads((out / "human_review.jsonl").read_text()) == decision
