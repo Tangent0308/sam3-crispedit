@@ -26,7 +26,7 @@ The candidates are already prefiltered as two or three distinct visible instance
 The no-ref instruction must be identical for all members and be rendered from one shared structured specification. References are concise noun phrases that distinguish members in the unmarked original image. Do not mention masks, colors, IDs, crops, annotations or image coordinates. For add, select the directly supporting host/attachment site; use a reference anchor only when direct attachment is clearly unnatural. For remove, never remove human anatomy or an essential support. For replace, change visible form/design, not only color. For attribute, change one plausible requested property that is visibly different on every member.
 
 Return JSON only:
-{"feasible":true,"operation":"...","scope":"short noun phrase","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","members":[{"object_id":"...","ref_phrase":"the ...","evidence":"brief"},...],"evidence":"brief"}
+{"feasible":true,"operation":"...","scope":"short shared noun","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","members":[{"object_id":"...","ref_phrase":"the ...","source_color":"","evidence":"brief"},...],"evidence":"brief"}
 The operation must be the assigned operation. attributes is [{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}] only for attribute. placement for add is {"relation":"on|in|around|to|...","site":"optional noun","anchor_mode":"support|reference"}; direct support is preferred. remove_mode is whole, part, contents, contents_only, lowerlegs or hem. Keep the edit one concise sentence after rendering.
 '''
 
@@ -130,14 +130,15 @@ def multi_prompt(assignments: dict[str, str], objects: list[dict[str, Any]], ord
     ) + "\nDefault generation order: " + ", ".join(order)
 
 
-def _shared_raw(plan: dict[str, Any], ref: str, object_id: str, unit_index: int) -> dict[str, Any]:
+def _shared_raw(plan: dict[str, Any], ref: str, object_id: str, unit_index: int,
+                *, scope: str | None = None, source_color: str = "") -> dict[str, Any]:
     return {"feasible": True, "object_id": object_id, "unit_index": unit_index,
             "operation": plan["operation"], "ref_phrase": ref,
-            "category": plan.get("scope", "object"), "scope": plan["scope"],
+            "category": scope or plan.get("scope", "object"), "scope": scope or plan["scope"],
             "payload": plan.get("payload", ""), "target_part": plan.get("target_part", ""),
             "remove_mode": plan.get("remove_mode", "whole"), "placement": plan.get("placement"),
             "attributes": plan.get("attributes", []), "qualifier": plan.get("qualifier", ""),
-            "evidence": plan.get("evidence", "")}
+            "source_color": source_color, "evidence": plan.get("evidence", "")}
 
 
 def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], plan: dict[str, Any],
@@ -149,12 +150,25 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
     if not isinstance(members, list) or len(members) != len(objects):
         raise ValueError("twin plan member count mismatch")
     by_id = {str(m.get("object_id")): m for m in members}
+    # The no-ref sentence is shared across members.  Use the common source
+    # category for its scope so a model cannot leak one member's color/material
+    # into the instruction used for another member.
+    categories = [str(obj.get("category") or "object").split(",", 1)[0].strip() for obj in objects]
+    shared_scope = categories[0] if categories and all(c.lower() == categories[0].lower() for c in categories) else str(plan.get("scope") or "object")
+    if plan.get("operation") == "attribute":
+        attrs = plan.get("attributes") or []
+        target_values = [str(a.get("value", "")).strip().lower() for a in attrs if isinstance(a, dict)]
+        for item in members:
+            evidence = f"{item.get('ref_phrase', '')} {item.get('source_color', '')} {item.get('evidence', '')}".lower()
+            if any(value and value in evidence for value in target_values):
+                raise ValueError("attribute value is already present in a twin member description")
     units = []
     for index, (obj, mask_path, geom) in enumerate(zip(objects, mask_paths, geometry), 1):
         item = by_id.get(str(obj["object_id"]))
         if not item or not str(item.get("ref_phrase", "")).strip():
             raise ValueError("missing twin reference")
-        raw = _shared_raw(plan, item["ref_phrase"], str(obj["object_id"]), index)
+        raw = _shared_raw(plan, item["ref_phrase"], str(obj["object_id"]), index,
+                          scope=shared_scope, source_color=str(item.get("source_color", "")))
         unit = build_unit(raw, {**obj, "metadata": obj.get("metadata", {})}, mask_path, geom, [])
         errors = validate_instruction(unit)
         if errors:
