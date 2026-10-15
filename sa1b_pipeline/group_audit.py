@@ -20,6 +20,25 @@ TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. The sourc
 MULTI_GROUP_PROMPT = '''You are auditing a joint multi-target edit group. The original scene, each chain step, and the final result are provided. Check that each original ref identifies one target, every assigned operation is completed in its step and remains correct later, adjacent targets do not bleed into each other, and the final image is natural. Return JSON only: {"decision":"pass|fail","unique_refs":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
 
+def _marked_scene(group: dict[str, Any]) -> str | None:
+    views = (group.get("planning") or {}).get("views") or []
+    if views and Path(views[0]).is_file():
+        return str(views[0])
+    return None
+
+
+def _target_contract(group: dict[str, Any], *, kind: str) -> str:
+    rows = group.get("members", []) if kind == "twins" else group.get("units", [])
+    lines = []
+    for index, member in enumerate(rows, 1):
+        lines.append(
+            f"{member.get('unit_id', f'U{index}')}: object_id={member.get('object_id')}; "
+            f"ref={member.get('ref') or member.get('ref_phrase')}; "
+            f"operation={member.get('operation')}; instruction={member.get('instruction') or member.get('instruction_ref')}"
+        )
+    return "\n".join(lines)
+
+
 def _member_comparison(paths: list[str], out: Path) -> str:
     """Pack every twin member panel into one audit image.
 
@@ -60,8 +79,14 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
         comparison = _member_comparison([m["edited_image"] for m in group["members"]],
                                         panel_dir / f"{group['twin_id']}_comparison.jpg")
         refs.append(group)
-        jobs.append({"job_id": group["twin_id"], "images": [group["source_image"], comparison],
-                     "prompt": TWIN_GROUP_PROMPT})
+        marked = _marked_scene(group)
+        images = [group["source_image"]]
+        if marked:
+            images.append(marked)
+        images.append(comparison)
+        jobs.append({"job_id": group["twin_id"], "images": images[:3],
+                     "prompt": TWIN_GROUP_PROMPT + "\nTarget contract:\n" +
+                     _target_contract(group, kind="twins")})
     # The source plus one tiled comparison stays within the three-image limit
     # while showing every member, including optional three-member groups.
     results = []
@@ -81,6 +106,9 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
     results = []
     for group in groups:
         images = [group["source_image"]]
+        marked = _marked_scene(group)
+        if marked:
+            images.append(marked)
         comparison_paths = []
         for member in group["units"]:
             if member.get("step_output_image"):
@@ -90,7 +118,8 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
         if comparison_paths:
             images.append(_member_comparison(comparison_paths, panel_dir / f"{group['multi_id']}_comparison.jpg"))
         result = model.call_batch([{"job_id": group["multi_id"], "images": images[:3],
-                                    "prompt": MULTI_GROUP_PROMPT}])[0]
+                                    "prompt": MULTI_GROUP_PROMPT + "\nTarget contract:\n" +
+                                    _target_contract(group, kind="multi")}])[0]
         audit = result["semantic_audit"]
         group["joint_audit"]["semantic_audit"] = audit
         group["joint_audit"]["semantic_audit_pass"] = audit.get("decision") == "pass"
