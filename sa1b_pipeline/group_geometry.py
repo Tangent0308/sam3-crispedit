@@ -25,28 +25,22 @@ def precise_point(mask: np.ndarray) -> list[int]:
 
     The benchmark point is an interior selector, not a bbox-centre heuristic.
     ``distance_transform_edt`` is exact on the pixel grid and deterministic;
-    the fallback scans the smaller foreground set for environments without
-    SciPy.
+    SciPy is required: choosing distance from the image border is not a valid
+    substitute for distance from the selector boundary.
     """
     mask = np.asarray(mask, dtype=bool)
     if mask.ndim != 2 or not mask.any():
         raise ValueError("point requires a non-empty 2D mask")
     try:
         from scipy.ndimage import distance_transform_edt
-        distances = distance_transform_edt(mask)
+        distances = distance_transform_edt(np.pad(mask, 1, constant_values=False))[1:-1, 1:-1]
         best = np.flatnonzero(distances == distances.max())
         index = int(best[0])
         y, x = np.unravel_index(index, mask.shape)
         return [int(x), int(y)]
-    except ImportError:
-        ys, xs = np.where(mask)
-        best = (int(xs[0]), int(ys[0]), -1)
-        coords = list(zip(ys.tolist(), xs.tolist()))
-        for y, x in coords:
-            distance = min(x, y, mask.shape[1] - 1 - x, mask.shape[0] - 1 - y)
-            if distance > best[2]:
-                best = (x, y, distance)
-        return [best[0], best[1]]
+    except ImportError as exc:
+        raise RuntimeError("precise_point requires scipy; install it in the planning runtime") from exc
+
 
 
 def support_mask(mask: np.ndarray, operation: str, policy: str | None = None) -> np.ndarray:

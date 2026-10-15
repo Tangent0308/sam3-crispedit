@@ -7,7 +7,7 @@ name = "sa1b-samtok-edit-data"
 version = "0.1.0"
 description = "Benchmark-v2 aligned SA-1B fine-grained edit-pair construction"
 requires-python = ">=3.10"
-dependencies = ["numpy", "Pillow"]
+dependencies = ["numpy", "Pillow", "scipy"]
 
 [project.optional-dependencies]
 vision = ["pycocotools", "opencv-python-headless"]

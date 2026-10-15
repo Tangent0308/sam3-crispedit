@@ -32,8 +32,8 @@ The operation must be the assigned operation. attributes is [{"property":"color|
 FIELD CONTRACT: scope is ONE shared singular object/part noun, e.g. wheel rim, never a full sentence or metadata alias list. It must describe the visible white mask itself, not an imagined subpart or the whole host of a part mask. target_part MUST be "": these candidates have no additional resolved execution sub-mask. If the mask is already a rim, use scope="wheel rim" and target_part="". Do not reinterpret a building mask as only its facade or a person mask as only their clothes.
 For remove: payload="", target_part="", attributes=[], placement=null, qualifier="". Example shared fields: scope="street lamp", operation="remove". Never put the instruction sentence in payload.
 For attribute: payload="", attributes=[{"property":"color","value":"blue"}], target_part="", placement=null, qualifier="". The property must naturally apply to the selected mask, preserve other surfaces, and differ from EVERY member's original appearance.
-For replace: payload names a different physical object/design (e.g. "a five-spoke alloy wheel"), never just "magenta" or a different paint color. target_part="", attributes=[], placement=null, qualifier="".
-For add: payload names a conventional new physical item, placement describes its direct support/attachment to each selected host; attributes=[], target_part="", qualifier="". Do not plant a shrub directly in solid rock or attach items to a painted line. No vague "small"/"identical" qualifiers: encode necessary size/design in payload.
+For replace: payload names a different physical object/design (e.g. "a five-spoke alloy wheel rim"), never just "magenta" or a different paint color. Replacing a green stripe with a black stripe is still attribute, NOT replace. If the selected entity is only printed paint/texture and no physical replacement is natural, return feasible=false. Match replacement extent: a rim mask receives a new rim, not a whole wheel and tire. target_part="", attributes=[], placement=null, qualifier="".
+For add: payload names a conventional new physical item, placement describes its direct support/attachment to each selected host; attributes=[], target_part="", qualifier="". site is a real location noun such as "top edge" or "center", or the empty string "" when unnecessary; never write "empty", "optional", "none", or the host noun again. Rendering is: Add PAYLOAD RELATION the SITE of REF, or Add PAYLOAD RELATION REF when site="". scope/ref name the whole white selector: for a full food-cart mask, use food cart as the anchor and canopy as placement.site, never rename the entire mask canopy. Do not plant a shrub directly in solid rock or attach items to a painted line. No vague "small"/"identical" qualifiers: encode necessary size/design in payload.
 Use natural edit content. A plausible refusal is better than inventing a source object, narrowing the mask, or requesting an operation that does not fit. Return feasible=false with a concrete reason if any member cannot satisfy the assigned operation.
 '''
 
@@ -173,6 +173,31 @@ def _shared_raw(plan: dict[str, Any], ref: str, object_id: str, unit_index: int,
             "source_color": source_color, "evidence": plan.get("evidence", "")}
 
 
+def _validate_group_edit_fields(plan: dict[str, Any]) -> None:
+    """Catch observed malformed fields before spending editor time.
+
+    This catches explicit color-only replacements, not all semantic mismatches;
+    source appearance and physical plausibility still require visual review.
+    """
+    operation = plan.get("operation")
+    if operation == "add":
+        site = str((plan.get("placement") or {}).get("site") or "").strip().lower()
+        if site in {"empty", "none", "null", "optional", "optional noun", "n/a"}:
+            raise ValueError("add placement site must be a location noun or empty string")
+        scope = str(plan.get("scope") or "").strip().lower()
+        if site and site.removeprefix("the ") == scope.removeprefix("the "):
+            raise ValueError("add placement site repeats the host scope")
+    if operation == "replace":
+        colors = r"red|green|blue|yellow|orange|purple|pink|black|white|grey|gray|brown|silver|gold|beige|cyan|magenta"
+        modifiers = re.compile(r"\b(?:a|an|the|solid|bright|dark|light|" + colors + r")\b", re.I)
+        def without_color(value: Any) -> str:
+            return " ".join(modifiers.sub(" ", str(value or "")).lower().split())
+        scope = without_color(plan.get("scope"))
+        payload = without_color(plan.get("payload"))
+        if scope and payload == scope:
+            raise ValueError("replace needs a different physical form, not only a color")
+
+
 def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], plan: dict[str, Any],
                      mask_paths: list[str], *, split: str, scope_level: str, group_id: str,
                      geometry: list[dict[str, Any]], assigned_operation: str | None = None) -> dict[str, Any]:
@@ -184,6 +209,7 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         raise ValueError("twin add requires a direct support anchor")
     if plan.get("feasible") is not True or plan.get("operation") not in {"add", "replace", "remove", "attribute"}:
         raise ValueError("infeasible or invalid twin plan")
+    _validate_group_edit_fields(plan)
     members = plan.get("members")
     if not isinstance(members, list) or len(members) != len(objects):
         raise ValueError("twin plan member count mismatch")
@@ -266,6 +292,7 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
         if (not item or str(item.get("unit_id")) != expected_unit_id
                 or item.get("operation") != assignments.get(str(obj["object_id"]))):
             raise ValueError("multi operation or object mismatch")
+        _validate_group_edit_fields(item)
         raw = {"feasible": True, "object_id": str(obj["object_id"]), "unit_index": index,
                "operation": item["operation"], "ref_phrase": item["ref_phrase"],
                "category": item.get("scope", "object"), "scope": item["scope"],

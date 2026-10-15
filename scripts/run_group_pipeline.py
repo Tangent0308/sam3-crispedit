@@ -120,6 +120,13 @@ def _require_manual_review(groups: list[dict[str, Any]], path: Path, *, kind: st
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     by_id = {str(row.get("group_id")): row for row in rows if row.get("group_id")}
     expected = [str(group.get("twin_id") or group.get("multi_id")) for group in groups]
+    reviewed_failures = [gid for gid in expected if gid in by_id
+                         and str(by_id[gid].get("status", "")).lower() in
+                         {"reviewed", "pass", "fail", "manual_pass", "approved"}
+                         and not _manual_review_pass(by_id[gid])]
+    if reviewed_failures:
+        raise RuntimeError("human review gate contains explicitly rejected or incomplete reviews: "
+                           + ", ".join(reviewed_failures[:10]))
     valid_ids = {gid for gid in expected if _manual_review_pass(by_id.get(gid, {}))}
     required = len(expected) if split == "eval" else (200 if kind == "twins" else 100)
     required = min(required, len(expected))
