@@ -533,3 +533,11 @@ def test_scene_locator_preserves_selected_pixels_and_crop_alignment(tmp_path):
     union = np.logical_or.reduce([np.asarray(Image.open(p)) > 0 for p in masks])
     assert np.array_equal(before[union], after[union])
     assert np.any(before[~union] != after[~union])
+
+
+def test_twin_category_exclusions_cover_modified_nouns_not_materials():
+    from sa1b_pipeline.group_geometry import category_allowed
+    for name in ("artificial autumn leaves", "brick wall", "large grey boulder", "sandy embankment", "stone,rock"):
+        assert not category_allowed(name)[0]
+    for name in ("stone fountain", "wall clock", "leaf-shaped pendant", "brick chimney", "shirt sleeve"):
+        assert category_allowed(name)[0]

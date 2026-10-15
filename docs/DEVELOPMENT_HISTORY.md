@@ -77,3 +77,5 @@ Qwen3-VL-8B 规划小批中，修复后 2 组保留 1 组；该组用 Qwen-Image
 继续检查发现轮廓补充 prompt 的 `site=empty` 容易被逐字生成，和主 prompt 的空字符串约定冲突；已改成明确的 JSON 空字符串说明。新 32 组测试启动在此修正之前，保留为真实测试证据，不回写其模型输出。另修复组生图续跑：新 `render.json` 对源图/前一步、mask、spec、seed、editor config 建立指纹，原子保存目标图并校验哈希；拒绝把旧图片与新指令拼接，复用时保留原始 context。旧实验无 render checkpoint 的图片仍可 audit-only 复审，不能未经验证进入新的 generate-only 续跑。原 50k 的代码包完全不受影响。
 
 32 组独立规划测试耗时 326.3 秒，29 组结构通过（add 6、replace 7、remove 8、attribute 8），61 张目标图开始完整生成。assistant 实际检查全部 29 组后判 8 组规划基本可用；主要失败是全图位置错配而非源 mask 无法使用。增加默认关闭的 `--locate-planning-scene` 对照实验：将 U 标签关联到全图外轮廓，补充归一化 bbox，明确相对位置按原图而非 crop 行序解释。图像测试保证所有 selector 内部像素和干净 crop 不变，候选/输出协议不变。此时尚未完成该变体的模型回归，不能宣称质量改善。
+
+2026-10-15：对已选候选的类别检查补足带修饰语的名词，例如 artificial autumn leaves、brick wall、embankment；按名词尾部而非任意子串判断，避免错误排除 stone fountain。面积分桶优先读取压缩 RLE 真面积，避免为统计解码整张 mask；不改源图、已有生成结果或 50k 部署包。
