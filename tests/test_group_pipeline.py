@@ -146,6 +146,30 @@ def test_multi_attribute_rejects_value_repeated_in_source_selector(tmp_path):
         raise AssertionError("source attribute no-op was accepted")
 
 
+def test_ref_color_must_match_explicit_dense_object_color(tmp_path):
+    image, objects = _source(tmp_path)
+    objects[0].update({"category": "car,suv", "description": "A black SUV with a glossy finish."})
+    candidate = {"source_id": "color-ref", "image_path": str(image), "objects": objects[:1]}
+    _, mask_paths, _ = group_views(candidate, objects[:1], tmp_path / "color_views")
+    mask = np.asarray(Image.open(mask_paths[0])) > 0
+    ys, xs = np.where(mask)
+    geometry = [{"bbox": [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)],
+                 "point": precise_point(mask), "area_fraction": float(mask.mean())}]
+    plan = {"feasible": True, "generation_order": ["U1"], "targets": [{
+        "unit_id": "U1", "object_id": "0", "operation": "remove", "scope": "suv",
+        "ref_phrase": "the red SUV", "payload": "", "target_part": "",
+        "remove_mode": "whole", "placement": None, "attributes": [], "qualifier": "",
+        "evidence": "wrong color"
+    }]}
+    try:
+        build_multi_group(candidate, objects[:1], plan, mask_paths, split="train",
+                          group_id="color-ref-test", geometry=geometry, assignments={"0": "remove"})
+    except ValueError as exc:
+        assert "reference color" in str(exc)
+    else:
+        raise AssertionError("contradictory ref color was accepted")
+
+
 def test_multi_plan_requires_exact_unit_ids_and_unique_refs(tmp_path):
     image, objects = _source(tmp_path)
     candidate = {"source_id": "multi-id", "image_path": str(image), "objects": objects}

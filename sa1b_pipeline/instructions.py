@@ -30,6 +30,25 @@ def _scope_phrase(raw_scope: str, category: str) -> str:
     return _lower_article(value or "object")
 
 
+_COLOR_WORDS = {
+    "black", "white", "red", "blue", "green", "yellow", "orange", "pink",
+    "purple", "brown", "gray", "grey", "silver", "gold", "beige", "tan",
+}
+
+
+def _main_color_conflict(ref: str, obj: dict[str, Any]) -> bool:
+    """Reject a ref color contradicting a directly described object color."""
+    category = _clean(obj.get("category", "")).split(",")[-1].strip().lower()
+    if not category:
+        return False
+    description = _clean(obj.get("description", "")).lower()
+    colors = "|".join(sorted(_COLOR_WORDS))
+    source_match = re.search(r"\b(?:a|an|the)\s+(%s)\s+%s\b" %
+                            (colors, re.escape(category)), description)
+    ref_match = re.search(r"\b(%s)\s+%s\b" % (colors, re.escape(category)), ref.lower())
+    return bool(source_match and ref_match and source_match.group(1) != ref_match.group(1))
+
+
 def _payload_for_operation(operation: str, payload: str, target: str) -> str:
     """Normalize an MLLM that returned a full instruction instead of payload."""
     value = _clean(payload)
@@ -61,6 +80,8 @@ def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometr
         raise ValueError(f"invalid MLLM operation: {operation}")
     ref = _lower_article(_clean(raw.get("ref_phrase") or raw.get("target") or obj.get("description") or obj.get("category")))
     scope = _scope_phrase(_clean(raw.get("scope") or ""), _clean(obj.get("category") or ""))
+    if _main_color_conflict(ref, obj):
+        raise ValueError('reference color conflicts with the dense source description')
     attributes = raw.get('attributes') or []
     attribute_kind = _clean(raw.get('attribute_kind')) or 'color'
     payload = _payload_for_operation(operation, _clean(raw.get('payload') or raw.get('new_content')), ref)
