@@ -27,6 +27,7 @@ def main(argv=None):
     parser.add_argument("--split", choices=("train", "eval"), required=True)
     parser.add_argument("--target", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--twin-same-category-fraction", type=float, default=.30)
     args = parser.parse_args(argv)
     name = ("twins_" if args.kind == "twins" else "multi_") + args.split + ".jsonl"
     files = sorted(args.input_root.glob(f"rank*/final/{name}"))
@@ -49,12 +50,23 @@ def main(argv=None):
     sources = Counter(_source_id(row) for row in rows)
     if any(count > 2 for count in sources.values()):
         raise RuntimeError("source has more than two groups: " + repr({k: v for k, v in sources.items() if v > 2}))
+    relation_counts = Counter()
     operation_counts = Counter()
     member_counts = Counter()
     if args.kind == "twins":
         for row in rows:
             operation_counts[str(row.get("operation"))] += 1
             member_counts[len(row.get("members", []))] += 1
+        if any(row.get('twin_contract_version') == 'blind-cross-category-1' for row in rows):
+            from sa1b_pipeline.group_schema import validate_twin_record
+            if any(row.get('twin_contract_version') != 'blind-cross-category-1' for row in rows):
+                raise RuntimeError('cannot merge historical twins into the blind cross-category contract')
+            for row in rows:
+                validate_twin_record(row, expected_split=args.split)
+                relation_counts[row.get('category_relation')] += 1
+            expected_same=round(args.target*args.twin_same_category_fraction)
+            if set(relation_counts)-{'same','cross'} or abs(relation_counts['same']-expected_same)>max(1,round(args.target*.02)):
+                raise RuntimeError(f'twin category relation quota drift: {dict(relation_counts)}')
         expected = args.target // 4
         if any(operation_counts[op] not in {expected, expected + (1 if i < args.target % 4 else 0)}
                for i, op in enumerate(OPS)):
@@ -80,7 +92,7 @@ def main(argv=None):
     temp.replace(args.output)
     summary = {"kind": args.kind, "split": args.split, "groups": len(rows),
                "source_count": len(sources), "max_groups_per_source": max(sources.values(), default=0),
-               "operation_counts": dict(operation_counts), "member_counts": dict(member_counts),
+               "operation_counts": dict(operation_counts), "category_relations": dict(relation_counts), "member_counts": dict(member_counts),
                "inputs": [str(path) for path in files], "output": str(args.output)}
     summary_path = args.output.with_suffix(args.output.suffix + ".summary.json")
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

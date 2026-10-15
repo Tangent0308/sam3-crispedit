@@ -15,7 +15,7 @@ from PIL import Image
 from .geometry import load_mask, operation_quality_gate
 from .group_geometry import (adjacent_pair_gate, category_allowed, object_features,
                              twin_pair_gate, normalized_category, support_mask, bbox_gap,
-                             gap_pixels)
+                             gap_pixels, candidate_granularity, candidate_category)
 from .schema import OPERATIONS
 
 
@@ -169,7 +169,24 @@ def twin_operation_priority(objects: list[dict[str, Any]], operation: str) -> in
         if operation == "attribute" and heads & {"banner", "logo", "text", "sign"}:
             score -= 1
         scores.append(score)
-    return min(scores, default=0)
+    score = min(scores, default=0)
+    if len(objects)>1 and len({normalized_category(o.get('category','')) for o in objects})>1:
+        # Ranking only: shared physical function/support improves proposal
+        # efficiency; the planner still verifies pixels and may reject.
+        families = [
+            {'chair','armchair','stool','bench','sofa','couch'},
+            {'bottle','vase','pot','planter','urn','cup','bowl'},
+            {'shirt','jacket','coat','dress','sweater','garment'},
+            {'backpack','bag','sack','suitcase','package'},
+            {'lamp','light','lantern'},
+        ]
+        if operation == 'add':
+            families += [{'table','desk','shelf','cart','chair','armchair','bench'},
+                         {'shirt','jacket','coat','backpack','bag','hat'}]
+        words = [set(re.findall(r'[a-z]+', normalized_category(o.get('category','')))) for o in objects]
+        if operation in {'add','replace'} and any(all(w & f for w in words) for f in families):
+            score += 4
+    return score
 
 
 def _short_side(obj: dict[str, Any]) -> float:
@@ -309,7 +326,7 @@ def _group_scope(a: dict[str, Any], b: dict[str, Any],
     def is_part(obj: dict[str, Any]) -> bool:
         if (obj.get("metadata") or {}).get("is_part") is True:
             return True
-        return _is_part_category(obj.get("category", ""))
+        return candidate_granularity(obj) == "part"
     if is_part(a) or is_part(b):
         # Dense SA-1B labels do not carry parent IDs.  Recover a conservative
         # same-host signal when a third, non-part mask encloses both parts
@@ -337,13 +354,16 @@ def _group_scope(a: dict[str, Any], b: dict[str, Any],
 def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation: str,
                            seed: int = 0, max_groups_per_source: int = 2,
                            reserved_source_ids: set[str] | None = None,
-                           strict_geometry: bool = False, member_count: int = 2) -> list[dict[str, Any]]:
-    """Select same-category pairs/triples before the MLLM sees them.
+                           strict_geometry: bool = False, member_count: int = 2,
+                           category_relation: str = "any") -> list[dict[str, Any]]:
+    """Select comparable-granularity pairs/triples, allowing different categories.
 
     This function is intentionally conservative: no operation fallback is
     performed after selection and no candidate is rejected for a textual
     ambiguity that only the planner can judge.
     """
+    if category_relation not in {"same", "cross", "any"}:
+        raise ValueError("unknown twin category relation")
     if operation not in OPERATIONS or target < 1 or member_count not in (2, 3):
         raise ValueError("invalid twin target or operation")
     reserved = {str(x) for x in (reserved_source_ids or set())}
@@ -361,7 +381,8 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
         for obj in c.get("objects", []):
             ok, _ = category_allowed(obj.get("category", ""))
             if ok:
-                groups[normalized_category(obj.get("category", ""))].append(obj)
+                key = (candidate_granularity(obj), candidate_category(obj) if category_relation == "same" else "all")
+                groups[key].append(obj)
         # Same-host recovery only needs plausible enclosing masks. Keeping the
         # largest non-part boxes avoids scanning hundreds of tiny labels for
         # every part pair while retaining persons, vehicles, buildings, etc.
@@ -399,6 +420,10 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
             rng.shuffle(values)
             pair_attempts = 0
             for group_objects in combinations(values, member_count):
+                categories = {candidate_category(obj) for obj in group_objects}
+                relation = "same" if len(categories) == 1 else "cross"
+                if category_relation != "any" and relation != category_relation:
+                    continue
                 pair_attempts += 1
                 attempted_total += 1
                 if pair_attempts > 2000 or attempted_total > 50000:
@@ -438,7 +463,8 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
                     rows.append({"candidate": c, "objects": list(group_objects),
                                  "gate": {"member_count": member_count, "pairs": gates,
                                           "eligible": True, "geometry_exact": strict_geometry},
-                                 "scope_level": scope_level,
+                                 "scope_level": scope_level, "category_relation": relation,
+                                 "candidate_granularity": candidate_granularity(group_objects[0]),
                                  "operation": operation})
                     if len(rows) >= target * 8:
                         break

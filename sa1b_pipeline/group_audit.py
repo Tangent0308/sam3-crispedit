@@ -17,7 +17,7 @@ from .audit_backend import VLLMAuditor
 from .validate import _target_panel, audit_prompt
 
 
-TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. Image 1 is the clean original full scene. Image 2 contains one row per member: SOURCE original crop (left), RESULT edited crop (middle), and MASK ONLY black-and-white selector (right). Judge generated appearance ONLY from the middle RESULT column. The right column is never a result. White selects the source object and black excludes it. The source scene and the member result images are provided. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Before deciding, match each white selector to the actual source part and exclude black holes and neighboring objects. Check every ref against all similar instances in the full scene; image-left/image-right refer to the original scene, never crop row order. For add, verify direct physical contact with the selected host/site, not a nearby surface. For remove, check for target remnants and unsupported remnants; deleting a wheel, door, support or other functional part is not natural unless the image clearly supports it. For replace, require a visibly different physical form/design, not only a color or material change. For attribute, verify the requested surface changed while geometry, markings and unrelated materials remain. Judge only visible evidence and fail a member with a concrete mismatch. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
+TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. Image 1 is the clean original full scene. Image 2 contains one row per member: SOURCE original crop (left), RESULT edited crop (middle), and MASK ONLY black-and-white selector (right). Judge generated appearance ONLY from the middle RESULT column. The right column is never a result. White selects the source object and black excludes it. The source scene and the member result images are provided. Different categories are allowed; comparable means all whole objects or all parts, with the shared edit natural for every member. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Before deciding, match each white selector to the actual source part and exclude black holes and neighboring objects. Check every ref against all similar instances in the full scene; image-left/image-right refer to the original scene, never crop row order. For add, verify direct physical contact with the selected host/site, not a nearby surface. For remove, check for target remnants and unsupported remnants; deleting a wheel, door, support or other functional part is not natural unless the image clearly supports it. For replace, require a visibly different physical form/design, not only a color or material change. For attribute, verify the requested surface changed while geometry, markings and unrelated materials remain. Judge only visible evidence and fail a member with a concrete mismatch. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
 MULTI_GROUP_PROMPT = '''You are auditing a joint multi-target edit group. The original scene, each chain step, and the final result are provided. Check that each original ref identifies one target, every assigned operation is correct and completed in its step and remains correct later, adjacent targets do not bleed into each other, and the final image is natural. The group fails if any operation type is wrong. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
@@ -176,6 +176,7 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
         checks["semantic_audit_pass"] = semantic_pass
         checks["group_pass"] = bool(
             member_pass
+            and checks.get("blind_disambiguation", {}).get("pass") is True
             and
             checks.get("deterministic", {}).get("pass") is True
             and checks.get("cross_target_preservation", {}).get("pass") is True
@@ -192,7 +193,7 @@ in member order. Each result should edit ONLY its own member, starting from the 
 For each member first identify the actual white-mask entity and extent. A door leaf is not a double
 door; a rim excludes the tire; multiple leaves are not one leaf. Then test its reference against ALL
 similar instances in image 1. Left/right in a ref means the full original scene, not row order.
-Reject collections, unequal instance granularity, enlarged ref scopes, ambiguous refs, and wrong targets.
+Reject collections, unequal instance granularity, enlarged ref scopes, ambiguous refs, and wrong targets. Different categories are allowed: judge whether the exact shared request is natural for EVERY member, not whether category nouns match.
 The delivered mask is the actual edited source region. For add it is the attachment SITE,
 not necessarily the entire host named in Ref. Verify the site lies on that named host.
 No-ref deliberately supplies NO entity identity; do not infer the masked noun from it.
@@ -219,7 +220,7 @@ Output JSON, with EVERY member in original order, using this schema (replace enu
 "scope_correct":"pass|fail|uncertain","operation_correct":"pass|fail|uncertain",
 "target_done":"pass|fail|uncertain","non_target_preserved":"pass|fail|uncertain",
 "natural":"pass|fail|uncertain"},"failure_reasons":[]}],
-"same_scope":"pass|fail|uncertain","shared_edit_valid":"pass|fail|uncertain","evidence":"brief"}.
+"comparable_granularity":"pass|fail|uncertain","shared_edit_valid":"pass|fail|uncertain","evidence":"brief"}.
 Use fail for a concrete contradiction, uncertain for insufficient visual evidence, pass only when
 supported by your observations. Evaluate independently: earlier members' success proves nothing
 about later members. Do not copy the requested change as observed_change without checking pixels.
@@ -238,7 +239,7 @@ def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> No
         for row in rows:
             if not all(str(row.get(k, "")).strip() for k in ("observed_entity", "ref_entity", "observed_change")):
                 row["scope_correct"] = False
-        audit = {**audit, "members": rows, "same_scope": audit.get("same_scope") == "pass",
+        audit = {**audit, "members": rows, "comparable_granularity": audit.get("comparable_granularity") == "pass",
                  "shared_edit_valid": audit.get("shared_edit_valid") == "pass"}
     expected = [m["unit_id"] for m in group["members"]]
     valid_rows = isinstance(rows, list) and all(isinstance(r, dict) for r in rows)
@@ -246,7 +247,7 @@ def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> No
     members_pass = bool(ids_match) and all(all(r.get(k) is True for k in JOINT_MEMBER_FIELDS) for r in rows)
     if result.get("finish_reason") == "length" or audit.get("decision") == "fail" or audit.get("_parse_error"):
         members_pass = False
-    semantic_pass = members_pass and audit.get("same_scope") is True and audit.get("shared_edit_valid") is True
+    semantic_pass = members_pass and audit.get("comparable_granularity") is True and audit.get("shared_edit_valid") is True
     for index, member in enumerate(group["members"]):
         row = rows[index] if ids_match else {"failure_reasons": ["missing_or_mismatched_member_ids"]}
         member["semantic_audit"] = {**row, "decision": "pass" if ids_match and
@@ -255,10 +256,10 @@ def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> No
     checks.update({"member_semantic_audit_pass": members_pass,
                    "semantic_audit_pass": semantic_pass,
                    "semantic_audit": {**audit, "decision": "pass" if semantic_pass else "fail"},
-                   "audit_mode": "joint-observation-v2", "audit_calls": 1,
+                   "audit_mode": "joint-observation-v3", "audit_calls": 1,
                    "audit_request": {k: result.get(k) for k in
                                      ("semantic_audit_raw", "input_tokens", "output_tokens", "finish_reason")}})
-    checks["group_pass"] = semantic_pass and all(checks.get(k, {}).get("pass") is True for k in
+    checks["group_pass"] = (checks.get("blind_disambiguation", {}).get("pass") is True) and semantic_pass and all(checks.get(k, {}).get("pass") is True for k in
         ("deterministic", "cross_target_preservation", "support_gap"))
 
 

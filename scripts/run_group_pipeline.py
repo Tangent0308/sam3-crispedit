@@ -238,17 +238,16 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
             triple_count = int(math.ceil(pool_count * three_fraction))
             pair_count = pool_count - triple_count
             op_rows = []
-            if triple_count:
-                op_rows.extend(select_twin_candidates(
-                    candidates, target=triple_count, operation=op,
-                    seed=args.seed + index * 1009 + 17,
-                    reserved_source_ids=reservation_ids if args.split == "train" else set(),
-                    member_count=3))
-            if pair_count:
-                op_rows.extend(select_twin_candidates(
-                    candidates, target=pair_count, operation=op,
-                    seed=args.seed + index * 1009,
-                    reserved_source_ids=reservation_ids if args.split == "train" else set()))
+            # Build both relation pools independently so abundant cross-class
+            # combinations cannot crowd out the hard same-class examples.
+            for relation in ('same', 'cross'):
+                for members, number in ((3,triple_count),(2,pair_count)):
+                    if number:
+                        op_rows.extend(select_twin_candidates(
+                            candidates, target=number, operation=op,
+                            seed=args.seed+index*1009+(17 if members==3 else 0),
+                            reserved_source_ids=reservation_ids if args.split=='train' else set(),
+                            member_count=members, category_relation=relation))
             # Keep operation-specific pools separate until quotas are filled;
             # truncating one concatenated pool by source order can silently
             # turn a nominally balanced run into an attribute-heavy run.
@@ -281,6 +280,9 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
         category_counts: Counter[str] = Counter()
         seen_sources: Counter[str] = Counter()
         seen_groups: set[tuple[str, tuple[str, ...], str]] = set()
+        relation_targets = {'same': int(round(args.target*getattr(args,'twin_same_category_fraction',.30)))}
+        relation_targets['cross'] = args.target-relation_targets['same']
+        relation_counts = Counter()
         requirements = []
         for member_count in (3, 2):
             needs_by_op = {
@@ -301,6 +303,9 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
         for op, member_count in requirements:
             candidates_for_cell = []
             for row in pools[op]:
+                relation = row.get('category_relation','same')
+                if relation_counts[relation] >= relation_targets[relation]:
+                    continue
                 if len(row["objects"]) != member_count:
                     continue
                 sid = str(row["candidate"]["source_id"])
@@ -327,6 +332,9 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
                 # silently destroying the requested distribution.
                 fallback = []
                 for row in pools[op]:
+                    relation = row.get('category_relation','same')
+                    if relation_counts[relation] >= relation_targets[relation]:
+                        continue
                     if len(row["objects"]) != member_count:
                         continue
                     sid = str(row["candidate"]["source_id"])
@@ -361,11 +369,12 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
             area_counts[str(row["_selection_area_bucket"])] += 1
             category_counts[category] += 1
             selected.append(row)
+            relation_counts[row.get("category_relation","same")] += 1
         if shortages or len(selected) != args.target or relaxed_quota_count > max(1, int(math.ceil(args.target * 0.005))):
             raise RuntimeError(
                 f"twin selection cannot satisfy quotas: shortages={dict(shortages)} "
                 f"selected={len(selected)}/{args.target} scopes={dict(scope_counts)} "
-                f"areas={dict(area_counts)} relaxed={relaxed_quota_count}")
+                f"areas={dict(area_counts)} relations={dict(relation_counts)} relaxed={relaxed_quota_count}")
         for row in selected:
             row.pop("_selection_area_bucket", None)
         # The loops above preserve both operation quotas and the requested
@@ -425,6 +434,10 @@ def main(argv=None):
     p.add_argument("--max-groups", type=int)
     p.add_argument("--candidate-pool-factor", type=float, default=3.0,
                    help="oversample planning candidates so rejected plans can be refilled")
+    p.add_argument("--quota-from-selection", action="store_true",
+                   help="use frozen shard operation/relation counts to avoid per-rank rounding drift")
+    p.add_argument("--twin-same-category-fraction", type=float, default=.30,
+                   help="target same-category share; remaining groups may mix categories")
     p.add_argument("--twin-three-member-fraction", type=float, default=0.15,
                    help="target fraction of three-member twin groups")
     p.add_argument("--fast-selection", action="store_true",
@@ -436,6 +449,8 @@ def main(argv=None):
         p.error("--audit-only requires --audit-model and no planner/editor model")
     if args.publish and (args.plan_only or args.selection_only or args.generate_only):
         p.error("publication requires the audit stage")
+    if not 0 <= args.twin_same_category_fraction <= 1:
+        p.error("same-category fraction must be within 0..1")
     if args.target < 1:
         p.error("--target must be positive")
     if args.editor_devices and not args.generate_only:
@@ -451,6 +466,9 @@ def main(argv=None):
                                            "reservation": str(args.reservation.resolve()) if args.reservation else None,
                                            "protocol": "2.0", "mask_semantics": "2.0",
                                            "instruction_style": "benchmark-concise-3-blind-1", "steps": 40,
+                                           **({"twin_contract": "blind-cross-category-1",
+                                               "twin_same_category_fraction": args.twin_same_category_fraction,
+                                               **({"quota_from_selection": True} if args.quota_from_selection else {})} if args.kind == "twins" else {}),
                                            **({"structured_planning_json": True} if args.structured_planning_json else {}),
                                            **({"site_model": str(Path(args.site_model).resolve())} if args.site_model else {})})
     candidates = _candidate_rows(args, reservation_ids)
@@ -474,9 +492,11 @@ def main(argv=None):
     selection_members = Counter()
     selection_areas = Counter()
     selection_categories = Counter()
+    selection_relations = Counter()
     for row in selected:
         if args.kind == "twins":
             selection_operations[str(row.get("operation"))] += 1
+            selection_relations[row.get("category_relation", "same")] += 1
             selection_scopes[str(row.get("scope_level", "object"))] += 1
             selection_areas[_row_area_bucket(row)] += 1
             selection_categories[normalized_category(row["objects"][0].get("category", "object")).split(",", 1)[0].strip()] += 1
@@ -491,6 +511,7 @@ def main(argv=None):
                                           "member_counts": selection_members,
                                           "area_buckets": selection_areas,
                                           "category_counts": selection_categories,
+                                          "category_relations": selection_relations,
                                           "source_count": len({r["candidate"]["source_id"] for r in selected}),
                                           "source_ids": sorted({r["candidate"]["source_id"] for r in selected})})
     if args.selection_only:
@@ -617,9 +638,21 @@ def main(argv=None):
                 print(json.dumps({"planning_batch_completed": min(batch_start + len(batch), len(pending)),
                                   "planning_batch_total": len(pending), "checkpointed": len(planned)},
                                  ensure_ascii=False), flush=True)
+        if args.kind == 'twins' and planner is not None:
+            from sa1b_pipeline.blind_identifiability import run_blind_probes
+            run_blind_probes(planned, planner, root / 'blind_probes')
+            for group in planned:
+                atomic_json(plans_dir / (group['twin_id']+'.json'), group)
     finally:
         if planner is not None and hasattr(planner, "close"):
             planner.close()
+    if args.kind == 'twins':
+        for group in planned:
+            check = group.get('group_checks', {}).get('blind_disambiguation', {})
+            if check.get('pass') is not True:
+                atomic_json(root / 'rejected' / (group['twin_id']+'_blind.json'),
+                            {'group_id':group['twin_id'],'stage':'blind_preflight','check':check})
+        planned = [g for g in planned if g.get('group_checks', {}).get('blind_disambiguation', {}).get('pass') is True]
     write_jsonl(root / "planned.jsonl", planned)
     if args.plan_only:
         print(json.dumps({"status": "planned", "groups": len(planned), "root": str(root)}, ensure_ascii=False))
@@ -684,7 +717,15 @@ def main(argv=None):
     write_jsonl(root / "audited.jsonl", generated)
     final = []
     final_counts = Counter()
+    final_relations = Counter()
+    relation_target = {'same': int(round(args.target*args.twin_same_category_fraction))}
+    relation_target['cross'] = args.target-relation_target['same']
     final_quota = _quota(args.target) if args.kind == "twins" else None
+    if args.kind == 'twins' and args.quota_from_selection:
+        if len(selected) != args.target:
+            raise ValueError('shard quota mode requires target equal to frozen selection size')
+        final_quota = dict(selection_operations)
+        relation_target = dict(selection_relations)
     for group in generated:
         if args.kind == "twins":
             semantic = group.get("group_checks", {}).get("semantic_audit_pass") is True
@@ -699,6 +740,10 @@ def main(argv=None):
                 continue
             if final_quota is not None and final_counts[group["operation"]] >= final_quota[group["operation"]]:
                 continue
+            relation = group.get('category_relation', 'same')
+            if final_relations[relation] >= relation_target.get(relation, 0):
+                continue
+            final_relations[relation] += 1
             final_counts[group["operation"]] += 1
         else:
             if not group.get("joint_audit", {}).get("pass"):
@@ -726,6 +771,8 @@ def main(argv=None):
         assert_no_eval_leakage(exported, args.reservation)
     write_jsonl(final_path, exported)
     atomic_json(root / "release.json", {"groups": len(exported), "requested": args.target,
+                                        "accepted_by_category_relation": dict(final_relations) if args.kind == "twins" else None,
+                                        "requested_by_category_relation": relation_target if args.kind == "twins" else None,
                                         "accepted_by_operation": dict(final_counts) if args.kind == "twins" else None,
                                         "remaining_by_operation": {op: max(0, n - final_counts[op]) for op, n in final_quota.items()} if final_quota else None,
                                         "human_review": human_review_summary,

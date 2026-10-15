@@ -150,6 +150,13 @@ def validate_twin_record(record: dict[str, Any], *, expected_split: str | None =
             raise ValueError("twin operation mismatch")
     if not isinstance(record.get("group_checks"), dict):
         raise ValueError("group_checks must be an object")
+    if record.get('twin_contract_version') == 'blind-cross-category-1':
+        kinds = {m.get('selector_granularity', m.get('granularity')) for m in members}
+        if len(kinds) != 1 or not kinds <= {'object', 'part'}:
+            raise ValueError('twin selector granularity mismatch')
+        if record['group_checks'].get('blind_disambiguation', {}).get('pass') is not True:
+            raise ValueError('missing or failed independent blind disambiguation check')
+
 
 
 def validate_multi_record(record: dict[str, Any], *, expected_split: str | None = None) -> None:

@@ -237,3 +237,12 @@ CUDA_VISIBLE_DEVICES=4 /tmp/sa1b-next-runtime/bin/python \
 ```
 
 GPU 4 仅为例子，需选择本任务可用卡。该本机运行时为 Transformers 5.17；复制到新节点时应先验证 SAM3Model/SAM3VideoModel/SAM3Processor 可导入。新 `groups.jsonl` 只复用原目标图，变更源 mask 的组会撤销旧语义通过状态并标 pending，不会发布。它是诊断修正入口，不能把旧审核的通过率当成新 mask 的通过率；新版本须完成定位/轮廓复核再进入发布流程。
+
+
+### 跨类别孪生配额与盲测
+
+新孪生默认 `--twin-same-category-fraction 0.30`，其余 70% 为跨类别。四类编辑配额、两/三成员比例、面积比和源隔离不变。旧的纯同类 5,000 组清单不满足新配比；复用源候选库与 reservation，重新选择、冻结并分片，使用新运行根目录。不可变配置包含 `twin_contract=blind-cross-category-1`，旧计划不会静默当作新协议通过。
+
+规划阶段现在包括每组一次规划和一次独立无定位盲测；`--plan-only` 的 planned.jsonl 只包含两关都通过的组，planned/ 中保留所有规划成功记录，rejected/*_blind.json 与 blind_probes/ 保留盲测拒绝/不确定结果。可读取 blind_probes/summary.json 查看额外调用和耗时。盲测失败组不会进入编辑器。
+
+`group_4node_entry.sh` 自动加 `--quota-from-selection`，各 rank 按冻结 shard 的操作/同类跨类计数分配最终名额；这样不会因每 rank 各自四舍五入而破坏全局配额。选择清单中的 category_relation 必须来自新选择过程。`merge_group_shards.py` 对新协议复核盲测、粒度和同类约 30% 的全局比例（容差 max(1 组, 2% 总组数)）；任何 rank 缺额都不能发布为足额数据。本轮没有启动四机生成。
