@@ -168,7 +168,7 @@ bash scripts/group_4node_entry.sh
 
 ```bash
 python scripts/merge_group_shards.py --kind twins --split train \
-  --input-root "$GROUP_ROOT/twins_train_wave1" --target 5000 \
+  --input-root "$GROUP_ROOT/runs/twins_train" --target 5000 \
   --output "$GROUP_ROOT/final/twins_train.jsonl"
 ```
 
