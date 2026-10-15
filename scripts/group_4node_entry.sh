@@ -53,6 +53,7 @@ ARGS=(
   --manifest "$GROUP_MANIFEST"
   --output-root "$RUN_ROOT"
   --target "$TARGET"
+  --quota-from-selection
   --split "$GROUP_SPLIT"
   --reservation "$GROUP_RESERVATION"
   --planner-model "$GROUP_PLANNER_MODEL"

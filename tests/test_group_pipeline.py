@@ -61,15 +61,18 @@ def test_group_views_and_twin_record_contract(tmp_path):
         m["support_mask"] = m["mask"]
         m["edited_image"] = str(image)
         m["blind_eligible"] = True
+    record["group_checks"]["blind_disambiguation"] = {"pass": True}
     validate_twin_record(record)
     assert record["members"][0]["instruction_noref"] == record["members"][1]["instruction_noref"]
 
 
-def test_pair_gates_require_same_category_and_adjacency(tmp_path):
+def test_pair_gates_allow_cross_category_but_require_comparable_granularity(tmp_path):
     image, objects = _source(tmp_path)
     gate = twin_pair_gate(objects[0], objects[1], image_size=(128, 96))
     assert gate["eligible"]
     objects[1]["category"] = "chair"
+    assert twin_pair_gate(objects[0], objects[1], image_size=(128, 96))["eligible"]
+    objects[1]["category"] = "sleeve"
     assert not twin_pair_gate(objects[0], objects[1], image_size=(128, 96))["eligible"]
 
 
@@ -572,7 +575,8 @@ def test_joint_twin_audit_requires_all_members_and_deterministic_gates():
     group = {"members": [{"unit_id": "U1"}, {"unit_id": "U2"}], "group_checks": {
         k: {"pass": True} for k in ("deterministic", "cross_target_preservation", "support_gap")}}
     result = {"semantic_audit": {"members": [{"unit_id": uid, **{k: True for k in JOINT_MEMBER_FIELDS}}
-              for uid in ("U1", "U2")], "same_scope": True, "shared_edit_valid": True}}
+              for uid in ("U1", "U2")], "comparable_granularity": True, "shared_edit_valid": True}}
+    group["group_checks"]["blind_disambiguation"] = {"pass": True}
     good = copy.deepcopy(group)
     _apply_joint_twin_audit(good, result)
     assert good["group_checks"]["group_pass"]
@@ -620,7 +624,7 @@ def test_joint_observation_audit_uncertainty_fails_closed():
     row = {"unit_id": "U1", "observed_entity": "door leaf", "ref_entity": "whole door",
            "observed_change": "red panel", "checks": {k: "pass" for k in JOINT_MEMBER_FIELDS}}
     row["checks"]["scope_correct"] = "uncertain"
-    _apply_joint_twin_audit(g, {"semantic_audit": {"members": [row], "same_scope": "pass", "shared_edit_valid": "pass"}})
+    _apply_joint_twin_audit(g, {"semantic_audit": {"members": [row], "comparable_granularity": "pass", "shared_edit_valid": "pass"}})
     assert g["members"][0]["semantic_audit"]["scope_correct"] is False
     assert not g["group_checks"]["semantic_audit_pass"]
 

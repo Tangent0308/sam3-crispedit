@@ -109,7 +109,7 @@ def test_contents_mask_union_and_part_selector(tmp_path):
     assert member['mask_semantics']['source_role']=='target'
 
 
-def test_multi_allows_duplicate_sentences_twins_still_require_scope_and_sentence():
+def test_multi_duplicates_and_cross_category_twins_keep_same_sentence():
     spec=make_spec('remove','the left bag','bag')
     m=dict(instruction_spec=spec,instruction_noref=render(spec,False),area_fraction=.1,blind_eligible=True)
     group={'units':[copy.deepcopy(m),copy.deepcopy(m)]}
@@ -117,7 +117,10 @@ def test_multi_allows_duplicate_sentences_twins_still_require_scope_and_sentence
     group={'twin_id':'tw','members':[copy.deepcopy(m),copy.deepcopy(m)]}
     assert blind_group_check(group)['pass']
     group['members'][1]['instruction_spec']['scope']='hat'
+    assert blind_group_check(group)['pass']
+    group['members'][1]['selector_granularity']='part'
     assert not blind_group_check(group)['pass']
+    group['members'][1]['selector_granularity']='object'
     group['members'][1]['instruction_spec']['scope']='bag'
     group['members'][1]['instruction_noref']='Remove the selected bag.'
     assert not blind_group_check(group)['pass']

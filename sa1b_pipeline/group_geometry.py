@@ -129,6 +129,30 @@ def object_features(obj: dict[str, Any], image_size: tuple[int, int]) -> dict[st
     return geometry
 
 
+def candidate_category(obj):
+    """Coarse label hint, avoiding alias-list and decorative-adjective splits."""
+    first = re.split(r'[,;/]', normalized_category(obj.get('category', '')))[0].strip()
+    head = first.split()[-1] if first else 'unknown'
+    return {'armchair':'chair', 'couch':'sofa'}.get(head,head)
+
+
+def candidate_granularity(obj):
+    """Cheap candidate hint only; planning verifies actual mask granularity."""
+    meta = obj.get('metadata') or {}
+    if isinstance(meta.get('is_part'), bool):
+        return 'part' if meta['is_part'] else 'object'
+    if obj.get('parent_id') or meta.get('parent_id'):
+        return 'part'
+    words = set(normalized_category(obj.get('category', '')).split())
+    # Standalone lamps, planters and signs can be complete objects. Do not
+    # classify them as parts merely because they may attach to another object.
+    parts = {'sleeve', 'handle', 'wheel', 'tire', 'strap', 'frame', 'hinge',
+             'latch', 'armrest', 'headlight', 'taillight', 'bumper', 'fender',
+             'pedal', 'spoke', 'handlebar', 'drawer', 'knob', 'cuff', 'roof',
+             'arm', 'hand', 'leg', 'foot', 'finger', 'head', 'face', 'torso'}
+    return 'part' if words & parts else 'object'
+
+
 def twin_pair_gate(a: dict[str, Any], b: dict[str, Any], *, image_size: tuple[int, int],
                    min_gap: float = 16.0, allow_same_host: bool = True) -> dict[str, Any]:
     """Validate structural twin constraints without making semantic claims."""
@@ -136,8 +160,8 @@ def twin_pair_gate(a: dict[str, Any], b: dict[str, Any], *, image_size: tuple[in
     if str(a.get("object_id")) == str(b.get("object_id")):
         reasons.append("same_object")
     ca, cb = normalized_category(a.get("category", "")), normalized_category(b.get("category", ""))
-    if ca != cb:
-        reasons.append("category_mismatch")
+    if candidate_granularity(a) != candidate_granularity(b):
+        reasons.append("granularity_mismatch")
     for obj in (a, b):
         ok, reason = category_allowed(obj.get("category", ""))
         if not ok:
@@ -163,7 +187,8 @@ def twin_pair_gate(a: dict[str, Any], b: dict[str, Any], *, image_size: tuple[in
     return {
         "eligible": not reasons,
         "reasons": reasons,
-        "category": ca,
+        "categories": [ca, cb],
+        "category_relation": "same" if ca == cb else "cross",
         "gap_pixels": gap,
         "required_gap_pixels": threshold,
         "same_host": same_host,

@@ -1,6 +1,8 @@
 """One-call planners for twin and adjacent multi-target groups."""
 from __future__ import annotations
 
+from .group_geometry import candidate_category
+
 import hashlib
 import json
 import re
@@ -25,7 +27,7 @@ TWIN_PROMPT = r'''Plan ONE counterfactual twin group in ONE response. Image 1 is
 
 First identify EACH mask independently from pixels. Candidate labels are deliberately withheld: the geometric preselection does not prove semantic sameness. Describe the selected physical entity, its visible extent and one excluded neighboring part in at most 16 words. Infer a mechanical part from its attachment/function, not just its color or rectangular outline. Do not call every member the same noun merely to create a group. A strap alone, a bag plus strap and a pouch are not interchangeable extents. A partial colored patch cannot authorize deleting the whole object. Occlusion, image clipping and small size alone are NOT rejection reasons when the visible target and request are clear.
 
-Then decide whether ALL masks represent distinct instances of the SAME singular entity at the SAME granularity, and whether the assigned operation is natural for ALL. Reject a mismatched group with feasible=false and one concrete reason. Never change the assigned operation or omit a member. Do not select new targets.
+Then decide whether ALL masks represent distinct editable instances at COMPARABLE granularity (all whole objects or all parts), possibly DIFFERENT categories, and whether the assigned operation is natural for ALL. Reject a mismatched group with feasible=false and one concrete reason. Never change the assigned operation or omit a member. Do not select new targets.
 
 For feasible groups choose ONE shared edit:
 - add: a conventional object directly supported by every host, at an actually visible shared attachment site. scope/ref name the INITIAL mask entity; placement.site names its necessary subpart (e.g. seat). The pipeline later derives the source site mask from target difference intersected with host. Do not call the whole host its subpart. No distant/adjacent reference anchors. Keep site empty only when the selected entity itself is the direct site.
@@ -33,12 +35,12 @@ For feasible groups choose ONE shared edit:
 - remove: erase the selected independent object/part naturally. Do not remove human anatomy, essential supports or only a carrying strap while leaving its bag unsupported. Do not broaden a fragment mask into the whole object.
 - attribute: one plausible property with a new value different from EVERY member's current value. Preserve unrequested shape, markings and other components. Do not reinterpret a person as clothes or an entire mixed object as one surface.
 
-Each ref is the shortest noun phrase that uniquely identifies its mask in the ORIGINAL scene. Prefer one verified distinguishing modifier; use an ordinal only with a clear counting set. For several similar objects on the same side, left/right alone is insufficient. No relative clauses, explanatory afterthoughts or invented landmarks. All members share the exact same no-ref sentence; scope must also match. Payload names new content explicitly, without 'a matching one' or 'like it'.
+Each ref is the shortest noun phrase that uniquely identifies its mask in the ORIGINAL scene. Prefer one verified distinguishing modifier; use an ordinal only with a clear counting set. For several similar objects on the same side, left/right alone is insufficient. No relative clauses, explanatory afterthoughts or invented landmarks. All members share the exact same no-ref sentence; each member keeps its own truthful scope. Never rename different objects as one class. The shared payload/value must be equally natural at EVERY member: chair and stool can share a bar-stool replacement; a car and bag cannot share leather material; removing an occupied chair leaves a person unsupported. Reject requests that clearly imply only one member. Actual source-mask areas must stay within a factor of three. Payload names new content explicitly, without 'a matching one' or 'like it'.
 
 Return valid JSON. Put members FIRST so each visual identification precedes the common edit. For every supplied ID include exactly one entry:
-{"members":[{"object_id":"ID","ref_phrase":"the ...","grounding":{"entity":"independently identified noun","kind":"object|part","host":"host noun or empty","current_value":"source property or empty","distinction":"brief visible unique fact","mask_description":"white includes ...; excludes ...","site_visible":true,"edit_feasible":true}}],"feasible":true,"grounding_version":2,"scope":"shared singular noun","operation":"ASSIGNED","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","replacement_form":"","evidence":"brief"}
+{"members":[{"object_id":"ID","scope":"own singular category","ref_phrase":"the ...","placement_site":"own attachment site or empty","grounding":{"entity":"independently identified noun","kind":"object|part","host":"host noun or empty","current_value":"source property or empty","distinction":"brief visible unique fact","mask_description":"white includes ...; excludes ...","site_visible":true,"edit_feasible":true}}],"feasible":true,"grounding_version":3,"operation":"ASSIGNED","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","replacement_form":"","evidence":"brief"}
 
-Fields: target_part and qualifier are empty because these source candidates have no resolved additional part mask. remove_mode=whole. For add/replace payload is the concrete new object; for remove/attribute payload is empty. For attribute attributes=[{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}], otherwise attributes=[]. Only add has placement={"relation":"on|in|attached to|...","site":"part or empty","anchor_mode":"support"}; otherwise null. For non-add site_visible=true. All grounding entities must agree with scope only AFTER independent identification; if they do not, reject. Keep all internal evidence brief. A rejected response needs only {"feasible":false,"reason":"specific visible incompatibility"}.
+Fields: target_part and qualifier are empty because these source candidates have no resolved additional part mask. remove_mode=whole. For add/replace payload is the concrete new object; for remove/attribute payload is empty. For attribute attributes=[{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}], otherwise attributes=[]. Only add has placement={"relation":"on|in|attached to|...","site":"part or empty","anchor_mode":"support"}; otherwise null. For non-add site_visible=true. Each grounding.entity must agree with its OWN member.scope. Different scopes are allowed. All grounding.kind values must agree. For add, each member.placement_site may differ; only relation/payload are shared. Do not force identical site nouns onto different hosts. Keep all internal evidence brief. A rejected response needs only {"feasible":false,"reason":"specific visible incompatibility"}.
 '''
 
 
@@ -65,15 +67,15 @@ empty list, or null value for a field required by its operation.
 
 def validate_twin_grounding(plan: dict[str, Any]) -> None:
     """Validate explicit contradictions, never treat self-reported fields as visual proof."""
-    if plan.get("grounding_version") != 2:
-        raise ValueError("missing twin grounding v2")
-    scope = str(plan.get("scope", "")).strip().casefold()
+    if plan.get("grounding_version") not in (2, 3):
+        raise ValueError("missing twin visual grounding")
     kinds = set()
     operation = plan.get("operation")
     for member in plan.get("members", []):
         binding = member.get("grounding") or {}
-        if str(binding.get("entity", "")).strip().casefold() != scope:
-            raise ValueError("mask entity differs from shared scope")
+        scope = str(member.get("scope") or plan.get("scope", "")).strip().casefold()
+        if not scope or str(binding.get("entity", "")).strip().casefold() != scope:
+            raise ValueError("mask entity differs from member scope")
         if binding.get("kind") not in {"object", "part"}:
             raise ValueError("twin selector is not one object or part")
         kinds.add(binding["kind"])
@@ -103,9 +105,12 @@ def validate_twin_grounding(plan: dict[str, Any]) -> None:
             "brass copper gold golden silver aluminum aluminium alloy leather fabric black white red "
             "blue green yellow orange purple pink gray grey brown beige bright dark light solid".split())
         payload_words = set(re.findall(r"[a-z]+", str(plan.get("payload", "")).casefold()))
-        scope_words = set(re.findall(r"[a-z]+", scope))
-        if payload_words and not (payload_words - scope_words - property_words):
-            raise ValueError("replacement changes only material/color/finish of the same noun")
+        if payload_words and payload_words <= property_words | {'chrome','finish','texture','coating','paint','surface'}:
+            raise ValueError('replacement payload names only an attribute, not a new physical object')
+        for member in plan.get("members", []):
+            scope_words = set(re.findall(r"[a-z]+", str(member.get("scope") or plan.get("scope", "")).casefold()))
+            if payload_words and not (payload_words - scope_words - property_words):
+                raise ValueError("replacement changes only material/color/finish of the same noun")
 
 
 def _overlay(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.ndarray], *, labels: bool = True) -> Image.Image:
@@ -304,7 +309,7 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         raise ValueError("twin add requires a direct support anchor")
     if plan.get("feasible") is not True or plan.get("operation") not in {"add", "replace", "remove", "attribute"}:
         raise ValueError("infeasible or invalid twin plan")
-    if require_grounding or plan.get("grounding_version") == 2:
+    if require_grounding or plan.get("grounding_version") in (2, 3):
         validate_twin_grounding(plan)
     _validate_group_edit_fields(plan)
     members = plan.get("members")
@@ -313,11 +318,6 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
     by_id = {str(m.get("object_id")): m for m in members}
     if len(by_id) != len(members):
         raise ValueError("duplicate twin object ids")
-    # The planner verifies one noun for all masks. Dense categories are hints,
-    # not authoritative scope names (e.g. corrugated slat versus a full shutter).
-    shared_scope = str(plan.get("scope") or "").strip()
-    if not shared_scope:
-        raise ValueError("missing shared twin scope")
     if plan.get("operation") == "attribute":
         attrs = plan.get("attributes") or []
         target_values = [str(a.get("value", "")).strip().lower() for a in attrs if isinstance(a, dict)]
@@ -337,7 +337,12 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         if not item or not str(item.get("ref_phrase", "")).strip():
             raise ValueError("missing twin reference")
         raw = _shared_raw(plan, item["ref_phrase"], str(obj["object_id"]), index,
-                          scope=shared_scope, source_color=str(item.get("source_color", "")))
+                          scope=str(item.get("scope") or plan.get("scope") or ""), source_color=str(item.get("source_color", "")))
+        if not raw["scope"]:
+            raise ValueError("missing member scope")
+        if raw["operation"] == "add" and "placement_site" in item:
+            raw["placement"] = {**(raw["placement"] or {}), "site": item["placement_site"]}
+        _validate_group_edit_fields({**plan, "scope": raw["scope"], "placement": raw["placement"]})
         unit = build_unit(raw, {**obj, "metadata": obj.get("metadata", {})}, mask_path, geom, [])
         errors = validate_instruction(unit)
         if errors:
@@ -352,6 +357,7 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         raise ValueError("shared spec did not render one no-ref instruction")
     member_rows = []
     for u, geom in zip(units, geometry):
+        grounding = by_id[str(u.object_id)].get("grounding") or {}
         member_rows.append({"unit_id": u.unit_id, "object_id": u.object_id, "ref": u.ref_phrase,
                             "instruction": u.instruction_ref, "instruction_noref": no_ref,
                             "instruction_spec": u.instruction_spec, "mask": u.mask_path,
@@ -360,14 +366,19 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
                             "generation_context": {}, "seed": 0, "deterministic": {},
                             "semantic_audit": {}, "area_fraction": geom["area_fraction"],
                             "operation": u.operation, "scope": u.scope, "payload": u.payload,
+                            "granularity": grounding.get("kind") or ("object" if scope_level == "object" else "part"),
+                            "grounding": grounding,
                             "mask_role": u.mask_role, "mask_semantics": u.mask_semantics,
                             "unit": u.to_dict()})
     return {"schema_version": "sa1b.samtok.group.v1",
             "instruction_protocol_version": "2.0", "mask_semantics_version": "2.0",
-            "instruction_style_version": "benchmark-concise-3-blind-1", "twin_id": group_id,
+            "instruction_style_version": "benchmark-concise-3-blind-1",
+            "twin_contract_version": "blind-cross-category-1",
+            "category_relation": "same" if len({candidate_category({"category": u.scope}) for u in units}) == 1 else "cross",
+            "twin_id": group_id,
             "source_id": candidate["source_id"], "source_image": candidate["image_path"],
             "source_provenance": candidate.get("provenance", {}), "operation": units[0].operation,
-            "instruction_spec": {**spec, "ref": ""}, "instruction_noref": no_ref,
+            "instruction_spec": {**spec, "ref": "", "scope": ""}, "instruction_noref": no_ref,
             "scope_level": scope_level, "members": member_rows, "split": split,
             "group_checks": {"plan": {"status": "pass", "model_evidence": plan.get("evidence", "")},
                              "group_gate": "pending_generation"}, "merged_target": None}

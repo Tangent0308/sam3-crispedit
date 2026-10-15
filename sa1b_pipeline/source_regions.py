@@ -124,6 +124,7 @@ def resolve_source_region(member, source_path, target_path, directory, *, site_r
             if mode == 'contents':
                 selector = selector | host
             info = {'method': 'container_union_contents' if mode == 'contents' else 'resolved_part_mask'}
+    member['selector_granularity'] = 'part' if needs_site or needs_part else member.get('granularity', 'object')
     member['source_region_resolution'] = info
     member['source_region_review_required'] = bool(needs_site)
     if selector is None or not selector.any():
@@ -163,12 +164,11 @@ def blind_group_check(group):
     eligible = bool(members) and all(m.get('blind_eligible') is True for m in members)
     sentences = [m['instruction_noref'] for m in members]
     same = 'twin_id' not in group or len(set(sentences)) == 1
-    # Same scope remains a twin selection requirement; equal multi sentences
-    # are deliberately allowed and are distinguished by their mask tokens.
-    scope = 'twin_id' not in group or len({m['instruction_spec']['scope'] for m in members}) == 1
+    # Category identity is deliberately not a gate under blind instructions.
+    comparable = 'twin_id' not in group or len({m.get('selector_granularity', m.get('granularity', 'object')) for m in members}) == 1
     areas = [m['area_fraction'] for m in members]
     ratio = max(areas)/min(areas) if areas and min(areas)>0 else float('inf')
     area_ok = 'twin_id' not in group or ratio <= 3
-    return {'pass': bool(eligible and same and scope and area_ok), 'all_regions_resolved': eligible,
-            'shared_noref': same, 'shared_scope': scope, 'final_area_ratio': ratio,
+    return {'pass': bool(eligible and same and comparable and area_ok), 'all_regions_resolved': eligible,
+            'shared_noref': same, 'comparable_granularity': comparable, 'final_area_ratio': ratio,
             'final_area_ratio_pass': area_ok}
