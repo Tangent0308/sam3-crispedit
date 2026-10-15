@@ -5,7 +5,8 @@ from PIL import Image
 
 from sa1b_pipeline.group_geometry import precise_point, twin_pair_gate, adjacent_pair_gate
 from sa1b_pipeline.group_planning import build_multi_group, build_twin_group, group_views
-from sa1b_pipeline.group_audit import _semantic_group_pass, MULTI_REQUIRED_AUDIT_FIELDS, TWIN_REQUIRED_AUDIT_FIELDS
+from sa1b_pipeline.group_audit import (_call_batched, _semantic_group_pass,
+                                        MULTI_REQUIRED_AUDIT_FIELDS, TWIN_REQUIRED_AUDIT_FIELDS)
 from scripts.run_group_pipeline import _require_manual_review
 from sa1b_pipeline.group_schema import validate_twin_record, validate_multi_record
 from sa1b_pipeline.group_selection import select_twin_candidates, select_multi_candidates
@@ -189,4 +190,22 @@ def test_group_audit_requires_all_fields_before_recomputing_pass():
     assert _semantic_group_pass(multi, MULTI_REQUIRED_AUDIT_FIELDS)
     multi["no_crosstalk"] = False
     assert not _semantic_group_pass(multi, MULTI_REQUIRED_AUDIT_FIELDS)
+
+
+def test_group_audit_batches_without_reordering():
+    class Fake:
+        batch_size = 2
+
+        def __init__(self):
+            self.batch_sizes = []
+
+        def call_batch(self, jobs):
+            self.batch_sizes.append(len(jobs))
+            return [{"job_id": job["job_id"]} for job in jobs]
+
+    model = Fake()
+    jobs = [{"job_id": str(i)} for i in range(5)]
+    result = _call_batched(model, jobs)
+    assert [row["job_id"] for row in result] == [str(i) for i in range(5)]
+    assert model.batch_sizes == [2, 2, 1]
 
