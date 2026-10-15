@@ -1,0 +1,11 @@
+{
+  "status": "complete",
+  "authorized_by": "user: 删除A",
+  "scope": "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014/source_cache",
+  "started_unix": 1792054804.581447,
+  "file_count": 4004,
+  "logical_bytes": 18724479695,
+  "other_candidates_deleted": false,
+  "completed_unix": 1792054835.5543623,
+  "source_cache_absent": true
+}

@@ -1,0 +1,18 @@
+{
+  "status": "pass",
+  "completed_unix": 1792054965.5171268,
+  "source_cache_absent": true,
+  "samples": 50000,
+  "operations": {
+    "attribute": 12500,
+    "add": 12500,
+    "remove": 12500,
+    "replace": 12500
+  },
+  "media_files_verified": 151132,
+  "media_checks": "regular file; size unchanged; nonzero; release-relative path",
+  "train_sha256_unchanged": true,
+  "audit_sha256_unchanged": true,
+  "decoded_read_examples": 4,
+  "cleanup_scope": "A only; B/C/D/E preserved"
+}

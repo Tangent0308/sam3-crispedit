@@ -8,7 +8,7 @@
 - 目标：50,000 条自动审核通过样本，`add/replace/remove/attribute` 各 12,500 条
 - CUDA：12.9；PyTorch `2.13.0+cu129`
 - 共享挂载：`/mnt/bn/strategy-mllm-train`
-- 源记录：运行目录下已冻结的 `source_cache/`，无需 SG2 HDFS 挂载
+- 源记录：运行期间使用冻结的 `source_cache/`，无需 SG2 HDFS 挂载；本批完成后该缓存已按确认删除，恢复旧 run 前需重建
 - W&B：关闭
 
 ## 入口
@@ -73,9 +73,13 @@ python3 -u -m scripts.finalize_production_exports \
 
 收尾进度写入 `final/progress.json`；最终标注为 `final/auto_pass.jsonl`，其中图片路径相对于数据根目录；`final/summary.json` 保存统计、输入导出哈希及最终标注哈希。目录锁 `final/finalize.lock.d` 不会自动抢占；异常退出遗留锁时，先核实 `owner.json` 对应进程已退出再处理。历史 `failure.json` 保留；本次 `Errno 38` 成功恢复后更新节点进度为完成。
 
+## 本批最终数据入口（2026-10-15）
+
+四机配额已完成，无需重启任务。CPU 收尾及规范整理后，训练入口为 `$ROOT/release/annotations/train.jsonl`，媒体路径相对于 `$ROOT/release`；`final/auto_pass.jsonl` 作为原始合并记录保留。全量统计、字段和可视化见 [50k 数据说明](DATASET_50K_ZH.md)。源记录缓存 A 已按用户确认删除；该已完成运行不应直接重新启动，恢复/扩量前需重建并校验缓存。其余候选保留，见 [清理记录](CLEANUP_CANDIDATES_50K_ZH.md)。
+
 ## 2026-10-14 启动修复与原地恢复
 
-本次任务的 root 始终为 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014`，直接用上方原入口重新提交四机任务，保留 `SA1B_SKIP_SETUP=0`。无需重新 prepare，也无需换目录。
+以下记录 2026-10-14 的故障恢复方式：当时使用同一 root `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014` 和原入口重新提交，保留 `SA1B_SKIP_SETUP=0`，无需重新 prepare。当前本批已经完成且源缓存已清理，不再直接套用该历史重启步骤。
 
 - 审核 lock 曾同时安装 `opencv-python` 与 `opencv-python-headless`，二者覆盖同一 `cv2` 目录，子进程报 `libxcb.so.1`。修复为只保留 headless；旧环境 lock 变化时自动同步，并重新安装 headless 修复共享文件。
 - 编辑器从共享盘并发读权重，触发 Omni 默认 600 秒启动超时。`model_cache.py` 在启动 GPU worker 前将编辑、审核权重各复制一份到节点本地盘，按文件 SHA-256 校验、断点复用；约需 83 GiB，建议预留 100 GiB。Omni 初始化及 stage 超时均设为 1800 秒。缓存阶段日志有字节进度，复制不会占用模型初始化的超时额度。

@@ -10,11 +10,11 @@
 /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014
 ```
 
-2026-10-15 00:48 UTC 的可复核快照：wave3 规划 8,892/23,217（接受 7,903），wave2 已有 rank 完成 5,515 个计划的生成和审核，累计自动通过 38,885/50,000（77.77%）。任务使用原目录断点恢复，已完成结果复用，`final/` 尚未发布；该自动通过数不代表人工或最终发布通过。实时状态以共享目录中的 `control/progress_monitor_latest.json`、最新失败记录和 `logs/progress_monitor_tqdm.log` 为准，启动故障及恢复方法见第 6 节。
+2026-10-15 已完成：累计生成并审核 79,821 条，自动通过 50,000 条（62.64%），四类各 12,500 条，覆盖 1,132 张不同源图。规范训练入口为上述根目录下 `release/annotations/train.jsonl`，所有媒体路径相对于 `release/`。原始四机合并记录保留在 `final/auto_pass.jsonl`。本批完整统计、目录、字段、读取示例、12 例目视记录和图片见 [50k 数据说明](DATASET_50K_ZH.md)。自动审核完成不等于独立人工验收完成。
 
 ## 2. 源数据
 
-源数据是 SA-1B 图像及其 dense label 记录。准备阶段从 SG2 的随机访问索引冻结 16,000 个 source ID，并提取 32,000 条原始 TFRecord 记录（每张图的 image 和 annotation），缓存约 17.42 GiB。缓存保留原始 TFRecord 字节、记录长度、CRC32C、SHA-256 和 source ID，四机运行通过 `shared_record_cache_v1` 读取，不依赖任务内的 SG2 HDFS 挂载。
+源数据是 SA-1B 图像及其 dense label 记录。准备阶段从 SG2 的随机访问索引冻结 16,000 个 source ID，并提取 32,000 条原始 TFRecord 记录（每张图的 image 和 annotation），缓存约 17.42 GiB。运行期间缓存保留原始 TFRecord 字节、记录长度、CRC32C、SHA-256 和 source ID，四机通过 `shared_record_cache_v1` 读取，不依赖任务内的 SG2 HDFS 挂载。50k 完成并整理后，已按用户确认删除该批 `source_cache/`（17.439 GiB 逻辑大小）；正式 `release/` 不依赖它，旧任务恢复/扩量需先重建缓存。
 
 源选择固定随机种子，排除 benchmark source ID 和原图字节哈希；每个 rank 负责不重叠的 4,000 张源图。源图中的所有可解码、非空 mask 都进入供给池；尺寸不一致、空 mask 或无法解码的记录只记录为异常，不按面积、遮挡或主体美观进行隐式筛选。一个源图可以贡献多个独立 case，多个 case 不代表同一目标图联合执行多个编辑。
 
@@ -40,7 +40,7 @@
 | 生成 | `sa1b_pipeline/production_generation.py`、`scripts/run_generation_queue.py`、`sa1b_pipeline/editor.py`、`utils/qwen21_omni.py` | 每 rank 启动 6 个单卡编辑器；Qwen-Image-2.1/vLLM-Omni，40 steps、seed 0；区域保护和 compositor 记录 generation fingerprint。 |
 | 审核 | `scripts/run_audit_queue.py`、`sa1b_pipeline/audit_backend.py`、`sa1b_pipeline/validate.py` | 每 rank 启动 2 个审核 worker；批量检查 target_done、non_target_preserved、natural、operation_correct、结构完整性和 mask/尺寸一致性。任一关键字段失败则拒绝。 |
 | 配额与恢复 | `sa1b_pipeline/operation_balance.py`、`shared_operation_quota.py`、`production_state.py`、`work_queue.py` | 以自动审核通过数填充四类缺额；本地 SQLite 队列保存租约和提交；共享 JSON/JSONL checkpoint 支持中断恢复和重复提交隔离。 |
-| 四机编排 | `scripts/run_production_4node.py`、`scripts/production/bootstrap_arnold_4node.sh` | 校验 rank、共享缓存、模型配置和代码 hash；按 source wave 规划、生成、审核、合并；最终验证数量、四类均衡、ID/mask 唯一性和图片可解码性。 |
+| 四机编排 | `scripts/run_production_4node.py`、`scripts/production/bootstrap_arnold_4node.sh` | 校验 rank、共享缓存、模型配置和代码 hash；按 source wave 规划、生成、审核、合并；最终验证数量、四类均衡、ID/mask 唯一性及媒体存在性/非空/路径范围；没有全量解码图片。 |
 | 运行时 | `scripts/production/setup_runtime.sh`、`scripts/production/check_runtime.py`、`requirements/production/*.lock.txt` | 三套独立 CUDA 12.9 环境；规划、编辑、审核均固定 PyTorch `2.13.0+cu129` 和明确的 cu129 vLLM wheel，ready 前执行真实 GPU matmul/RMSNorm 检查。 |
 
 ## 5. 小批量质量和速度
@@ -96,30 +96,31 @@ CUDA 12.9 冒烟测试的原始 source、mask、target 和完整元数据位于�
 
 ## 6. 运行结果和查看方式
 
-正式任务曾因共享盘权重加载超时、OpenCV GUI 依赖和子进程退出而中断；修复后使用同一目录和检查点恢复，修复包括仅保留 headless OpenCV、本机权重缓存和 1800 秒初始化超时。最新快照为 32,007/50,000 自动通过，任务仍在运行，不能把当前中间状态当作最终交付。
+本批已完成生成、审核与收尾。共享盘不支持 `flock` 导致 node2 最后的汇总报错；独立 CPU 收尾入口 `scripts/finalize_production_exports.py` 使用目录锁，复核后完成汇总，未重新生图。旧错误记录仍保留，不代表当前未完成。
 
-
-正式运行输出结构：
+正式使用目录：
 
 ```text
-nodes/node*/waves/*/planning_*/       规划输入、原始回复和 planned.jsonl
-nodes/node*/waves/*/generation/       生成图、审核结果和队列 checkpoint
-nodes/node*/auto_pass.jsonl           本 rank 自动审核通过样本
-nodes/node*/validation.jsonl          本 rank 全部结果
-final/auto_pass.jsonl                 四机合并的最终样本
-final/summary.json                    数量、类型、唯一性和完整性检查
-logs/node*.log                        Arnold rank 日志
-logs/progress_monitor.log             后台进度 JSON 快照
-logs/progress_monitor_tqdm.log        每 300 秒更新的可读进度
+release/annotations/train.jsonl      50,000 条训练主标注
+release/annotations/audit.jsonl      对应完整生成与审核记录
+release/images/source/              原图
+release/images/target/              目标图
+release/masks/region/               源区域（add 为锚点）
+release/masks/support/              生成执行范围
+release/statistics.json             全量统计
+release/validation.json             整理和隔离检查
+release/visualizations/examples_12.pdf  每类三例，含问题案例
 ```
+
+父目录 `nodes/`、`final/`、`inputs/`、`deployment/` 保留运行溯源，不作为训练入口一起加载。整理脚本 `scripts/organize_production_release.py` 建立规范硬链接和相对路径标注，保留原始文件；正式媒体不可原地修改。归档详情和字段协议见 [50k 数据说明](DATASET_50K_ZH.md)，待确认的删除项见 [清理候选清单](CLEANUP_CANDIDATES_50K_ZH.md)。
 
 ```bash
 ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014
-python -m scripts.run_production_4node --root "$ROOT" status
-tail -F "$ROOT/logs/node0.log" "$ROOT/logs/progress_monitor_tqdm.log"
+cat "$ROOT/release/release.json"
+cat "$ROOT/release/statistics.json"
 ```
 
-只有 `final/summary.json` 显示 `status=complete`、总数 50,000、四类各 12,500，才可以称为 pipeline 自动完成。人工发布前还要抽查并记录指令准确性、目标图完整性、非目标保持、自然性和 add 锚点是否正确。
+本次 12 例固定规则目视抽查发现：9 例基本可用，2 例待复核，1 例帆船删除后有悬空索具残留。它们均为 pipeline 自动通过样本；抽查偏向可见区域，不能外推全量质量率，也未据此改写原始自动通过标记。人工验收仍需检查指代、目标完整性、非目标保持、自然性和 add 直接锚点。
 
 ## 7. 分组数据扩展
 
