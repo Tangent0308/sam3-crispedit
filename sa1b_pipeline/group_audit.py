@@ -44,7 +44,8 @@ def _call_batched(model: VLLMAuditor, jobs: list[dict[str, Any]]) -> list[dict[s
 def _marked_scene(group: dict[str, Any]) -> str | None:
     views = (group.get("planning") or {}).get("views") or []
     if views and Path(views[0]).is_file():
-        return str(views[0])
+        marked = Path(views[0]).with_name("marked_scene.png")
+        return str(marked if marked.is_file() else views[0])
     return None
 
 

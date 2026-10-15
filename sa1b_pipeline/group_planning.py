@@ -19,25 +19,25 @@ from .mllm import parse_json
 COLORS = [(255, 66, 66), (54, 180, 255), (255, 190, 40), (144, 88, 255), (35, 205, 120)]
 
 
-TWIN_PROMPT = r'''Plan one counterfactual twin edit group. The original scene is the first image; the second image is a compact contact sheet of the same candidate instances. Each candidate has a different solid outline/color and its ID is printed in the layout only. The colors and labels are localization aids, never source content.
+TWIN_PROMPT = r'''Plan one counterfactual twin edit group. Image 1 is the clean original scene. Image 2 has one row per candidate: a clean source crop on the LEFT and its aligned black-and-white mask on the RIGHT. White identifies the target; black is excluded. Unit and object IDs are printed above each row. Judge appearance only from clean photographs; the mask and headers are localization aids.
 
 The candidates are already prefiltered as two or three distinct visible instances of the same noun. Use the original pixels and the masks to verify the noun and write a short, unique natural reference for each candidate. One shared edit must be natural for every member. The operation is assigned and cannot be changed or silently rejected as another operation. If the assigned operation is not natural for all members, return feasible=false.
 
-The no-ref instruction must be identical for all members and be rendered from one shared structured specification. References are concise noun phrases that distinguish members in the unmarked original image. Do not mention masks, colors, IDs, crops, annotations or image coordinates. For add, select the directly supporting host/attachment site; use a reference anchor only when direct attachment is clearly unnatural. For remove, never remove human anatomy or an essential support. For replace, change visible form/design, not only color. For attribute, change one plausible requested property that is visibly different on every member.
+The no-ref instruction must be identical for all members and be rendered from one shared structured specification. References are concise noun phrases that distinguish members in the unmarked original image. Do not mention annotation colors, IDs, masks or crops. Genuine source colors and concise image-left/image-right references are allowed when needed for unique identification. For twin add, use only a directly supporting host/attachment site shared by every member; reference anchors are not allowed. Reject the group if no natural directly attached addition works for all members. For remove, never remove human anatomy or an essential support. For replace, change visible form/design, not only color. For attribute, change one plausible requested property that is visibly different on every member.
 
 Return JSON only:
 {"feasible":true,"operation":"...","scope":"short shared noun","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","members":[{"object_id":"...","ref_phrase":"the ...","source_color":"","evidence":"brief"},...],"evidence":"brief"}
-The operation must be the assigned operation. attributes is [{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}] only for attribute. placement for add is {"relation":"on|in|around|to|...","site":"optional noun","anchor_mode":"support|reference"}; direct support is preferred. remove_mode is whole, part, contents, contents_only, lowerlegs or hem. Keep the edit one concise sentence after rendering.
+The operation must be the assigned operation. attributes is [{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}] only for attribute. placement for add is {"relation":"on|in|around|to|...","site":"optional noun","anchor_mode":"support"}; direct support is required for twins. remove_mode is whole, part, contents, contents_only, lowerlegs or hem. Keep the edit one concise sentence after rendering.
 '''
 
 
-MULTI_PROMPT = r'''Plan one joint editing group from the original scene. The first image marks all candidates with distinct colors and printed IDs; the second is a contact sheet for the preselected adjacent candidates. Markings and labels are localization aids only. Select every provided candidate exactly once and give each a natural, concise instruction grounded in the unmarked original image.
+MULTI_PROMPT = r'''Plan one joint editing group from the original scene. Image 1 is the clean original scene. Image 2 has one row per candidate: a clean source crop on the LEFT and its aligned black-and-white mask on the RIGHT. White identifies the target; black is excluded. Unit and object IDs are printed above each row. Read all appearance from clean photographs only. Select every provided candidate exactly once and give each a natural, concise instruction grounded in the unmarked original image.
 
 Operations and target order are assigned by the caller. Do not change an operation, merge targets, add fallback targets, or refer to a target created by an earlier step. Each ref must uniquely identify its own original target. Verify color words against the unmarked pixels; never call a black object red because a small detail is red. If color is uncertain, use a stable position or host instead. At least one preselected pair is adjacent. Avoid conflicting edits such as removing a host while editing its part. Add uses the directly supporting host first. Remove never removes human anatomy or essential support; replace changes form/design; attribute changes one visible property.
 
 Return JSON only:
 {"feasible":true,"generation_order":["U1",...],"targets":[{"unit_id":"U1","object_id":"...","operation":"...","scope":"...","ref_phrase":"the ...","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","evidence":"brief"}],"evidence":"brief"}
-Use exactly the assigned operation for each target and exactly the assigned target IDs. No masks, colors, labels or crop references in instructions.
+Use exactly the assigned operation for each target and exactly the assigned target IDs. No annotation-color, mask, ID or crop references in instructions; genuine source colors are allowed. scope is only the short object/part noun, without articles or instance/location qualifiers; put those in ref_phrase.
 Field requirements are strict: every target must have a nonempty scope and ref_phrase. For
 attribute, set exactly one nonempty attributes item with property and value that is
 visibly different from the selected source (never repeat a color, material, finish or
@@ -72,33 +72,29 @@ def _overlay(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.
 
 
 def _crop_sheet(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.ndarray]) -> Image.Image:
-    tiles = []
-    for i, (obj, mask) in enumerate(zip(objects, masks), 1):
+    """Aligned clean crop and binary locator; never tint source appearance."""
+    width, height, header = 512, 320, 32
+    sheet = Image.new("RGB", (width * 2, (height + header) * len(objects)), (35, 35, 35))
+    draw = ImageDraw.Draw(sheet)
+    for index, (obj, mask) in enumerate(zip(objects, masks)):
         ys, xs = np.where(mask)
         if not len(xs):
-            continue
+            raise ValueError("empty group target mask")
         extent = max(int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
         margin = max(24, int(extent * .45))
         box = (max(0, int(xs.min()) - margin), max(0, int(ys.min()) - margin),
                min(source.width, int(xs.max()) + margin + 1), min(source.height, int(ys.max()) + margin + 1))
-        tile = source.crop(box).convert("RGB")
-        local = mask[box[1]:box[3], box[0]:box[2]]
-        ar = np.asarray(tile).copy()
-        color = COLORS[i - 1]
-        ar[local] = (0.45 * ar[local] + 0.55 * np.asarray(color)).astype(np.uint8)
-        tile = Image.fromarray(ar)
-        tile.thumbnail((420, 300), Image.Resampling.LANCZOS)
-        panel = Image.new("RGB", (440, 340), "white")
-        panel.paste(tile, ((440 - tile.width) // 2, 32 + (300 - tile.height) // 2))
-        ImageDraw.Draw(panel).text((10, 8), f"{obj['object_id']}  {obj.get('category','object')}", fill="black")
-        tiles.append(panel)
-    if not tiles:
-        return Image.new("RGB", (440, 340), "white")
-    cols = min(2, len(tiles))
-    rows = (len(tiles) + cols - 1) // cols
-    sheet = Image.new("RGB", (cols * 440, rows * 340), (235, 235, 235))
-    for i, tile in enumerate(tiles):
-        sheet.paste(tile, ((i % cols) * 440, (i // cols) * 340))
+        clean = source.crop(box).convert("RGB")
+        locator = Image.fromarray(mask[box[1]:box[3], box[0]:box[2]].astype(np.uint8) * 255).convert("RGB")
+        scale = min(width / clean.width, height / clean.height)
+        size = (max(1, round(clean.width * scale)), max(1, round(clean.height * scale)))
+        top = index * (height + header)
+        for column, (tile, label) in enumerate(((clean, "SOURCE"), (locator, "MASK: WHITE = TARGET"))):
+            draw.text((column * width + 8, top + 8),
+                      f"U{index+1} / object {obj['object_id']} - {label}", fill="white")
+            resized = tile.resize(size, Image.Resampling.LANCZOS if column == 0 else Image.Resampling.NEAREST)
+            sheet.paste(resized, (column * width + (width - size[0]) // 2,
+                                 top + header + (height - size[1]) // 2))
     return sheet
 
 
@@ -109,15 +105,23 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
     directory.mkdir(parents=True, exist_ok=True)
     source = Image.open(candidate["image_path"]).convert("RGB")
     masks = [load_mask(obj, source.size) for obj in objects]
-    key = json.dumps({"source": candidate.get("image_sha256"), "ids": [o.get("object_id") for o in objects]}, sort_keys=True)
+    key = json.dumps({"version": "clean-binary-v2",
+                      "source": hashlib.sha256(source.tobytes()).hexdigest(),
+                      "ids": [o.get("object_id") for o in objects],
+                      "masks": [hashlib.sha256(mask.tobytes()).hexdigest() for mask in masks]}, sort_keys=True)
     digest = hashlib.sha256(key.encode()).hexdigest()[:20]
     root = directory / digest
     root.mkdir(exist_ok=True)
-    full = root / "marked_scene.png"
+    full = root / "clean_scene.png"
+    marked = root / "marked_scene.png"
     sheet = root / "member_crops.png"
     mask_paths = []
     if not full.exists():
-        _overlay(source, objects, masks).save(full, compress_level=1)
+        clean = source.copy()
+        clean.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
+        clean.save(full, compress_level=1)
+    if not marked.exists():
+        _overlay(source, objects, masks).save(marked, compress_level=1)
     if not sheet.exists():
         _crop_sheet(source, objects, masks).save(sheet, compress_level=1)
     for obj, mask in zip(objects, masks):
@@ -152,7 +156,13 @@ def _shared_raw(plan: dict[str, Any], ref: str, object_id: str, unit_index: int,
 
 def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], plan: dict[str, Any],
                      mask_paths: list[str], *, split: str, scope_level: str, group_id: str,
-                     geometry: list[dict[str, Any]]) -> dict[str, Any]:
+                     geometry: list[dict[str, Any]], assigned_operation: str | None = None) -> dict[str, Any]:
+    if assigned_operation is not None and plan.get("operation") != assigned_operation:
+        raise ValueError("twin assigned operation mismatch")
+    if split == "eval" and len(objects) != 2:
+        raise ValueError("evaluation twins must have exactly two members")
+    if plan.get("operation") == "add" and (plan.get("placement") or {}).get("anchor_mode") != "support":
+        raise ValueError("twin add requires a direct support anchor")
     if plan.get("feasible") is not True or plan.get("operation") not in {"add", "replace", "remove", "attribute"}:
         raise ValueError("infeasible or invalid twin plan")
     members = plan.get("members")

@@ -51,3 +51,5 @@
 审核完整性随后补齐：`group_audit.py` 现在先为每个成员/链式步骤复用 50k 的 operation-aware 27B 单条审核，再执行组级比较；组级 JSON 额外要求 `operations_correct=true`，成员和组级审核均需通过才可进入 `final/`。这避免模型只判断“看起来改了”却把 remove/replace/attribute/add 类型混淆。
 
 Qwen3-VL-8B 规划小批中，修复后 2 组保留 1 组；该组用 Qwen-Image-2.1 在 CUDA 12.9/`TORCH_SDPA` 下完成 4 步链式生成，每步约 16 秒，结构性检查通过。但人工发现其中一个 ref 把 dense 描述明确为黑色的 SUV 写成红色，且改黑属于 no-op，整组按 all-or-nothing 拒绝。当前新增主对象颜色冲突检查、属性 no-op 检查和组内唯一 ref 检查。它仍未经过修复后 prompt 的 Qwen3.8-27B 语义审核和人工签收，因此只作为工程验证，不计入最终交付。Qwen3.8-27B 的 vLLM 0.31.1 cu129 后端已解析 `Qwen3_5ForConditionalGeneration`，首次权重加载约 14.3 分钟；未完成正式审核前不得把 8B 结果标为语义通过。
+
+规划输入复查发现旧全图与 crop 均有半透明彩色填充，黑色 SUV 曾被误认成红色。新版保留干净全图，并在 contact sheet 中逐行并列干净裁图和黑白定位 mask；缓存键加入视图版本、源像素和 mask 内容哈希。孪生构建器同时硬校验预分配操作、直接 add 锚点及评测双成员限定。2026-10-15 的 8 组四类均衡 27B 规划验证正在独立目录运行，完成前不计入交付。
