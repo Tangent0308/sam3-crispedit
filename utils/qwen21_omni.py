@@ -12,6 +12,7 @@ branch.  That branch's official API is ``Omni.generate`` with
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any
 import math
@@ -40,6 +41,11 @@ class QwenImage21OmniPipeline:
     is_qwen21 = True
 
     def __init__(self, model_id: str, *, tensor_parallel_size: int = 1, **kwargs: Any):
+        # CUDA 12.x workers must not fall through to automatic FlashAttention
+        # selection: an incompatible FA3/FA4 wheel can fail during Omni's
+        # dummy warm-up.  Callers may still override this explicitly, while
+        # direct pipeline invocations remain as safe as the four-node launcher.
+        os.environ.setdefault("DIFFUSION_ATTENTION_BACKEND", "TORCH_SDPA")
         from vllm_omni.entrypoints.omni import Omni
         from vllm_omni.model_extras import get_model_class_name
         from sa1b_pipeline.model_cache import resolve_model

@@ -26,6 +26,9 @@ export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 export WANDB_MODE=disabled
 export WANDB_DISABLED=true
+# The production editor runtime is CUDA 12.9; avoid incompatible automatic
+# FlashAttention selection in vLLM-Omni.
+export DIFFUSION_ATTENTION_BACKEND="${DIFFUSION_ATTENTION_BACKEND:-TORCH_SDPA}"
 
 SHARD_ROOT="${GROUP_SHARD_ROOT:-$GROUP_ROOT/shards/${GROUP_KIND}_${GROUP_SPLIT}}"
 SHARD="$SHARD_ROOT/selected_rank${ARNOLD_ID}.jsonl"
