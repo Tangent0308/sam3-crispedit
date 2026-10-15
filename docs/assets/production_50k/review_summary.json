@@ -1,0 +1,11 @@
+{
+  "reviewer": "assistant visual inspection",
+  "reviewed": 12,
+  "selection": "3/type, seeded hash order; mask area >= 1%; not representative of all source mask sizes",
+  "acceptable": 9,
+  "needs_review": 2,
+  "issue": 1,
+  "independent_human_review": false,
+  "training_auto_pass_manifest_modified": false,
+  "generalized_quality_rate": null
+}

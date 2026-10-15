@@ -1,0 +1,20 @@
+{
+  "status": "pass",
+  "samples": 50000,
+  "unique_job_ids": 50000,
+  "operations": {
+    "attribute": 12500,
+    "add": 12500,
+    "remove": 12500,
+    "replace": 12500
+  },
+  "all_annotation_media_in_manifest": true,
+  "instructions_and_coordinates_unchanged": true,
+  "all_mask_roles_valid": true,
+  "benchmark_cases_checked": 1084,
+  "benchmark_source_id_overlap": 0,
+  "benchmark_recorded_source_sha256_overlap": 0,
+  "benchmark_check_scope": "current 1084-case benchmark; source hashes from materialization receipts",
+  "full_media_decode": false,
+  "visualization_cases_decoded": 12
+}

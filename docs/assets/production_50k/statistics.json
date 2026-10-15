@@ -1,0 +1,208 @@
+{
+  "samples": 50000,
+  "operations": {
+    "attribute": 12500,
+    "add": 12500,
+    "remove": 12500,
+    "replace": 12500
+  },
+  "unique_source_images": 1132,
+  "unique_source_masks": 50000,
+  "generated_total": 79821,
+  "generated_by_type": {
+    "attribute": 16476,
+    "add": 16113,
+    "remove": 29676,
+    "replace": 17556
+  },
+  "pipeline_passes_by_type": {
+    "attribute": 12500,
+    "add": 12500,
+    "remove": 12500,
+    "replace": 12500
+  },
+  "pipeline_pass_rate": 0.6264015735207527,
+  "pipeline_pass_rate_by_type": {
+    "attribute": 0.7586792910900704,
+    "add": 0.7757711164897908,
+    "remove": 0.4212157972772611,
+    "replace": 0.7120072909546594
+  },
+  "nodes": {
+    "0": {
+      "generated": {
+        "attribute": 4037,
+        "add": 4042,
+        "remove": 7504,
+        "replace": 4390
+      },
+      "passed": {
+        "attribute": 3125,
+        "add": 3125,
+        "remove": 3125,
+        "replace": 3125
+      }
+    },
+    "1": {
+      "generated": {
+        "remove": 7174,
+        "add": 4037,
+        "attribute": 4087,
+        "replace": 4454
+      },
+      "passed": {
+        "add": 3125,
+        "replace": 3125,
+        "attribute": 3125,
+        "remove": 3125
+      }
+    },
+    "2": {
+      "generated": {
+        "replace": 4353,
+        "attribute": 4222,
+        "add": 4078,
+        "remove": 7680
+      },
+      "passed": {
+        "attribute": 3125,
+        "add": 3125,
+        "remove": 3125,
+        "replace": 3125
+      }
+    },
+    "3": {
+      "generated": {
+        "attribute": 4130,
+        "add": 3956,
+        "remove": 7318,
+        "replace": 4359
+      },
+      "passed": {
+        "attribute": 3125,
+        "add": 3125,
+        "remove": 3125,
+        "replace": 3125
+      }
+    }
+  },
+  "timings_seconds": {
+    "generation_seconds": {
+      "count": 79821,
+      "mean": 10.198457312848246,
+      "median": 9.774373802007176,
+      "p90": 11.692129608942196
+    },
+    "audit_seconds": {
+      "count": 79821,
+      "mean": 3.4557863965364195,
+      "median": 3.257167625667838,
+      "p90": 4.37816710624611
+    }
+  },
+  "samples_per_source": {
+    "min": 1,
+    "max": 210,
+    "mean": 44.169611307420496,
+    "median": 37.0
+  },
+  "media_files": 151132,
+  "media_logical_bytes": 230428080201,
+  "media_by_directory": {
+    "images/source": {
+      "files": 1132,
+      "bytes": 1126125410
+    },
+    "images/target": {
+      "files": 50000,
+      "bytes": 228271658381
+    },
+    "masks/region": {
+      "files": 50000,
+      "bytes": 817139812
+    },
+    "masks/support": {
+      "files": 50000,
+      "bytes": 213156598
+    }
+  },
+  "failure_reason_counts": {
+    "semantic:missing_edit": 25935,
+    "semantic:operation_type_mismatch": 14655,
+    "remove_mask_change_too_weak": 8465,
+    "semantic:implausible_edit_content": 3885,
+    "semantic:wrong_instance": 2038,
+    "no_visible_target_change": 1615,
+    "semantic:visible_artifact": 321,
+    "semantic:extra_duplicate": 91,
+    "semantic:broken_occlusion_contact": 64,
+    "semantic:wrong_color": 52,
+    "semantic:target_not_removed": 51,
+    "semantic:wrong_operation": 43,
+    "semantic:partial_edit": 41,
+    "semantic:incomplete_edit": 38,
+    "semantic:wrong_edit": 20,
+    "semantic:missing_or_partial_edit": 16,
+    "semantic:broken_contact": 12,
+    "semantic:wrong_location": 10,
+    "semantic:missing_partial_edit": 9,
+    "semantic:residual_artifact": 7,
+    "semantic:missing_required_detail": 7,
+    "semantic:malformed_mllm_json": 6,
+    "semantic:truncated_audit": 6,
+    "semantic:wrong_instance_edited": 5,
+    "semantic:no_edit_performed": 5,
+    "semantic:missing_required_feature": 4,
+    "semantic:wrong_target_color": 4,
+    "semantic:broken_occlusion": 4,
+    "semantic:target_still_present": 4,
+    "semantic:broken_structure": 3,
+    "semantic:no_edit_detected": 3,
+    "semantic:wrong_source_color": 3,
+    "semantic:missing_required_features": 3,
+    "semantic:broken_text": 3,
+    "semantic:wrong_operation_type": 2,
+    "semantic:wrong_target_instance": 2,
+    "semantic:wrong_shape": 2,
+    "semantic:wrong_scale": 2,
+    "semantic:broken_physics": 2,
+    "semantic:incomplete_removal": 2,
+    "semantic:poor_rendering": 2,
+    "semantic:wrong_count": 2,
+    "semantic:wrong_target_location": 2,
+    "semantic:wrong_new_identity": 2,
+    "semantic:wrong_text_content": 1,
+    "semantic:wrong_pattern": 1,
+    "semantic:shape_mismatch": 1,
+    "semantic:wrong_target_content": 1,
+    "semantic:missing_requested_content": 1,
+    "semantic:target_not_done": 1,
+    "semantic:residual_content": 1,
+    "semantic:wrong_result": 1,
+    "semantic:wrong_object_added": 1,
+    "semantic:wrong_color_direction": 1,
+    "semantic:no_visible_change": 1,
+    "semantic:wrong_object_shape": 1,
+    "semantic:instruction_ambiguity": 1,
+    "semantic:wrong_target": 1,
+    "semantic:missing_target_edit": 1,
+    "semantic:missing_required_element": 1,
+    "semantic:wrong_glyph": 1,
+    "semantic:missing_required_geometry": 1,
+    "semantic:missing_requested_edit": 1,
+    "semantic:text_corrupted": 1,
+    "semantic:target_not_found": 1,
+    "semantic:wrong_attribute": 1,
+    "semantic:structural_inconsistency": 1,
+    "semantic:broken_geometry": 1,
+    "semantic:missing_required_attribute": 1,
+    "semantic:missing_required_structure": 1,
+    "semantic:wrong_result_color": 1,
+    "semantic:extra_content": 1,
+    "semantic:wrong_source_description": 1,
+    "semantic:wrong_motif": 1
+  },
+  "counting_unit": "one independently edited source mask",
+  "manual_review": "not_performed",
+  "source_export_sha256": "aee1bf1ded92268ede367aff61f22dd1186e9c99713cd50ec94a6b5f29cda3c0"
+}
