@@ -15,7 +15,7 @@ from .audit_backend import VLLMAuditor
 from .validate import _target_panel, audit_prompt
 
 
-TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. The final comparison image contains one row per member, each with original crop, edited crop, and mask-overlay crop left to right. Use the clean crop columns to judge appearance; the overlay is only a locator. The source scene and the member result images are provided. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
+TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. Image 1 is the clean original full scene. Image 2 contains one row per member: SOURCE original crop (left), RESULT edited crop (middle), and MASK ONLY black-and-white selector (right). Judge generated appearance ONLY from the middle RESULT column. The right column is never a result. White selects the source object and black excludes it. The source scene and the member result images are provided. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
 MULTI_GROUP_PROMPT = '''You are auditing a joint multi-target edit group. The original scene, each chain step, and the final result are provided. Check that each original ref identifies one target, every assigned operation is correct and completed in its step and remains correct later, adjacent targets do not bleed into each other, and the final image is natural. The group fails if any operation type is wrong. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
@@ -115,10 +115,10 @@ def _single_member_audits(groups: list[dict[str, Any]], model: VLLMAuditor,
         members = group.get("members", []) if kind == "twins" else group.get("units", [])
         for member in members:
             row = _member_audit_row(group, member, kind=kind)
-            panel = _target_panel(row, panel_dir)
+            panel = _target_panel(row, panel_dir, binary_locator=True)
             jobs.append({"job_id": f"{group.get('twin_id') or group.get('multi_id')}::{member['unit_id']}",
                          "images": [row["source_image"], row["edited_image"], panel],
-                         "prompt": audit_prompt(row["instruction"], operation=row["operation"])})
+                         "prompt": audit_prompt(row["instruction"], operation=row["operation"], binary_locator=True)})
             locations.append((group, member))
     results = _call_batched(model, jobs) if jobs else []
     by_group: dict[str, list[dict[str, Any]]] = {}
@@ -145,15 +145,13 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
                    "mask": member["mask"], "operation": group["operation"],
                    "instruction": member["instruction"], "instruction_spec": member["instruction_spec"],
                    "support_mask": member["support_mask"]}
-            rows.append(_target_panel(row, panel_dir))
+            rows.append(_target_panel(row, panel_dir, binary_locator=True))
         comparison = _member_comparison(rows,
                                         panel_dir / f"{group['twin_id']}_comparison.jpg", crop_panels=True)
         refs.append(group)
-        marked = _marked_scene(group)
-        images = [group["source_image"]]
-        if marked:
-            images.append(marked)
-        images.append(comparison)
+        # Colored source overlays were repeatedly mistaken for edited pixels.
+        # Clean context plus labeled clean/binary crops localize without tint.
+        images = [group["source_image"], comparison]
         jobs.append({"job_id": group["twin_id"], "images": images[:3],
                      "prompt": TWIN_GROUP_PROMPT + "\nTarget contract:\n" +
                      _target_contract(group, kind="twins")})

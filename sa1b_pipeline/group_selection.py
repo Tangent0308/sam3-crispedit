@@ -351,6 +351,23 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
             )[:32]
             _HOST_CACHE[source_key] = host_objects
         scope_cache: dict[tuple[str, str], str] = {}
+        area_cache: dict[str, int] = {}
+
+        def exact_area(obj):
+            oid = str(obj["object_id"])
+            if oid not in area_cache:
+                rle = obj.get("rle")
+                if rle and isinstance(rle.get("counts"), (str, bytes)):
+                    # Compressed RLE area requires no full-resolution bitmap.
+                    try:
+                        from pycocotools import mask as coco_mask
+                        area_cache[oid] = int(coco_mask.area(rle))
+                    except ImportError:
+                        area_cache[oid] = int(load_mask(obj, size).sum())
+                else:
+                    area_cache[oid] = int(load_mask(obj, size).sum())
+            return area_cache[oid]
+
         attempted_total = 0
         for category in sorted(groups):
             values = [obj for obj in groups[category] if _cheap_operation_allowed(obj, operation, size)]
@@ -368,6 +385,9 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
                 # are almost never eligible and need not trigger RLE decode.
                 if any(bbox_gap(a, b) < 8 for a, b in combinations(group_objects, 2)):
                     continue
+                areas = [exact_area(obj) for obj in group_objects]
+                if min(areas) <= 0 or max(areas) > 3 * min(areas):
+                    continue
                 gates = []
                 for a, b in combinations(group_objects, 2):
                     key = (str(c["source_id"]), str(a.get("object_id")), str(b.get("object_id")), size)
@@ -378,6 +398,7 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
                             _PAIR_CACHE[key] = gate
                     else:
                         gate = {"eligible": True, "geometry_exact": False,
+                                "area_ratio_exact": max(exact_area(a), exact_area(b)) / min(exact_area(a), exact_area(b)),
                                 "gap_pixels_lower_bound": bbox_gap(a, b),
                                 "same_host": bool((a.get("parent_id") or (a.get("metadata") or {}).get("parent_id")) and
                                                    (a.get("parent_id") or (a.get("metadata") or {}).get("parent_id")) ==

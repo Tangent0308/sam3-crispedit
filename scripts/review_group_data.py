@@ -61,7 +61,9 @@ def _member_page(group: dict, member: dict, kind: str, index: int):
         if path:
             with Image.open(path) as im:
                 tile=im.convert("RGB").crop(crop_box)
-                tile.thumbnail((490,450), Image.Resampling.LANCZOS)
+                scale = min(490 / tile.width, 450 / tile.height)
+                tile = tile.resize((max(1, round(tile.width*scale)), max(1, round(tile.height*scale))),
+                                   Image.Resampling.NEAREST if path == member["mask"] else Image.Resampling.LANCZOS)
                 canvas.paste(tile,(x+(490-tile.width)//2,775+(450-tile.height)//2))
     draw.text((30, 1270), "Inspect reference, requested change, other targets, edges and naturalness.",
               font=_font(20), fill=(60,60,60))

@@ -432,3 +432,51 @@ def test_optional_contour_keeps_clean_pixels_and_stays_outside_mask(tmp_path):
         guided = after[top:top+320,1024:]
         assert np.array_equal(clean[mask], guided[mask])
         assert np.any(clean[~mask] != guided[~mask])
+
+
+def test_precise_point_handles_mask_touching_image_border():
+    mask = np.ones((9, 9), dtype=bool)
+    assert precise_point(mask) == [4, 4]
+    # A thin selector far from the image edge still needs its own centre.
+    mask = np.zeros((40, 40), dtype=bool)
+    mask[5:10, 3:30] = True
+    x, y = precise_point(mask)
+    assert y == 7 and 5 <= x <= 27
+
+
+def test_fast_twin_selection_checks_real_area_not_bbox_area(tmp_path):
+    image, objects = _source(tmp_path)
+    objects[0]['bbox'] = [12,20,36,48]
+    objects[1]['bbox'] = [72,24,98,52]
+    thin = np.zeros((96,128),dtype=np.uint8)
+    thin[20:22,12:36] = 255
+    Image.fromarray(thin).save(objects[0]['mask_path'])
+    candidate = {'source_id':'s','image_path':str(image),'objects':objects}
+    assert select_twin_candidates([candidate],target=1,operation='attribute',strict_geometry=False) == []
+
+
+def test_group_edit_fields_reject_observed_semantic_and_grammar_failures():
+    import pytest
+    from sa1b_pipeline.group_planning import _validate_group_edit_fields
+    with pytest.raises(ValueError, match="physical form"):
+        _validate_group_edit_fields({"operation": "replace", "scope": "stripe", "payload": "a solid black stripe"})
+    _validate_group_edit_fields({"operation": "replace", "scope": "wheel rim", "payload": "a gold five-spoke wheel rim"})
+    for site in ("empty", "optional noun", "arm guard"):
+        with pytest.raises(ValueError, match="placement site"):
+            _validate_group_edit_fields({"operation": "add", "scope": "arm guard", "placement": {"site": site}})
+    for site in ("", "top edge"):
+        _validate_group_edit_fields({"operation": "add", "scope": "arm guard", "placement": {"site": site}})
+
+
+def test_review_sample_quota_cannot_hide_reviewed_failure(tmp_path):
+    import json
+    import pytest
+    groups = [{"twin_id": f"g{i}"} for i in range(201)]
+    rows = [{"group_id": g["twin_id"], "status": "reviewed", "reviewer": "assistant", "decision": "pass",
+             "reference_correct": True, "target_done": True, "non_target_preserved": True, "natural": True}
+            for g in groups]
+    rows[-1]["decision"] = "fail"
+    path = tmp_path / "review.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows))
+    with pytest.raises(RuntimeError, match="explicitly rejected"):
+        _require_manual_review(groups, path, kind="twins", split="train")
