@@ -38,6 +38,14 @@ Operations and target order are assigned by the caller. Do not change an operati
 Return JSON only:
 {"feasible":true,"generation_order":["U1",...],"targets":[{"unit_id":"U1","object_id":"...","operation":"...","scope":"...","ref_phrase":"the ...","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","evidence":"brief"}],"evidence":"brief"}
 Use exactly the assigned operation for each target and exactly the assigned target IDs. No masks, colors, labels or crop references in instructions.
+Field requirements are strict: every target must have a nonempty scope and ref_phrase. For
+attribute, set exactly one nonempty attributes item with property and value, and leave
+payload empty. For add, set a concrete new-object noun in payload and a non-null
+placement with relation and anchor_mode; choose anchor_mode=support whenever the new
+object can sit on or attach directly to the masked host. For replace, set a concrete
+replacement object/design in payload and leave attributes empty. For remove, leave
+payload and attributes empty and use a valid remove_mode. Never emit an empty object,
+empty list, or null value for a field required by its operation.
 '''
 
 
