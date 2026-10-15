@@ -246,3 +246,27 @@ GPU 4 仅为例子，需选择本任务可用卡。该本机运行时为 Transfo
 规划阶段现在包括每组一次规划和一次独立无定位盲测；`--plan-only` 的 planned.jsonl 只包含两关都通过的组，planned/ 中保留所有规划成功记录，rejected/*_blind.json 与 blind_probes/ 保留盲测拒绝/不确定结果。可读取 blind_probes/summary.json 查看额外调用和耗时。盲测失败组不会进入编辑器。
 
 `group_4node_entry.sh` 自动加 `--quota-from-selection`，各 rank 按冻结 shard 的操作/同类跨类计数分配最终名额；这样不会因每 rank 各自四舍五入而破坏全局配额。选择清单中的 category_relation 必须来自新选择过程。`merge_group_shards.py` 对新协议复核盲测、粒度和同类约 30% 的全局比例（容差 max(1 组, 2% 总组数)）；任何 rank 缺额都不能发布为足额数据。本轮没有启动四机生成。
+
+### 孪生动态补样入口（先做小批量验证）
+
+`scripts/run_dynamic_twins.py` 按最终通过数补足编辑类型及同类/跨类配额，运行根目录需要独立于旧 50k。当前使用一个协调器串行推进波次，波内可以配置多张编辑卡；不等于已经验证了四机动态任务调度。先用以下入口验证，不要四个 rank 共用同一根目录启动：
+
+```bash
+python scripts/run_dynamic_twins.py \
+  --manifest /path/to/train_candidates.jsonl \
+  --reservation /path/to/eval_reservation.json \
+  --output-root /path/to/new_dynamic_run \
+  --target 12 --wave-size 12 --max-attempts 24 \
+  --planner-python /path/to/planner/bin/python \
+  --editor-python /path/to/editor/bin/python \
+  --mllm-model /path/to/planner_model \
+  --editor-model /path/to/Qwen-Image-2.1 \
+  --site-model /path/to/sam3 \
+  --mllm-devices 2 --editor-devices 2,3
+```
+
+支持独立的 `--audit-model`、`--audit-tp`、`--audit-devices`，用于经质量对照验证的审核模型。默认与规划同模型；当前 27B 联合审核仍存在明显漏判，不应直接用默认配置正式发布。`progress.json` 给出目标、已通过、各类缺额和停止原因；`waves/NNN/{planning,generation,audit}.log` 保存详细进度。中断后使用相同参数重启；模型/输入/配额变更应使用新根目录。`accepted.jsonl` 是自动通过的实验记录，不代表人工验收或发布。
+
+审核模型配置在第一次进入审核阶段时单独冻结；可以先 `--stop-after planning` 或 `--stop-after generation` 检查阶段结果，再用原参数去掉停止选项继续。重复同一停止选项不会越过该阶段。需要扩充候选时用 `--candidate-extension /path/to/candidates.jsonl` 注册不可变增量清单，既有波次不变，已尝试源图仍不重复；增量也检查评测隔离。
+
+建议沿用生产环境的已验证本地模型缓存，避免共享盘冷读拖慢每波启动。启动前设置 `SA1B_LOCAL_MODEL_MAP` 为 canonical 模型路径到本机缓存路径的 JSON（例如 `export SA1B_LOCAL_MODEL_MAP="$(cat /path/to/verified-model-map.json)"`）；缓存必须有 `stage_model` 产生的 `ready.json` 和 `files.json`，不能只随意写一个目录。加载使用本地路径，数据 provenance 仍记录 canonical 模型。`stage_attempts.jsonl` 保留失败/恢复启动耗时，不能只用最终成功退出的时间估算总成本。

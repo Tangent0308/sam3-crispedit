@@ -1,8 +1,9 @@
 """Independent image + no-ref probe, without masks, refs or generated targets.
 
-The model enumerates plausible scene targets. Matching to the actual members is
-performed afterwards, outside the model context. Missing/ambiguous matches fail
-closed rather than being interpreted as evidence of ambiguity.
+The current probe checks semantic eligibility and visible alternatives without
+exhaustive box enumeration. Intended member scopes are checked only afterwards,
+outside the model context; localized final auditing remains mandatory. Legacy
+box-based records are still readable. Insufficient evidence never means pass.
 """
 from __future__ import annotations
 
@@ -14,11 +15,68 @@ from pathlib import Path
 
 from PIL import Image
 
-PROBE_VERSION = 'image-only-preference-2'
-PROMPT = '''This is a COUNTERFACTUAL AMBIGUITY TEST, NOT a request to execute an edit or locate an already marked region. The words 'the selected region' are an intentional placeholder. Imagine separately selecting each visible object/part, then ask whether the stated edit would be natural there. The missing locator is EXPECTED and is NEVER a reason to return an empty list. For example, 'Remove the selected region.' may reasonably refer to a removable lamp, a chair, a bag or a passerby; list the actual plausible alternatives visible in this photograph. A generic recoloring request can apply to several unrelated physical objects with different original colors. You see one unmarked original photograph and one editing request. Do not assume which region was selected. Independently enumerate up to 12 distinct visible objects or parts to which this exact request could naturally apply. Include equally plausible alternatives even if their categories differ. Judge the full payload/property in this scene, not just whether an edit is technically possible: already-present colors/items, incompatible replacement hardware/materials, essential supports and occupied chairs can make a request implausible.
-For each plausible target give its short visible description, a tight bounding box [left,top,right,bottom] normalized to 0..1000 in the ORIGINAL image, naturalness from 0 to 1, and preference_weight from 0 to 1 measuring how likely this target is intended based ONLY on the semantic fit of image+request. Do not rank by image centrality, visual salience or object size alone. Give equal weights when there is no semantic reason to prefer one; do not invent differences merely to rank. Include the actual edited part/attachment site when the request specifies one. Weights need not sum to one. Describe one target per box, not a collection or an entire scene.
-Return JSON only: {"targets":[{"description":"...","bbox_1000":[0,0,100,100],"naturalness":0.9,"preference_weight":0.5}],"evidence":"brief reason for any strong preference, or no clear preference"}. Return an empty targets list ONLY if no visible object or part could naturally receive this edit even if it were selected; ambiguity itself must produce multiple alternatives, not an empty list. Do not infer hidden masks or ask for them.
+PROBE_VERSION = 'image-only-semantic-3.1'
+PROMPT = '''This is a BLIND INTENT test, not an instruction to execute an edit. You see only the original image and an editing sentence, with no locator. "the selected region" intentionally hides the target. Do NOT ask for a mask. Do NOT rank by centrality, size or visual salience.
+Does the wording/payload naturally allow multiple visible targets, or strongly imply one specific target? Consider normal photo editing, physical function and support. Multiple instances of the same class count as alternatives. Give two short visibly plausible examples if ambiguous; no bounding boxes or exhaustive instance list.
+Report semantic_scope="broad" ONLY for category-neutral removal or ordinary color changes that could naturally apply across multiple visible classes. Otherwise use "restricted" and list the singular physical category nouns that the FULL payload can naturally apply to in this scene (including parts, e.g. lamp head). A dashed road marking is not a replacement for a window. Do not include an incompatible category to increase diversity. Report "specific" if wording clearly favors one visible instance; "uncertain" if core evidence is insufficient.
+Return compact JSON only:
+{"blind_schema":3,"decision":"ambiguous|specific|uncertain","semantic_scope":"broad|restricted","eligible_categories":[],"examples":["visible alternative 1","visible alternative 2"],"evidence":"one short reason based on semantic fit, not salience"}.
+This check tests blind ambiguity; separate localized checks must still verify EACH intended member's naturalness. Do not claim all hidden members are valid.
 Editing request: '''
+
+
+def _category_covered(scope, categories):
+    """Conservative lexical coverage; never infer eligibility from a missing class."""
+    import re
+    aliases = {'lights':'lamp', 'light':'lamp', 'lantern':'lamp', 'bags':'bag',
+               'backpack':'bag', 'sack':'bag', 'shutters':'shutter', 'chairs':'chair',
+               'stool':'chair', 'armchair':'chair', 'bottles':'bottle', 'screens':'screen'}
+    def words(value):
+        return {aliases.get(w, w.rstrip('s') if w.endswith('s') and not w.endswith('ss') else w)
+                for w in re.findall(r'[a-z]+',str(value).lower())
+                if w not in {'the','a','an','small','large','object','part','surface','item'}}
+    target = words(scope)
+    # Qualifiers may differ while the physical object class is identical:
+    # "canvas bag" and "military bag" must not fail solely on adjectives.
+    # Keep host qualifiers for generic components (door/window handle, etc.).
+    generic_parts = {'head', 'top', 'side', 'leg', 'arm', 'back', 'front',
+                     'handle', 'strap', 'rim', 'edge', 'cover', 'base', 'frame', 'body'}
+    def head(value):
+        tokens = re.findall(r'[a-z]+', str(value).lower())
+        return next(iter(words(tokens[-1])), '') if tokens else ''
+    target_head = head(scope)
+    # Match a category phrase or a more general head, but never via qualifiers
+    # alone (e.g. metal window != metal chair).
+    return any(target and (target <= words(c) or words(c) <= target or
+                          (target_head and target_head not in generic_parts and target_head == head(c))) and words(c)
+               for c in categories)
+
+
+def evaluate_semantic_probe(group, raw):
+    result = {'version':PROBE_VERSION,'pass':False,'decision':'uncertain',
+              'input_contract':'clean_source_image_and_noref_only','raw':raw,
+              'requires_localized_shared_edit_audit':True}
+    if (raw.get('_generation_metadata') or {}).get('finish_reason') == 'length':
+        return {**result,'reason':'truncated_blind_response'}
+    if raw.get('decision') == 'specific':
+        return {**result,'decision':'fail','reason':'blind_instruction_implies_specific_target'}
+    examples = raw.get('examples')
+    if (raw.get('decision') != 'ambiguous' or not isinstance(examples,list)
+            or len({x.strip().casefold() for x in examples if isinstance(x,str) and x.strip()}) < 2
+            or not str(raw.get('evidence','')).strip()):
+        return {**result,'reason':'insufficient_blind_ambiguity_evidence'}
+    broad_allowed = group.get('operation') == 'remove' or (
+        group.get('operation') == 'attribute' and
+        [a.get('property') for a in group.get('instruction_spec',{}).get('attributes',[])] == ['color'])
+    if raw.get('semantic_scope') == 'broad' and broad_allowed:
+        return {**result,'pass':True,'decision':'pass','reason':'broad_request_with_visible_alternatives'}
+    categories = raw.get('eligible_categories')
+    if raw.get('semantic_scope') != 'restricted' or not isinstance(categories,list) or not all(isinstance(c,str) for c in categories):
+        return {**result,'reason':'missing_blind_semantic_scope'}
+    covered = [_category_covered(m.get('scope',''), categories) for m in group['members']]
+    if not all(covered):
+        return {**result,'reason':'member_category_not_covered_by_blind_evidence','coverage':covered}
+    return {**result,'pass':True,'decision':'pass','reason':'shared_semantic_scope_with_visible_alternatives','coverage':covered}
 
 
 def probe_request(group):
@@ -34,6 +92,8 @@ def _iou(a, b):
 
 
 def evaluate_probe(group, raw):
+    if raw.get('blind_schema') == 3:
+        return evaluate_semantic_probe(group, raw)
     targets = raw.get('targets')
     result = {'version': PROBE_VERSION, 'pass': False, 'decision': 'uncertain',
               'input_contract': 'clean_source_image_and_noref_only', 'raw': raw,
@@ -94,7 +154,8 @@ def run_blind_probes(groups, model, output_dir):
         images,prompt=probe_request(group)
         digest=hashlib.sha256(Path(images[0]).read_bytes()).hexdigest()
         fingerprint=hashlib.sha256(json.dumps({'image':digest,'prompt':prompt,
-            'members':[(m['unit_id'],m['bbox']) for m in group['members']],
+            'members':[(m['unit_id'],m['bbox'],m.get('scope')) for m in group['members']],
+            'operation':group.get('operation'),'instruction_spec':group.get('instruction_spec'),
             'model':getattr(model,'model_id','unknown'),'version':PROBE_VERSION},sort_keys=True).encode()).hexdigest()
         path=directory/(group['twin_id']+'.json')
         if path.exists():
