@@ -233,3 +233,97 @@ def test_group_audit_batches_without_reordering():
     assert [row["job_id"] for row in result] == [str(i) for i in range(5)]
     assert model.batch_sizes == [2, 2, 1]
 
+
+
+def test_clean_group_views_preserve_color_and_mask_geometry(tmp_path):
+    image, objects = _source(tmp_path)
+    candidate = {"source_id": "s", "image_path": str(image), "objects": objects}
+    paths, masks, digest = group_views(candidate, objects, tmp_path / "views")
+    assert np.array_equal(np.asarray(Image.open(paths[0])), np.asarray(Image.open(image)))
+    sheet = np.asarray(Image.open(paths[1]))
+    # The photographic half is never tinted with a guide color.
+    photo = sheet[32:352, :512]
+    assert np.all(photo[..., 0] == photo[..., 1])
+    assert np.all(photo[..., 1] == photo[..., 2])
+    locator = sheet[32:352, 512:]
+    assert set(np.unique(locator)) <= {0, 35, 255}
+    # Geometry updates invalidate the view cache even for the same object ID.
+    changed = np.asarray(Image.open(objects[0]["mask_path"])).copy()
+    changed[0:10, 0:10] = 255
+    Image.fromarray(changed).save(objects[0]["mask_path"])
+    _, _, next_digest = group_views(candidate, objects, tmp_path / "views")
+    assert next_digest != digest
+
+
+def test_twin_assignment_eval_size_and_direct_anchor_fail_closed():
+    import pytest
+    base = {"feasible": True, "operation": "remove"}
+    with pytest.raises(ValueError, match="assigned operation"):
+        build_twin_group({}, [], base, [], split="train", scope_level="object",
+                         group_id="x", geometry=[], assigned_operation="add")
+    with pytest.raises(ValueError, match="exactly two"):
+        build_twin_group({}, [{}, {}, {}], base, [], split="eval", scope_level="object",
+                         group_id="x", geometry=[])
+    with pytest.raises(ValueError, match="direct support"):
+        build_twin_group({}, [], {"operation": "add", "placement": {"anchor_mode": "reference"}},
+                         [], split="train", scope_level="object", group_id="x", geometry=[])
+
+
+def test_member_audit_failure_cannot_be_overridden_by_group_pass(tmp_path):
+    from sa1b_pipeline.group_audit import audit_twin_groups
+    image, objects = _source(tmp_path)
+    members = [{"unit_id": f"U{i+1}", "object_id": obj["object_id"], "ref": f"bag {i}",
+                "operation": "attribute", "instruction": "Change the bag color to blue.",
+                "instruction_spec": {}, "mask": obj["mask_path"], "support_mask": obj["mask_path"],
+                "edited_image": str(image)} for i, obj in enumerate(objects)]
+    group = {"twin_id": "tw", "source_image": str(image), "operation": "attribute",
+             "members": members, "group_checks": {k: {"pass": True} for k in
+             ("deterministic", "cross_target_preservation", "support_gap")}}
+    class Model:
+        batch_size = 2
+        def call_batch(self, jobs):
+            results = []
+            for job in jobs:
+                if "::" in job["job_id"]:
+                    assert "Expected operation: attribute" in job["prompt"]
+                    audit = dict(decision="pass", target_done=True, non_target_preserved=True,
+                                 natural=True, operation_correct=not job["job_id"].endswith("U2"))
+                else:
+                    audit = {"decision": "pass", **dict.fromkeys(TWIN_REQUIRED_AUDIT_FIELDS, True)}
+                results.append({"job_id": job["job_id"], "semantic_audit": audit})
+            return results
+    audited = audit_twin_groups([group], Model(), tmp_path / "audit")[0]
+    assert audited["group_checks"]["semantic_audit_pass"]
+    assert not audited["group_checks"]["group_pass"]
+    assert not audited["members"][1]["semantic_audit"]["operation_correct"]
+
+
+def test_multi_step_audit_compares_each_actual_input_and_output(tmp_path):
+    from sa1b_pipeline.group_audit import audit_multi_groups
+    image, objects = _source(tmp_path)
+    mid, final = tmp_path / "mid.png", tmp_path / "final.png"
+    Image.open(image).save(mid)
+    Image.open(image).save(final)
+    units = [{"unit_id": f"U{i+1}", "object_id": obj["object_id"], "ref": f"bag {i}",
+              "operation": "attribute", "instruction": "Change the bag color to blue.",
+              "instruction_spec": {}, "mask": obj["mask_path"], "support_mask": obj["mask_path"],
+              "step_input_image": str(image if i == 0 else mid),
+              "step_output_image": str(mid if i == 0 else final)} for i, obj in enumerate(objects)]
+    group = {"multi_id": "mu", "source_image": str(image), "units": units,
+             "joint_target": str(final), "joint_audit": {"steps": [{"decision": "pending_semantic_audit"}]*2,
+             "outside_union_support_fraction": 0.0}}
+    class Model:
+        batch_size = 2
+        def call_batch(self, jobs):
+            results = []
+            for job in jobs:
+                if "::" in job["job_id"]:
+                    i = int(job["job_id"][-1])-1
+                    assert job["images"][:2] == [units[i]["step_input_image"], units[i]["step_output_image"]]
+                    audit = dict(decision="pass", target_done=True, non_target_preserved=True,
+                                 natural=True, operation_correct=True)
+                else:
+                    audit = {"decision": "pass", **dict.fromkeys(MULTI_REQUIRED_AUDIT_FIELDS, True)}
+                results.append({"job_id": job["job_id"], "semantic_audit": audit})
+            return results
+    assert audit_multi_groups([group], Model(), tmp_path / "audit")[0]["joint_audit"]["pass"]

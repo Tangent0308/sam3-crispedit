@@ -204,7 +204,7 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
         # training selection cost bounded.
         if args.split == "eval":
             factor = max(factor, 4.0)
-        three_fraction = min(1.0, max(0.0, float(args.twin_three_member_fraction)))
+        three_fraction = 0.0 if args.split == "eval" else min(1.0, max(0.0, float(args.twin_three_member_fraction)))
         pools: dict[str, list[dict[str, Any]]] = {}
         for index, (op, count) in enumerate(quotas.items()):
             pool_count = max(count, int(math.ceil(count * factor)))
@@ -482,7 +482,7 @@ def main(argv=None):
                     if args.kind == "twins":
                         group = build_twin_group(selection["candidate"], objects, raw, item["mask_paths"],
                                                  split=args.split, scope_level=selection["scope_level"], group_id=item["gid"],
-                                                 geometry=item["geometries"])
+                                                 geometry=item["geometries"], assigned_operation=selection["operation"])
                         group["selection_evidence"] = selection["gate"]
                     else:
                         group = build_multi_group(selection["candidate"], objects, raw, item["mask_paths"],
