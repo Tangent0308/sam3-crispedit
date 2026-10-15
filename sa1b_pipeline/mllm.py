@@ -195,7 +195,7 @@ def _required_operation_rule(operation: str | None) -> str:
     criteria = {
         'add': 'Select existing hosts with a visible usable attachment/resting surface for the requested conventional accessories. Keep the host. The source mask is the host anchor, not the new item. Avoid hosts with no natural accessory.',
         'replace': 'Select complete, compact objects or detachable parts that admit a visibly different design with compatible size, support and function. A recolor is not a replacement.',
-        'remove': 'Select self-contained removable objects or detachable decorations whose absence leaves a plausible scene. Avoid deleting body parts, worn shoes/clothes wholesale, load-bearing supports or mixed-background masks. A named removable garment part is allowed only with a prepared execution region.',
+        'remove': 'Select self-contained removable objects or detachable decorations whose absence leaves a plausible scene. Avoid deleting body parts, wheels, doors, tires, vehicle panels, safety equipment, worn shoes/clothes wholesale, load-bearing supports or mixed-background masks. A named removable garment part is allowed only with a prepared execution region. If removing the target would leave a vehicle or structure visibly nonfunctional, reject it.',
         'attribute': 'Select a specific editable surface or single-material object with a credible visible appearance change. Preserve geometry, unrequested markings and other materials. Avoid already-present target colors and whole-person masks.',
     }
     return (f"HARD OPERATION ASSIGNMENT: {operation}. This was assigned BEFORE target selection. "
