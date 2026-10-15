@@ -183,3 +183,5 @@ $GROUP_ROOT/shards/multi_eval/                     # 4 x 25
 
 生图阶段追加 `--editor-model ... --audit-model ... --publish`，并将 `--split eval` 指向
 `inputs/eval_candidates.jsonl` 生成 200 组评测；评测组必须全部通过人工 ledger 后才可发布。多目标第一批在孪生第一批训练侧确认后执行，命令把 `--kind twins` 改为 `--kind multi`，目标设为 1,500，并使用同一个 source-isolation reservation。每个组一条 planning call，生成和审核 checkpoint 可从同一独立根目录恢复；不要把失败组缩减成较少目标数。
+
+分组规划实验可显式添加 `--outline-planning-crops`，在每个候选行追加 mask 外侧轮廓；仍只向模型传原图和一张候选拼图。该开关尚在验证，默认关闭，当前 50k 快照不受影响。
