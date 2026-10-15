@@ -133,7 +133,7 @@ python scripts/run_group_pipeline.py --kind twins \
 Flash-Next 仍是待验证的规划/审核候选，不代表已经达到正式发布质量。当前适配根据本地 `config.json` 的 `Qwen4ExpForConditionalGeneration` 自动启用 Triton MoE、Engram CPU offload；四卡使用 TP4，八卡使用 TEP8。它需要支持该架构的运行时；`requirements/mllm-vllm-cu129.txt` 中的旧 27B 环境不能直接视作已验证兼容。本机实验复用 `/tmp/sa1b-next-runtime/bin/python`（vLLM 0.31.1rc1.dev296、CUDA 12.9）及已下载的节点缓存。审核切换模型时同时指定 `--audit-tp 4`，默认仍为 1。每种模型/输入变体必须使用新的输出根目录，避免复用另一模型的计划缓存。
 
 正式 wave1 选择已经固定在独立根目录
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_twins_flashnext_wave1_20261015/inputs/selected.jsonl`（5,000 组），四个分片位于同目录的 `shards/twins_train_wave1/`。这份清单已完成四类、scope、面积比和评测排除校验，不要重新选择或覆盖它：
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_twins_flashnext_wave1_20261015/inputs/selected.jsonl`（5,000 组），四个分片位于同目录的 `shards/twins_train_wave1/`。这份清单已完成四类、scope、面积比和评测排除校验，不要重新选择或覆盖它：校验摘要和清单/分片哈希见 `$GROUP_ROOT/verification/selection_integrity.json`。
 
 ```bash
 export GROUP_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_twins_flashnext_wave1_20261015
