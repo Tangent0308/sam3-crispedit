@@ -5,6 +5,7 @@ from PIL import Image
 
 from sa1b_pipeline.group_geometry import precise_point, twin_pair_gate, adjacent_pair_gate
 from sa1b_pipeline.group_planning import build_multi_group, build_twin_group, group_views
+from scripts.run_group_pipeline import _require_manual_review
 from sa1b_pipeline.group_schema import validate_twin_record, validate_multi_record
 from sa1b_pipeline.group_selection import select_twin_candidates, select_multi_candidates
 from sa1b_pipeline.source_isolation import assert_no_eval_leakage
@@ -167,4 +168,15 @@ def test_multi_plan_requires_exact_unit_ids_and_unique_refs(tmp_path):
         assert "mismatch" in str(exc) or "reference" in str(exc)
     else:
         raise AssertionError("invalid unit ids/references were accepted")
+
+
+def test_group_publish_manual_review_gate_requires_signed_fields(tmp_path):
+    ledger = tmp_path / "human_review.jsonl"
+    ledger.write_text(
+        '{"group_id":"g1","reviewer":"reviewer","status":"manual_pass",'
+        '"decision":"manual_pass","reference_correct":true,"target_done":true,'
+        '"non_target_preserved":true,"natural":true}\n', encoding="utf-8")
+    groups = [{"twin_id": "g1"}]
+    summary = _require_manual_review(groups, ledger, kind="twins", split="eval")
+    assert summary["passing_groups"] == 1 and summary["all_eval_groups"]
 

@@ -154,6 +154,8 @@ export GROUP_RESERVATION="$GROUP_ROOT/inputs/eval_reservation.json"
 export GROUP_PLANNER_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8
 export GROUP_EDITOR_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1
 export GROUP_AUDIT_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B
+# Only set this after the PDF has been reviewed and the ledger is filled.
+export GROUP_HUMAN_REVIEW="$GROUP_ROOT/review/twins_train_human_review.jsonl"
 export GROUP_PUBLISH=1
 bash scripts/group_4node_entry.sh
 ```
@@ -166,7 +168,7 @@ python scripts/merge_group_shards.py --kind twins --split train \
   --output "$GROUP_ROOT/final/twins_train.jsonl"
 ```
 
-评测 200 组使用相同流程，但输入换为 `eval_twin_selected.jsonl`，`--split eval`，并把输出写到 `twins_eval/rank${RANK}`；评测组完成后必须生成图片内嵌 PDF，逐组填写 `human_review.jsonl`，全部确认后才可发布。多目标的 1,500 训练组和 100 评测组必须在孪生第一批人工确认后执行。当前选择文件已经完成并分片：
+评测 200 组使用相同流程，但输入换为 `eval_twin_selected.jsonl`，`--split eval`，并把输出写到 `twins_eval/rank${RANK}`；评测组完成后必须生成图片内嵌 PDF，逐组填写 `human_review.jsonl`，全部确认后才可发布。训练发布至少需要孪生 200 组或多目标 100 组的显式人工通过记录；评测发布必须每组都人工通过。`GROUP_PUBLISH=1` 时必须设置 `GROUP_HUMAN_REVIEW`，入口会拒绝缺失或未签字的 ledger。多目标的 1,500 训练组和 100 评测组必须在孪生第一批人工确认后执行。当前选择文件已经完成并分片：
 
 ```text
 $GROUP_ROOT/inputs/train_multi_selected.jsonl       # 1,500 groups
