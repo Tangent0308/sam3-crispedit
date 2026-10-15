@@ -535,38 +535,53 @@ def main(argv=None):
                             "geometries": geometries, "view_digest": view_digest,
                             "prompt": prompt, "assignments": assignments if args.kind == "multi" else None})
         if pending:
-            raws = planner.generate_multimage([(item["views"], item["prompt"]) for item in pending])
-            if len(raws) != len(pending):
-                raise RuntimeError("planner returned an incomplete batch")
-            for item, raw in zip(pending, raws):
-                selection, objects = item["selection"], item["objects"]
-                try:
-                    if args.kind == "twins":
-                        group = build_twin_group(selection["candidate"], objects, raw, item["mask_paths"],
-                                                 split=args.split, scope_level=selection["scope_level"], group_id=item["gid"],
-                                                 geometry=item["geometries"], assigned_operation=selection["operation"])
-                        group["selection_evidence"] = selection["gate"]
-                    else:
-                        group = build_multi_group(selection["candidate"], objects, raw, item["mask_paths"],
-                                                  split=args.split, group_id=item["gid"], geometry=item["geometries"],
-                                                  assignments=item["assignments"])
-                        group["adjacent_pairs"] = selection["adjacent_pairs"]
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    # One malformed/infeasible completion must not discard
-                    # valid siblings from the same continuous batch. Keep the
-                    # raw answer and selection evidence for audit/retry.
-                    rejection = {"group_id": item["gid"], "status": "plan_rejected",
-                                 "reason": str(exc), "raw": raw, "selection": selection}
-                    atomic_json(root / "rejected" / f"{item['gid']}.json", rejection)
+            # Submit bounded batches and persist every completed plan before
+            # asking for the next batch. A rank may be preempted while a
+            # 1,250-group shard is running; per-group checkpoints make resume
+            # reuse successful calls instead of losing the whole shard.
+            batch_size = max(1, int(getattr(planner, "batch_size", args.planner_batch_size)))
+            for batch_start in range(0, len(pending), batch_size):
+                batch = pending[batch_start:batch_start + batch_size]
+                raws = planner.generate_multimage([(item["views"], item["prompt"]) for item in batch])
+                if len(raws) != len(batch):
+                    raise RuntimeError(
+                        f"planner returned an incomplete batch: {len(raws)}/{len(batch)}")
+                for item, raw in zip(batch, raws):
+                    selection, objects = item["selection"], item["objects"]
+                    try:
+                        if args.kind == "twins":
+                            group = build_twin_group(selection["candidate"], objects, raw, item["mask_paths"],
+                                                     split=args.split, scope_level=selection["scope_level"], group_id=item["gid"],
+                                                     geometry=item["geometries"], assigned_operation=selection["operation"])
+                            group["selection_evidence"] = selection["gate"]
+                        else:
+                            group = build_multi_group(selection["candidate"], objects, raw, item["mask_paths"],
+                                                      split=args.split, group_id=item["gid"], geometry=item["geometries"],
+                                                      assignments=item["assignments"])
+                            group["adjacent_pairs"] = selection["adjacent_pairs"]
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                        # One malformed/infeasible completion must not discard
+                        # valid siblings from the same continuous batch. Keep the
+                        # raw answer and selection evidence for audit/retry.
+                        rejection = {"group_id": item["gid"], "status": "plan_rejected",
+                                     "reason": str(exc), "raw": raw, "selection": selection}
+                        atomic_json(root / "rejected" / f"{item['gid']}.json", rejection)
+                        print(json.dumps({"planned": len(planned), "total": len(selected),
+                                          "id": item["gid"], "status": "rejected", "reason": str(exc)},
+                                         ensure_ascii=False), flush=True)
+                        continue
+                    group["planning"] = {"model": getattr(planner, "model_id", "unknown"), "calls": 1,
+                                          "views": item["views"], "view_digest": item["view_digest"], "raw": raw}
+                    # This is the resume checkpoint. It is written before the
+                    # next request is submitted, so an interrupted rank never
+                    # needs to repeat a successfully parsed MLLM response.
+                    atomic_json(item["path"], group)
+                    planned.append(group)
                     print(json.dumps({"planned": len(planned), "total": len(selected),
-                                      "id": item["gid"], "status": "rejected", "reason": str(exc)},
-                                     ensure_ascii=False), flush=True)
-                    continue
-                group["planning"] = {"model": getattr(planner, "model_id", "unknown"), "calls": 1,
-                                      "views": item["views"], "view_digest": item["view_digest"], "raw": raw}
-                atomic_json(item["path"], group)
-                planned.append(group)
-                print(json.dumps({"planned": len(planned), "total": len(selected), "id": item["gid"]}, ensure_ascii=False), flush=True)
+                                      "id": item["gid"]}, ensure_ascii=False), flush=True)
+                print(json.dumps({"planning_batch_completed": min(batch_start + len(batch), len(pending)),
+                                  "planning_batch_total": len(pending), "checkpointed": len(planned)},
+                                 ensure_ascii=False), flush=True)
     finally:
         if planner is not None and hasattr(planner, "close"):
             planner.close()
