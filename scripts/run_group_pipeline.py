@@ -31,6 +31,7 @@ from sa1b_pipeline.group_planning import (build_multi_group, build_twin_group, g
 from sa1b_pipeline.group_schema import validate_multi_record, validate_twin_record
 from sa1b_pipeline.group_selection import select_multi_candidates, select_twin_candidates
 from sa1b_pipeline.io import load_candidates, write_jsonl
+from sa1b_pipeline.multi_operation_balance import _target_counts
 from sa1b_pipeline.production_state import atomic_json, immutable_json, portable
 from sa1b_pipeline.source_isolation import assert_no_eval_leakage, load_reservation
 
@@ -149,6 +150,37 @@ def _group_id(kind: str, row: dict[str, Any]) -> str:
     op = row.get("operation") or "-".join(row.get("operations", []))
     digest = hashlib.sha256(f"{kind}|{row['candidate']['source_id']}|{ids}|{op}".encode()).hexdigest()[:12]
     return f"{kind}-{row['candidate']['source_id']}-{digest}"
+
+
+def _validate_multi_selection_operations(rows: list[dict[str, Any]]) -> None:
+    """Fail before planning if a shard violates the multi-target contract.
+
+    Selection is the only stage allowed to assign operation types.  A stale
+    fixed-order shard would otherwise consume planner/editor capacity and
+    quietly reintroduce the historical add/attribute skew.
+    """
+    counts = Counter()
+    for index, row in enumerate(rows):
+        objects = row.get("objects") or []
+        operations = row.get("operations") or []
+        n = len(objects)
+        if len(operations) != n:
+            raise RuntimeError(f"multi selection row {index} has {len(operations)} operations for {n} objects")
+        if n <= 4 and len(set(operations)) != n:
+            raise RuntimeError(f"multi selection row {index} repeats an operation for n={n}")
+        if n == 5 and set(operations) != set(("add", "replace", "remove", "attribute")):
+            raise RuntimeError("five-target multi selection must contain all four operations")
+        if n not in (2, 3, 4, 5):
+            raise RuntimeError(f"multi selection row {index} has invalid target count {n}")
+        counts.update(operations)
+    targets = _target_counts(sum(counts.values()))
+    deviations = {op: counts[op] - targets[op] for op in targets}
+    # Naturalness eligibility can make exact equality impossible.  Keep the
+    # release preflight tight enough to reject the old fixed-order skew while
+    # allowing a small, recorded residual imbalance.
+    limit = max(8, int(math.ceil(max(targets.values(), default=0) * 0.10)))
+    if max((abs(value) for value in deviations.values()), default=0) > limit:
+        raise RuntimeError(f"multi operation quota skew exceeds {limit}: {deviations}")
 
 
 def _candidate_rows(args, reservation_ids: set[str]) -> list[dict[str, Any]]:
@@ -376,6 +408,8 @@ def main(argv=None):
         write_jsonl(selected_path, selected)
     if not selected:
         raise RuntimeError("candidate selection produced no groups")
+    if args.kind == "multi":
+        _validate_multi_selection_operations(selected)
     if args.split == "train" and args.reservation:
         assert_no_eval_leakage((r["candidate"] for r in selected), args.reservation)
     selection_operations = Counter()

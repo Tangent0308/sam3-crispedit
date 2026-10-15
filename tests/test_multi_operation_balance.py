@@ -1,6 +1,7 @@
 from collections import Counter
 
 from sa1b_pipeline.multi_operation_balance import balance_multi_operations, operation_schedules
+from scripts.run_group_pipeline import _validate_multi_selection_operations
 
 
 def _rows():
@@ -52,4 +53,19 @@ def test_balancer_never_assigns_a_rejected_operation():
     for row in rows:
         for obj, operation in zip(row["objects"], row["operations"]):
             assert allowed(obj, operation, (100, 100))
+
+
+def test_pipeline_preflight_rejects_fixed_order_skew():
+    rows = []
+    for index in range(40):
+        rows.append({
+            "objects": [{"object_id": f"{index}-0"}, {"object_id": f"{index}-1"}],
+            "operations": ["add", "replace"],
+        })
+    try:
+        _validate_multi_selection_operations(rows)
+    except RuntimeError as error:
+        assert "quota skew" in str(error)
+    else:
+        raise AssertionError("fixed-order multi selection must fail quota preflight")
 
