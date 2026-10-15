@@ -126,7 +126,8 @@ def _cheap_operation_allowed(obj: dict[str, Any], operation: str, size: tuple[in
         # violates the benchmark's remove semantics even when the mask is
         # geometrically clean.
         if any(re.search(r"(?<![a-z])" + token + r"(?![a-z])", category)
-               for token in ("arm", "hand", "leg", "foot", "finger", "head", "face", "person")):
+               for token in ("arm", "hand", "leg", "foot", "finger", "head", "face", "person",
+                             "cheek", "eye", "ear", "nose", "mouth", "lip", "neck", "torso")):
             return False
     if operation == "add":
         # These labels describe a visual effect, text/mark, or a tiny
@@ -147,6 +148,28 @@ def _cheap_operation_allowed(obj: dict[str, Any], operation: str, size: tuple[in
     if operation in {"replace", "remove"} and (x0 <= 0 or y0 <= 0 or x1 >= size[0] or y1 >= size[1]):
         return False
     return width * height >= image_area * (0.00015 if operation == "add" else 0.00005)
+
+
+def twin_operation_priority(objects: list[dict[str, Any]], operation: str) -> int:
+    """Rank plausible edits within quota cells, without treating dense labels as ground truth."""
+    preferred = {
+        "add": {"table", "chair", "backpack", "bag", "hat", "pot", "planter", "cart", "shelf", "door", "screen"},
+        "remove": {"bottle", "cup", "bag", "backpack", "bicycle", "chair", "umbrella", "vase", "sign", "lamp", "flowerpot"},
+        "replace": {"chair", "stool", "bottle", "cup", "vase", "rim", "handle", "knob", "lamp", "pot", "hat", "shoe"},
+        "attribute": {"shirt", "sleeve", "backpack", "bag", "chair", "door", "frame", "cap", "hat", "rim", "handle", "shutter"},
+    }
+    risky = {"strip", "band", "concrete", "wood", "beef", "wire", "wires", "strut", "struts"}
+    scores = []
+    for obj in objects:
+        text = normalized_category(obj.get("category", ""))
+        heads = {s.strip().split()[-1] for s in text.split(",") if s.strip()}
+        score = 2 if heads & preferred.get(operation, set()) else 0
+        if heads & risky:
+            score -= 1
+        if operation == "attribute" and heads & {"banner", "logo", "text", "sign"}:
+            score -= 1
+        scores.append(score)
+    return min(scores, default=0)
 
 
 def _short_side(obj: dict[str, Any]) -> float:
@@ -424,6 +447,7 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
             if attempted_total > 50000:
                 break
     rng.shuffle(rows)
+    rows.sort(key=lambda row: twin_operation_priority(row["objects"], operation), reverse=True)
     selected, per_source, used_objects = [], Counter(), set()
     for row in rows:
         sid = str(row["candidate"]["source_id"])

@@ -38,12 +38,15 @@ python -m scripts.run_production_4node --root /path/to/run status
 `scripts/prepare_group_inputs.py` 和 `scripts/run_group_pipeline.py`。准备阶段先写入
 `eval_reservation.json`，再物化训练/评测候选；训练脚本会拒绝评测源图的 source ID
 或原图字节哈希。`sa1b_pipeline/group_selection.py` 只做几何和配额预选，
-`group_planning.py` 对每组只调用一次规划模型，`group_generation.py` 负责同 seed
+`group_planning.py` 对每组只调用一次规划模型并校验实体/范围字段，`group_generation.py` 负责同 seed
 孪生生成或 source→step 链式生成，`group_audit.py` 接入 27B 语义审核。
 
 组级结果必须通过确定性检查、27B 审核和人工复核后才能发布；`--plan-only` 只产出
 规划检查点，不会伪造目标图或人工结论。完整协议、字段和交付批次见
-`docs/PIPELINE.md` 的“分组数据扩展”章节。
+`docs/PIPELINE.md` 的“分组数据扩展”章节。最新小批量与失败回归见第 7.8 节：
+当前可产出人工确认合格组，但自动准入尚不足以支撑正式放量。
+生成阶段可用 `--generate-only --editor-devices 0,1` 启用常驻双卡编辑器；
+单次联合审核 `--twin-audit-mode joint` 尚未通过质量对照，保持实验选项。
 
 当前独立输入根目录为
 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014`：

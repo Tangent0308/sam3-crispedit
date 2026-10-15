@@ -25,13 +25,14 @@ from typing import Any
 from PIL import Image
 
 from sa1b_pipeline.geometry import load_mask, mask_geometry
-from sa1b_pipeline.group_generation import generate_multi_group, generate_twin_group
+from sa1b_pipeline.group_generation import (generate_multi_group, generate_twin_group,
+                                             twin_support_preflight, parallel_group_generation)
 from sa1b_pipeline.group_geometry import normalized_category
-from sa1b_pipeline.group_audit import audit_multi_groups, audit_twin_groups
+from sa1b_pipeline.group_audit import audit_multi_groups, audit_twin_groups, audit_twin_groups_joint
 from sa1b_pipeline.group_planning import (build_multi_group, build_twin_group, group_views,
                                            multi_prompt, twin_prompt)
 from sa1b_pipeline.group_schema import validate_multi_record, validate_twin_record
-from sa1b_pipeline.group_selection import select_multi_candidates, select_twin_candidates
+from sa1b_pipeline.group_selection import select_multi_candidates, select_twin_candidates, twin_operation_priority
 from sa1b_pipeline.io import load_candidates, write_jsonl
 from sa1b_pipeline.multi_operation_balance import _target_counts
 from sa1b_pipeline.production_state import atomic_json, immutable_json, portable
@@ -111,7 +112,8 @@ def _auditor(args):
         return None
     from sa1b_pipeline.audit_backend import VLLMAuditor
     return VLLMAuditor(args.audit_model, batch_size=args.audit_batch_size,
-                       max_tokens=512, check_operation=False, tensor_parallel_size=args.audit_tp)
+                       max_tokens=1000 if args.twin_audit_mode == "joint" else 512,
+                       check_operation=False, tensor_parallel_size=args.audit_tp)
 
 
 def _manual_review_pass(row: dict[str, Any]) -> bool:
@@ -341,7 +343,8 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
                 # Prefer scopes and area buckets furthest below their targets,
                 # then underused categories; source ID makes the final choice
                 # deterministic.
-                _, _, _, sid, row = max(candidates_for_cell, key=lambda x: (x[0], x[1], -x[2], x[3]))
+                _, _, _, sid, row = max(candidates_for_cell, key=lambda x: (
+                    twin_operation_priority(x[4]["objects"], op), x[0], x[1], -x[2], x[3]))
             category = normalized_category(row["objects"][0].get("category", "object")).split(",", 1)[0].strip()
             scope = str(row.get("scope_level", "object"))
             group_key = (sid, tuple(sorted(str(o["object_id"]) for o in row["objects"])), op)
@@ -383,14 +386,17 @@ def main(argv=None):
     p.add_argument("--planner-device-map", default="auto",
                    help="Transformers device map for the HF planner; auto shards large MoE models across visible GPUs")
     p.add_argument("--planner-tp", type=int, default=1)
-    p.add_argument("--max-new-tokens", type=int, default=900)
+    p.add_argument("--max-new-tokens", type=int, default=1600)
     p.add_argument("--planner-batch-size", type=int, default=8,
                    help="number of multimodal planning requests submitted per vLLM batch")
     p.add_argument("--editor-model")
     p.add_argument("--editor-dtype", default="bf16")
+    p.add_argument("--editor-devices", help="explicit GPU IDs for persistent parallel editors, e.g. 0,1; generation-only")
     p.add_argument("--audit-model")
     p.add_argument("--audit-tp", type=int, default=1)
     p.add_argument("--audit-batch-size", type=int, default=4)
+    p.add_argument("--twin-audit-mode", choices=["legacy", "joint"], default="legacy",
+                   help="experimental joint audit: one structured request per group; legacy remains the default")
     p.add_argument("--human-review", type=Path,
                    help="JSONL ledger with explicit human decisions; required for --publish")
     p.add_argument("--outline-planning-crops", action="store_true",
@@ -421,6 +427,8 @@ def main(argv=None):
         p.error("publication requires the audit stage")
     if args.target < 1:
         p.error("--target must be positive")
+    if args.editor_devices and not args.generate_only:
+        p.error("--editor-devices requires --generate-only to isolate GPU runtime ownership")
     root = args.output_root.resolve(); root.mkdir(parents=True, exist_ok=True)
     if root == FROZEN_ROOT or FROZEN_ROOT in root.parents or root in FROZEN_ROOT.parents:
         raise RuntimeError("refusing to write inside the protected 50k run root")
@@ -484,6 +492,11 @@ def main(argv=None):
             path = plans_dir / f"{gid}.json"
             if path.exists():
                 planned.append(json.loads(path.read_text())); continue
+            rejected_path = root / "rejected" / f"{gid}.json"
+            if rejected_path.exists():
+                # Resume never spends another planning call on a completed
+                # rejection. A new prompt experiment needs a separate root.
+                continue
             objects = selection["objects"]
             views, mask_paths, view_digest = group_views(selection["candidate"], objects, root / "planning_views",
                                                           locator_outline=args.outline_planning_crops,
@@ -552,8 +565,13 @@ def main(argv=None):
                         if args.kind == "twins":
                             group = build_twin_group(selection["candidate"], objects, raw, item["mask_paths"],
                                                      split=args.split, scope_level=selection["scope_level"], group_id=item["gid"],
-                                                     geometry=item["geometries"], assigned_operation=selection["operation"])
+                                                     geometry=item["geometries"], assigned_operation=selection["operation"],
+                                                     require_grounding=True)
                             group["selection_evidence"] = selection["gate"]
+                            preflight = twin_support_preflight(group, root / "generated" / item["gid"])
+                            if not preflight["pass"]:
+                                raise ValueError("pre-generation writable support gap failed")
+                            group["group_checks"]["support_preflight"] = preflight
                         else:
                             group = build_multi_group(selection["candidate"], objects, raw, item["mask_paths"],
                                                       split=args.split, group_id=item["gid"], geometry=item["geometries"],
@@ -571,7 +589,8 @@ def main(argv=None):
                                          ensure_ascii=False), flush=True)
                         continue
                     group["planning"] = {"model": getattr(planner, "model_id", "unknown"), "calls": 1,
-                                          "views": item["views"], "view_digest": item["view_digest"], "raw": raw}
+                                          "views": item["views"], "view_digest": item["view_digest"], "raw": raw,
+                                          "prompt": item["prompt"]}
                     # This is the resume checkpoint. It is written before the
                     # next request is submitted, so an interrupted rank never
                     # needs to repeat a successfully parsed MLLM response.
@@ -595,21 +614,29 @@ def main(argv=None):
             raise RuntimeError("--audit-only requires generated.jsonl from the completed generation stage")
         generated = [json.loads(line) for line in generated_path.read_text().splitlines() if line.strip()]
     else:
-        editor = _editor(args)
-        if editor is None:
+        editor = None if args.editor_devices else _editor(args)
+        if not args.editor_model:
             raise RuntimeError("--editor-model is required unless --plan-only is set")
         generated = []
         try:
-            for index, group in enumerate(planned):
+            if args.editor_devices:
+                groups_to_generate = parallel_group_generation(planned, root / "generated", kind=args.kind,
+                    model=args.editor_model, dtype=args.editor_dtype,
+                    devices=[d.strip() for d in args.editor_devices.split(",") if d.strip()])
+            else:
+                groups_to_generate = iter(planned)
+            for index, group in enumerate(groups_to_generate):
                 out = root / "generated" / (group.get("twin_id") or group.get("multi_id"))
                 if args.kind == "twins":
-                    group = generate_twin_group(group, out, editor, seed=0)
+                    if not args.editor_devices:
+                        group = generate_twin_group(group, out, editor, seed=0)
                     checks = group.get("group_checks", {})
                     accepted = bool(checks.get("deterministic", {}).get("pass")
                                     and checks.get("cross_target_preservation", {}).get("pass")
                                     and checks.get("support_gap", {}).get("pass"))
                 else:
-                    group = generate_multi_group(group, out, editor, seed=0)
+                    if not args.editor_devices:
+                        group = generate_multi_group(group, out, editor, seed=0)
                     joint = group.get("joint_audit", {})
                     accepted = (all(x.get("decision") != "fail" for x in joint.get("steps", []))
                                 and joint.get("outside_union_support_fraction", 1.0) <= 0.02)
@@ -621,6 +648,7 @@ def main(argv=None):
         finally:
             if hasattr(editor, "pipe"):
                 editor.pipe.close()
+        generated.sort(key=lambda g: g.get("twin_id") or g.get("multi_id"))
         write_jsonl(generated_path, generated)
     if args.generate_only:
         print(json.dumps({"status": "generated_pending_audit", "groups": len(generated),
@@ -630,7 +658,8 @@ def main(argv=None):
     try:
         if auditor is not None and generated:
             if args.kind == "twins":
-                generated = audit_twin_groups(generated, auditor, root / "audit_panels")
+                audit_fn = audit_twin_groups_joint if args.twin_audit_mode == "joint" else audit_twin_groups
+                generated = audit_fn(generated, auditor, root / "audit_panels")
             else:
                 generated = audit_multi_groups(generated, auditor, root / "audit_panels")
     finally:
@@ -681,6 +710,8 @@ def main(argv=None):
         assert_no_eval_leakage(exported, args.reservation)
     write_jsonl(final_path, exported)
     atomic_json(root / "release.json", {"groups": len(exported), "requested": args.target,
+                                        "accepted_by_operation": dict(final_counts) if args.kind == "twins" else None,
+                                        "remaining_by_operation": {op: max(0, n - final_counts[op]) for op, n in final_quota.items()} if final_quota else None,
                                         "human_review": human_review_summary,
                                         "semantic_audit": bool(args.audit_model),
                                         "published": bool(args.publish), "final": str(final_path)})

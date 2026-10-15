@@ -59,7 +59,7 @@ ARGS=(
   --planner-backend "${GROUP_PLANNER_BACKEND:-vllm}"
   --planner-tp "${GROUP_PLANNER_TP:-4}"
   --planner-batch-size "${GROUP_PLANNER_BATCH_SIZE:-8}"
-  --max-new-tokens "${GROUP_MAX_NEW_TOKENS:-1200}"
+  --max-new-tokens "${GROUP_MAX_NEW_TOKENS:-1600}"
   --outline-planning-crops
   --locate-planning-scene
   --editor-model "$GROUP_EDITOR_MODEL"

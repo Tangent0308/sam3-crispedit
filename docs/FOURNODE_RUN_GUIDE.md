@@ -63,7 +63,15 @@ tail -F "$ROOT/logs/progress_monitor_tqdm.log"
 3. 已完成 wave 会跳过；已完成 planning checkpoint 会按输入 mask 数和 accepted 数校验后复用；生成 fingerprint 匹配的结果和已落盘审核结果直接恢复。 分组规划还会按 planner batch（默认 8）逐组原子落盘，rank 被回收时不重复已解析的 MLLM 结果。
 4. 已提交但结果丢失的 planner request 会记录为 `interrupted_unknown`，不重复调用同一 mask，也不伪造拒绝结果。
 5. 数据协议、输入清单、模型或生成参数改变时不混入旧运行。仅修复启动依赖、权重缓存和超时，可以在所有 rank 停止并持有共享锁时使用 `scripts/production/repair_deployment.py` 发布补丁：备份旧部署、逐项验证旧代码及 planner 快照，只更新允许的运行时文件及 `code_hashes`，保留原根目录和全部检查点。禁止手工删除 hash 检查。
-6. 最后一个 rank 结束后自动尝试合并；必要时在代码环境执行 `finalize`，并检查 `final/summary.json`。
+6. 最后一个 rank 结束后自动尝试合并，成功后检查 `final/summary.json`。如果四个节点均已写出 `done.json` 和 `auto_pass.jsonl`，仅汇总失败（例如共享盘不支持 `flock`，报 `Errno 38`），无需重启四机或重新生成图片；在能访问共享目录的 CPU 机器上，使用更新后的仓库执行下述独立收尾入口。该入口保留冻结配置，验证原有导出及审核规则的代码哈希，使用原子建目录锁防止并发发布，并检查数量、类型配额、唯一性、审核标记及全部图片路径。图片校验包含存在性、非空及根目录内路径，不包含全量解码或人工质量复核。
+
+```bash
+python3 -u -m scripts.finalize_production_exports \
+  --root /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014 \
+  --workers 16
+```
+
+收尾进度写入 `final/progress.json`；最终标注为 `final/auto_pass.jsonl`，其中图片路径相对于数据根目录；`final/summary.json` 保存统计、输入导出哈希及最终标注哈希。目录锁 `final/finalize.lock.d` 不会自动抢占；异常退出遗留锁时，先核实 `owner.json` 对应进程已退出再处理。历史 `failure.json` 保留；本次 `Errno 38` 成功恢复后更新节点进度为完成。
 
 ## 2026-10-14 启动修复与原地恢复
 
@@ -157,7 +165,7 @@ export GROUP_RESERVATION="$GROUP_INPUT_ROOT/inputs/eval_reservation.json"
 export GROUP_PLANNER_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8
 export GROUP_EDITOR_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1
 export GROUP_AUDIT_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B
-export GROUP_PLANNER_TP=4 GROUP_MAX_NEW_TOKENS=1200 GROUP_AUDIT_TP=1
+export GROUP_PLANNER_TP=4 GROUP_MAX_NEW_TOKENS=1600 GROUP_AUDIT_TP=1
 # The entry automatically enables clean binary/outline crops, full-scene localization,
 # and the grounded group-audit prompt. Leave GROUP_PUBLISH unset until the PDF ledger is complete.
 bash scripts/group_4node_entry.sh
@@ -188,3 +196,19 @@ $GROUP_ROOT/shards/multi_eval/                     # 4 x 25
 `inputs/eval_candidates.jsonl` 生成 200 组评测；评测组必须全部通过人工 ledger 后才可发布。多目标第一批在孪生第一批训练侧确认后执行，命令把 `--kind twins` 改为 `--kind multi`，目标设为 1,500，并使用同一个 source-isolation reservation。每个组一条 planning call，生成和审核 checkpoint 可从同一独立根目录恢复；不要把失败组缩减成较少目标数。
 
 分组规划实验可显式添加 `--outline-planning-crops`，在每个候选行追加 mask 外侧轮廓；仍只向模型传原图和一张候选拼图。该开关尚在验证，默认关闭，当前 50k 快照不受影响。
+
+
+### 孪生小批量的分阶段并行入口（2026-10-15）
+
+`group_4node_entry.sh` 的默认入口仍是每 rank 一个编辑器。新增的 `--editor-devices` 是显式选择的分阶段接口，已验证单机双卡；尚未完成四机性能验证。规划/审核与编辑运行环境版本不同，应分别使用各自的 Python。以下变量沿用本节的模型和独立运行根目录；`RUN_ROOT`、`MANIFEST`、`TARGET` 应指向本 rank 的根目录、候选清单和预定组数。
+
+```bash
+COMMON=(--kind twins --manifest "$MANIFEST" --output-root "$RUN_ROOT"   --target "$TARGET" --split train --reservation "$GROUP_RESERVATION"   --outline-planning-crops --locate-planning-scene)
+"$PLANNER_PYTHON" scripts/run_group_pipeline.py "${COMMON[@]}"   --plan-only --planner-model "$GROUP_PLANNER_MODEL" --planner-tp "$GROUP_PLANNER_TP"   --max-new-tokens 1600
+"$EDITOR_PYTHON" scripts/run_group_pipeline.py "${COMMON[@]}"   --generate-only --editor-model "$GROUP_EDITOR_MODEL" --editor-devices 0,1
+"$AUDIT_PYTHON" scripts/run_group_pipeline.py "${COMMON[@]}"   --audit-only --audit-model "$GROUP_AUDIT_MODEL"
+```
+
+GPU 列表使用本机物理可见设备标识，每个 worker 独占列表中的一个编辑器实例；不要填写重复设备。每组只调度一次，恢复使用逐成员输入哈希与输出校验和。日志包含已生成/确定性通过/总组数，`release.json` 记录各类自动接受数量与缺口；缺口不会自动变成足额数据。新 prompt 实验必须用新根目录，恢复不会重复规划已拒绝组。
+
+`--twin-audit-mode joint` 仅用于对照实验：现有回归表明它严重漏检，不能因为调用数少而直接替代默认审核。当前小批量结论与 PDF 在 PIPELINE.md 第 7.8 节；正式分组生产尚不建议启动。当前 50k 生产快照不受这些实验入口影响。
