@@ -156,7 +156,9 @@ export GROUP_RESERVATION="$GROUP_ROOT/inputs/eval_reservation.json"
 export GROUP_PLANNER_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-Flash-Next-FP8
 export GROUP_EDITOR_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen-Image-2.1
 export GROUP_AUDIT_MODEL=/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B
-# Only set this after the PDF has been reviewed and the ledger is filled.
+export GROUP_PLANNER_TP=4 GROUP_MAX_NEW_TOKENS=1200 GROUP_AUDIT_TP=1
+# The entry automatically enables clean binary/outline crops, full-scene localization,
+# and the grounded group-audit prompt. Only set this after the PDF has been reviewed and the ledger is filled.
 export GROUP_HUMAN_REVIEW="$GROUP_ROOT/review/twins_train_human_review.jsonl"
 export GROUP_PUBLISH=1
 bash scripts/group_4node_entry.sh
