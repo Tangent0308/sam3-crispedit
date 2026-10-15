@@ -159,6 +159,8 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
     if not isinstance(members, list) or len(members) != len(objects):
         raise ValueError("twin plan member count mismatch")
     by_id = {str(m.get("object_id")): m for m in members}
+    if len(by_id) != len(members):
+        raise ValueError("duplicate twin object ids")
     # The no-ref sentence is shared across members.  Use the common source
     # category for its scope so a model cannot leak one member's color/material
     # into the instruction used for another member.
@@ -183,6 +185,9 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         if errors:
             raise ValueError("invalid twin instruction: " + ",".join(errors))
         units.append(unit)
+    twin_refs = [u.ref_phrase.strip().lower() for u in units]
+    if len(set(twin_refs)) != len(twin_refs):
+        raise ValueError("twin references are not unique")
     spec = dict(units[0].instruction_spec)
     no_ref = units[0].instruction_noref
     if any(u.instruction_noref != no_ref for u in units):
@@ -217,10 +222,14 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
     if not isinstance(targets, list) or len(targets) != len(objects):
         raise ValueError("multi plan target count mismatch")
     by_id = {str(t.get("object_id")): t for t in targets}
+    if len(by_id) != len(targets):
+        raise ValueError("duplicate multi object ids")
     units = []
     for index, (obj, mask_path, geom) in enumerate(zip(objects, mask_paths, geometry), 1):
         item = by_id.get(str(obj["object_id"]))
-        if not item or item.get("operation") != assignments.get(str(obj["object_id"])):
+        expected_unit_id = f"U{index}"
+        if (not item or str(item.get("unit_id")) != expected_unit_id
+                or item.get("operation") != assignments.get(str(obj["object_id"]))):
             raise ValueError("multi operation or object mismatch")
         raw = {"feasible": True, "object_id": str(obj["object_id"]), "unit_index": index,
                "operation": item["operation"], "ref_phrase": item["ref_phrase"],
@@ -234,8 +243,12 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
         if errors:
             raise ValueError("invalid multi instruction: " + ",".join(errors))
         units.append(unit)
+    multi_refs = [u.ref_phrase.strip().lower() for u in units]
+    if len(set(multi_refs)) != len(multi_refs):
+        raise ValueError("multi references are not unique")
     order_ids = plan.get("generation_order") or [u.unit_id for u in sorted(units, key=lambda u: (u.operation != "remove", u.operation != "replace", u.operation != "attribute"))]
-    if set(order_ids) != {u.unit_id for u in units}:
+    if (not isinstance(order_ids, list) or len(order_ids) != len(units)
+            or set(order_ids) != {u.unit_id for u in units}):
         raise ValueError("invalid generation order")
     member_rows = []
     for u, geom in zip(units, geometry):

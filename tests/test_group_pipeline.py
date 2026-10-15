@@ -142,3 +142,29 @@ def test_multi_attribute_rejects_value_repeated_in_source_selector(tmp_path):
     else:
         raise AssertionError("source attribute no-op was accepted")
 
+
+def test_multi_plan_requires_exact_unit_ids_and_unique_refs(tmp_path):
+    image, objects = _source(tmp_path)
+    candidate = {"source_id": "multi-id", "image_path": str(image), "objects": objects}
+    _, mask_paths, _ = group_views(candidate, objects, tmp_path / "id_views")
+    geometry = []
+    for path in mask_paths:
+        mask = np.asarray(Image.open(path)) > 0
+        ys, xs = np.where(mask)
+        geometry.append({"bbox": [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)],
+                         "point": precise_point(mask), "area_fraction": float(mask.mean())})
+    targets = []
+    for index, obj in enumerate(objects, 1):
+        targets.append({"unit_id": "U1", "object_id": str(obj["object_id"]),
+                        "operation": "remove", "scope": "backpack", "ref_phrase": "the backpack",
+                        "payload": "", "target_part": "", "remove_mode": "whole", "placement": None,
+                        "attributes": [], "qualifier": "", "evidence": "same"})
+    plan = {"feasible": True, "generation_order": ["U1", "U2"], "targets": targets}
+    try:
+        build_multi_group(candidate, objects, plan, mask_paths, split="train", group_id="multi-id-test",
+                          geometry=geometry, assignments={"0": "remove", "1": "remove"})
+    except ValueError as exc:
+        assert "mismatch" in str(exc) or "reference" in str(exc)
+    else:
+        raise AssertionError("invalid unit ids/references were accepted")
+
