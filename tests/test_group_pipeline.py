@@ -5,6 +5,7 @@ from PIL import Image
 
 from sa1b_pipeline.group_geometry import precise_point, twin_pair_gate, adjacent_pair_gate
 from sa1b_pipeline.group_planning import build_multi_group, build_twin_group, group_views
+from sa1b_pipeline.group_audit import _semantic_group_pass, MULTI_REQUIRED_AUDIT_FIELDS, TWIN_REQUIRED_AUDIT_FIELDS
 from scripts.run_group_pipeline import _require_manual_review
 from sa1b_pipeline.group_schema import validate_twin_record, validate_multi_record
 from sa1b_pipeline.group_selection import select_twin_candidates, select_multi_candidates
@@ -179,4 +180,13 @@ def test_group_publish_manual_review_gate_requires_signed_fields(tmp_path):
     groups = [{"twin_id": "g1"}]
     summary = _require_manual_review(groups, ledger, kind="twins", split="eval")
     assert summary["passing_groups"] == 1 and summary["all_eval_groups"]
+
+
+def test_group_audit_requires_all_fields_before_recomputing_pass():
+    twin = {"decision": "pass", **{field: True for field in TWIN_REQUIRED_AUDIT_FIELDS}}
+    multi = {"decision": "pass", **{field: True for field in MULTI_REQUIRED_AUDIT_FIELDS}}
+    assert _semantic_group_pass(twin, TWIN_REQUIRED_AUDIT_FIELDS)
+    assert _semantic_group_pass(multi, MULTI_REQUIRED_AUDIT_FIELDS)
+    multi["no_crosstalk"] = False
+    assert not _semantic_group_pass(multi, MULTI_REQUIRED_AUDIT_FIELDS)
 
