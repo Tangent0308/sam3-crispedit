@@ -81,3 +81,7 @@ Qwen3-VL-8B 规划小批中，修复后 2 组保留 1 组；该组用 Qwen-Image
 2026-10-15：对已选候选的类别检查补足带修饰语的名词，例如 artificial autumn leaves、brick wall、embankment；按名词尾部而非任意子串判断，避免错误排除 stone fountain。面积分桶优先读取压缩 RLE 真面积，避免为统计解码整张 mask；不改源图、已有生成结果或 50k 部署包。
 
 2026-10-15：按用户建议重新验证 Qwen3.8-Flash-Next-FP8。复用以前成功加载的 CUDA 12.9 运行时，新增规划/审核共用的架构适配（`sa1b_pipeline/mllm_runtime.py`）及审核 TP 参数，保留 27B 默认行为。实验根目录为 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_flashnext_validation_20261015`：`scene32` 与 27B scene32 使用同一份 32 组选择、同样的轮廓/全图定位输入和 prompt、相同非思考模式及 1,200 输出 token 上限；`audit12` 复审既有 12 个确定性通过组，保持成图和审核 prompt 不变。实验使用 GPU 1–4，GPU 0 原有生成/审核继续；没有修改 50k 正式任务。该条记录部署与实验设计，结果另行回填，不能把结构通过率当作实际质量。
+
+Flash-Next 审核实验增加同模型 paired prompt 对照：baseline 保持原审核提示；grounded 仅追加先识别白色 mask 实际部件、排除黑色孔洞、全图核对 ref、核对新增物体接触面等具体核验顺序。结果写到独立 `audit12/baseline` 和 `audit12/grounded`，保存每次请求、原始回答及耗时；不改变生产默认审核标准。首轮启动触发 FlashInfer 多卡通信算子 JIT 编译，冷启动耗时必须与常态推理分开解释。
+
+独立 32 组的原 27B 版本已完成 61 张目标图（29 个有效计划），生图阶段 1,387.68 秒，22.75 秒/张；21 组通过确定性筛选（attribute 7、add 6、replace 5、remove 3），进入语义审核。这是生成/确定性统计，不是最终质量通过数。
