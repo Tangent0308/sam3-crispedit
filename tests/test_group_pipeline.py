@@ -480,3 +480,41 @@ def test_review_sample_quota_cannot_hide_reviewed_failure(tmp_path):
     path.write_text("\n".join(json.dumps(row) for row in rows))
     with pytest.raises(RuntimeError, match="explicitly rejected"):
         _require_manual_review(groups, path, kind="twins", split="train")
+
+
+def test_render_resume_verifies_inputs_and_preserves_context(tmp_path):
+    import pytest
+    from sa1b_pipeline.group_generation import _render_member
+    image, objects = _source(tmp_path)
+    unit = {"mask_path": str(objects[0]["mask_path"]), "instruction_ref": "Change it to red."}
+    class Editor:
+        config = {"steps": 40}
+        last_generation_context = {}
+        calls = 0
+        def generate(self, source, unit, seed):
+            self.calls += 1
+            self.last_generation_context = {"render_call": self.calls, "seed": seed}
+            return Image.open(source).convert("RGB")
+    editor = Editor()
+    output = tmp_path / "edited.png"
+    context = _render_member(str(image), unit, output, editor, 7)
+    editor.last_generation_context = {"unrelated": True}
+    assert _render_member(str(image), unit, output, editor, 7) == context
+    assert editor.calls == 1 and context["seed"] == 7
+    with pytest.raises(ValueError, match="input changed"):
+        _render_member(str(image), unit, output, editor, 8)
+    with pytest.raises(ValueError, match="input changed"):
+        _render_member(str(image), {**unit, "instruction_ref": "Remove it."}, output, editor, 7)
+    Image.new("RGB", (128, 96), "red").save(image)
+    with pytest.raises(ValueError, match="input changed"):
+        _render_member(str(image), unit, output, editor, 7)
+
+
+def test_render_resume_rejects_unverified_legacy_image(tmp_path):
+    import pytest
+    from sa1b_pipeline.group_generation import _render_member
+    image, objects = _source(tmp_path)
+    class Editor:
+        config = {}
+    with pytest.raises(ValueError, match="no verifiable"):
+        _render_member(str(image), {"mask_path": str(objects[0]["mask_path"])}, image, Editor(), 0)

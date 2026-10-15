@@ -49,6 +49,39 @@ def _source_digest(path: str) -> str:
     return h.hexdigest()
 
 
+def _render_member(source: str, unit: dict[str, Any], output: Path,
+                   editor: Any, seed: int) -> dict[str, Any]:
+    """Resume only a matching input contract, retaining its original context."""
+    checkpoint = output.with_name("render.json")
+    contract = {"version": 1, "source_sha256": _source_digest(source), "unit": unit,
+                "seed": seed, "editor": getattr(editor, "config", {}),
+                "mask_hashes": {key: _source_digest(unit[key]) for key in
+                                ("mask_path", "execution_mask_path", "protected_mask_path")
+                                if unit.get(key)}}
+    fingerprint = hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
+    if checkpoint.exists():
+        saved = json.loads(checkpoint.read_text())
+        if saved.get("fingerprint") != fingerprint:
+            raise ValueError(f"generation input changed; use a new output directory: {output.parent}")
+        if saved.get("status") == "complete" and output.exists():
+            if saved.get("output_sha256") != _source_digest(str(output)):
+                raise ValueError(f"cached generated image checksum mismatch: {output}")
+            return saved["generation_context"]
+    elif output.exists():
+        raise ValueError(f"existing image has no verifiable render checkpoint: {output}")
+    atomic_json(checkpoint, {"fingerprint": fingerprint, "status": "rendering"})
+    result = editor.generate(source, unit, seed=seed)
+    temporary = output.with_name("edited.partial.png")
+    result.save(temporary)
+    temporary.replace(output)
+    context = {"editor": getattr(editor, "config", {}),
+               **getattr(editor, "last_generation_context", {})}
+    atomic_json(checkpoint, {"fingerprint": fingerprint, "status": "complete",
+                            "output_sha256": _source_digest(str(output)),
+                            "generation_context": context})
+    return context
+
+
 def _row(group: dict[str, Any], member: dict[str, Any], source: str, edited: str,
          support: str, *, input_image: str | None = None, output_image: str | None = None,
          step: int | None = None, generation_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -101,13 +134,11 @@ def generate_twin_group(group: dict[str, Any], output_dir: str | Path, editor: A
         output = unit_dir / "edited.png"
         state = unit_dir / "generation.json"
         started = time.perf_counter()
-        if not output.exists():
-            image = editor.generate(source, unit, seed=seed)
-            image.save(output)
-        context = getattr(editor, "last_generation_context", {})
+        context = _render_member(source, unit, output, editor, seed)
         support = _support_for(editor, source, unit, unit_dir / "support_mask.png")
         row = _row(group, member, source, str(output), support,
-                   generation_context={"editor": getattr(editor, "config", {}), **context})
+                   generation_context=context)
+        row["seed"] = seed
         check = deterministic_check(row)
         row["deterministic"] = check
         member.update({"edited_image": str(output), "support_mask": support, "seed": seed,
@@ -183,13 +214,11 @@ def generate_multi_group(group: dict[str, Any], output_dir: str | Path, editor: 
         unit_dir = output_dir / f"step_{step:02d}_{unit_id}"
         unit_dir.mkdir(parents=True, exist_ok=True)
         output = unit_dir / "edited.png"
-        if not output.exists():
-            result = editor.generate(current, unit, seed=seed)
-            result.save(output)
+        context = _render_member(current, unit, output, editor, seed)
         support = _support_for(editor, current, unit, unit_dir / "support_mask.png")
-        context = {"editor": getattr(editor, "config", {}), **getattr(editor, "last_generation_context", {})}
         row = _row(group, member, current, str(output), support, input_image=current,
                    output_image=str(output), step=step, generation_context=context)
+        row["seed"] = seed
         check = deterministic_check(row)
         row["step_audit"] = check
         member.update({"step_input_image": current, "step_output_image": str(output),
