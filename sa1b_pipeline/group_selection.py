@@ -640,4 +640,16 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
             if sum(1 for x in selected if len(x["objects"]) == n) >= quotas[n]:
                 break
     rng.shuffle(selected)
+    # A fixed operation order is biased by the naturalness gate: masks that
+    # cannot support the early slots silently push the aggregate toward the
+    # operations that are easiest to accept.  Reassign only among feasible
+    # schedules after the n/source quotas are fixed, so the requested four-way
+    # balance is an explicit invariant before planning.
+    from .multi_operation_balance import balance_multi_operations
+    balance_multi_operations(
+        selected,
+        image_size_for=lambda row: tuple(row.get("image_size") or _image_size(row["candidate"])),
+        allowed=lambda obj, op, size: _cheap_operation_allowed(obj, op, size),
+        seed=seed,
+    )
     return selected[:target]

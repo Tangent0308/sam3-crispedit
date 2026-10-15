@@ -46,4 +46,6 @@
 
 小批验证暴露出两类容易被普通 schema 漏掉的问题：多目标模型可能把 `unit_id` 错配到另一个 object，也可能给两个目标写同一 ref；attribute 还可能生成“把红色 SUV 改成红色”的 no-op。当前 `group_planning.build_multi_group` 强制 `U1…Un` 与 object 顺序一一对应、ref 在组内唯一、generation order 长度和集合严格匹配；`instructions.build_unit` 检查 ref/scope 中的源属性，拒绝重复的颜色、材质、纹理等请求。对应提交为 `45cb1e0` 和 `f8f392f`，全量测试为 237 passed。
 
+多目标初始选择使用固定的 `add/replace/remove/attribute` 序列，受候选自然性约束后出现明显偏斜（训练目标计数为 1,619/1,218/1,042/1,446）。新增 `multi_operation_balance.py`：为每组枚举符合操作合同且通过廉价自然性门槛的序列，再以 MILP 最小化最大四类偏差；无 scipy 时使用确定性贪心回退。已对现有 1,500 个训练组和 100 个评测组原地重排并重新分片，重排只改变合法 `operations`，没有改变 object、邻接证据、source reservation 或目标数配额。全量测试为 244 passed。
+
 Qwen3-VL-8B 规划小批中，修复后 2 组保留 1 组；该组用 Qwen-Image-2.1 在 CUDA 12.9/`TORCH_SDPA` 下完成 4 步链式生成，每步约 16 秒，结构性检查通过。但人工发现其中一个 ref 把 dense 描述明确为黑色的 SUV 写成红色，且改黑属于 no-op，整组按 all-or-nothing 拒绝。当前新增主对象颜色冲突检查、属性 no-op 检查和组内唯一 ref 检查。它仍未经过修复后 prompt 的 Qwen3.8-27B 语义审核和人工签收，因此只作为工程验证，不计入最终交付。Qwen3.8-27B 的 vLLM 0.31.1 cu129 后端已解析 `Qwen3_5ForConditionalGeneration`，首次权重加载约 14.3 分钟；未完成正式审核前不得把 8B 结果标为语义通过。

@@ -177,6 +177,8 @@ $GROUP_ROOT/shards/multi_train_wave1/               # 4 x 375
 $GROUP_ROOT/shards/multi_eval/                     # 4 x 25
 ```
 
+多目标选择文件在进入规划前必须完成操作配额检查。`scripts/rebalance_multi_operations.py` 会枚举每组可行序列并只更新 `operations` 字段；训练和评测的重排证据分别记录在 `$GROUP_ROOT/verification/multi_operation_balance.json`，随后必须重新运行 `scripts/shard_group_selection.py` 更新四机分片。不要用固定的目标位置顺序代替该步骤，也不要把不可行操作通过改标签强行填入配额。
+
 选择阶段使用快速 bbox 容量池后再运行 `scripts/recheck_multi_selection.py` 做 RLE 相邻复核；快速池本身不能进入规划或发布。四机入口将 `GROUP_KIND=multi`、`GROUP_SPLIT=train`、`GROUP_SHARD_ROOT=$GROUP_ROOT/shards/multi_train_wave1`、`GROUP_SELECTION=$GROUP_ROOT/inputs/train_multi_selected.jsonl`，目标设为 1,500；评测时改用 `multi_eval` 分片、`eval_multi_selected.jsonl` 和 `GROUP_SPLIT=eval`。多目标每组仍只做一次规划调用，随后按 `generation_order` 链式生图，组级生成/27B 审核/人工 ledger 全部通过后才可发布。
 
 生图阶段追加 `--editor-model ... --audit-model ... --publish`，并将 `--split eval` 指向
