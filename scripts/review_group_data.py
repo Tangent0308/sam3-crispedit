@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import textwrap
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 
 def _image(path: str, size=(620, 420)):
@@ -22,33 +23,48 @@ def _image(path: str, size=(620, 420)):
     return canvas
 
 
-def _page(group: dict, kind: str, page_size=(1300, 900)):
-    canvas = Image.new("RGB", page_size, (245, 247, 250))
+def _font(size=22):
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def _member_page(group: dict, member: dict, kind: str, index: int):
+    """One readable page per member, including all five multi-target steps."""
+    canvas = Image.new("RGB", (1600, 1320), (245, 247, 250))
     draw = ImageDraw.Draw(canvas)
     gid = group.get("twin_id") or group.get("multi_id")
-    draw.text((30, 22), f"{kind.upper()}  {gid}", fill=(20, 20, 20))
-    draw.text((30, 50), f"source={group.get('source_id')} split={group.get('split')}", fill=(60, 60, 60))
-    source = _image(group["source_image"], (390, 370))
-    canvas.paste(source, (30, 90))
-    if kind == "twins":
-        members = group.get("members", [])
-        for i, member in enumerate(members[:3]):
-            x = 450 + (i % 2) * 420
-            y = 90 + (i // 2) * 390
-            path = member.get("edited_image") or member.get("mask")
-            if path and Path(path).is_file():
-                canvas.paste(_image(path, (390, 300)), (x, y))
-            draw.text((x, y + 305), f"{member.get('unit_id')}  {member.get('ref')}", fill=(20, 20, 20))
-            draw.text((x, y + 328), member.get("instruction", ""), fill=(40, 40, 40))
-    else:
-        for i, member in enumerate(group.get("units", [])[:4]):
-            x = 450 + (i % 2) * 420
-            y = 90 + (i // 2) * 390
-            path = member.get("step_output_image") or member.get("mask")
-            if path and Path(path).is_file():
-                canvas.paste(_image(path, (390, 300)), (x, y))
-            draw.text((x, y + 305), f"step {i+1} {member.get('unit_id')}  {member.get('ref')}", fill=(20, 20, 20))
-            draw.text((x, y + 328), member.get("instruction", ""), fill=(40, 40, 40))
+    draw.text((30, 20), f"{kind.upper()}  {gid} / {member.get('unit_id')} / member {index + 1}",
+              font=_font(23), fill=(20, 20, 20))
+    instruction = member.get("instruction", "")
+    draw.multiline_text((30, 60), "\n".join(textwrap.wrap(instruction, 115)),
+                        font=_font(), fill=(20, 20, 20), spacing=7)
+    source = member.get("step_input_image") or group["source_image"]
+    target = member.get("edited_image") or member.get("step_output_image")
+    for x, path, label in [(30, source, "SOURCE / STEP INPUT"), (815, target, "RESULT")]:
+        draw.text((x, 150), label, font=_font(), fill=(40, 40, 40))
+        if path:
+            canvas.paste(_image(path, (755, 500)), (x, 185))
+    # Exact aligned crop, expanded for contact edges and nearby context.
+    with Image.open(member["mask"]) as im:
+        bbox = im.convert("L").getbbox()
+        width, height = im.size
+    if bbox is None:
+        raise ValueError(f"empty review mask: {member['mask']}")
+    margin = max(24, round(max(bbox[2]-bbox[0], bbox[3]-bbox[1]) * .25))
+    crop_box = (max(0,bbox[0]-margin), max(0,bbox[1]-margin),
+                min(width,bbox[2]+margin), min(height,bbox[3]+margin))
+    for x, path, label in [(30,source,"SOURCE CROP"), (555,target,"RESULT CROP"),
+                            (1080,member["mask"],"MASK: WHITE = SELECTOR")]:
+        draw.text((x, 730), label, font=_font(21), fill=(40, 40, 40))
+        if path:
+            with Image.open(path) as im:
+                tile=im.convert("RGB").crop(crop_box)
+                tile.thumbnail((490,450), Image.Resampling.LANCZOS)
+                canvas.paste(tile,(x+(490-tile.width)//2,775+(450-tile.height)//2))
+    draw.text((30, 1270), "Inspect reference, requested change, other targets, edges and naturalness.",
+              font=_font(20), fill=(60,60,60))
     return canvas
 
 
@@ -61,14 +77,30 @@ def main(argv=None):
     rows = [json.loads(line) for line in args.manifest.read_text().splitlines() if line.strip()]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     ledger = args.output_dir / "human_review.jsonl"
+    existing = {r["group_id"]: r for r in
+                (json.loads(line) for line in ledger.read_text().splitlines() if line.strip())} if ledger.exists() else {}
     with ledger.open("w", encoding="utf-8") as stream:
         for group in rows:
             gid = group.get("twin_id") or group.get("multi_id")
-            stream.write(json.dumps({"group_id": gid, "reviewer": "assistant", "status": "pending",
+            stream.write(json.dumps(existing.get(gid, {"group_id": gid, "reviewer": "assistant", "status": "pending",
                                      "reference_correct": None, "target_done": None,
                                      "non_target_preserved": None, "natural": None,
-                                     "decision": "pending", "notes": ""}, ensure_ascii=False) + "\n")
-    pages = [_page(group, args.kind) for group in rows]
+                                     "decision": "pending", "notes": ""}), ensure_ascii=False) + "\n")
+    pages = []
+    page_index = []
+    for group in rows:
+        members = group.get("members", []) if args.kind == "twins" else group.get("units", [])
+        if args.kind == "multi":
+            by_id = {m["unit_id"]: m for m in members}
+            members = [by_id[uid] for uid in group["generation_order"]]
+        for index, member in enumerate(members):
+            page = _member_page(group, member, args.kind, index)
+            page_path = args.output_dir / f"page_{len(pages)+1:04d}.jpg"
+            page.save(page_path, quality=92)
+            pages.append(page)
+            page_index.append({"page": len(pages), "group_id": group.get("twin_id") or group.get("multi_id"),
+                               "unit_id": member["unit_id"], "image": str(page_path)})
+    (args.output_dir / "page_index.json").write_text(json.dumps(page_index, indent=2))
     pdf = args.output_dir / "human_review.pdf"
     if pages:
         pages[0].save(pdf, save_all=True, append_images=pages[1:], resolution=120)

@@ -15,7 +15,7 @@ from .audit_backend import VLLMAuditor
 from .validate import _target_panel, audit_prompt
 
 
-TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. The source scene and the member result images are provided. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
+TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. The final comparison image contains one row per member, each with original crop, edited crop, and mask-overlay crop left to right. Use the clean crop columns to judge appearance; the overlay is only a locator. The source scene and the member result images are provided. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
 MULTI_GROUP_PROMPT = '''You are auditing a joint multi-target edit group. The original scene, each chain step, and the final result are provided. Check that each original ref identifies one target, every assigned operation is correct and completed in its step and remains correct later, adjacent targets do not bleed into each other, and the final image is natural. The group fails if any operation type is wrong. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
@@ -37,6 +37,8 @@ def _call_batched(model: VLLMAuditor, jobs: list[dict[str, Any]]) -> list[dict[s
         outputs = model.call_batch(batch)
         if len(outputs) != len(batch):
             raise RuntimeError("group audit backend returned an incomplete batch")
+        if [r.get("job_id") for r in outputs] != [j["job_id"] for j in batch]:
+            raise RuntimeError("group audit backend returned mismatched job IDs")
         results.extend(outputs)
     return results
 
@@ -61,7 +63,7 @@ def _target_contract(group: dict[str, Any], *, kind: str) -> str:
     return "\n".join(lines)
 
 
-def _member_comparison(paths: list[str], out: Path) -> str:
+def _member_comparison(paths: list[str], out: Path, *, crop_panels: bool = False) -> str:
     """Pack every twin member panel into one audit image.
 
     The 27B adapter accepts at most three image inputs. Passing the source and
@@ -69,7 +71,7 @@ def _member_comparison(paths: list[str], out: Path) -> str:
     of silently dropping the third member from a triple group.
     """
     panels = [Image.open(path).convert("RGB") for path in paths]
-    tile_w, tile_h = 768, 520
+    tile_w, tile_h = (1536, 480) if crop_panels else (768, 520)
     tiles = []
     for index, panel in enumerate(panels, 1):
         panel.thumbnail((tile_w, tile_h - 28), Image.Resampling.LANCZOS)
@@ -77,7 +79,7 @@ def _member_comparison(paths: list[str], out: Path) -> str:
         ImageDraw.Draw(tile).text((8, 6), f"MEMBER {index}", fill="black")
         tile.paste(panel, ((tile_w - panel.width) // 2, 28 + (tile_h - 28 - panel.height) // 2))
         tiles.append(tile)
-    columns = min(2, max(1, len(tiles)))
+    columns = 1 if crop_panels else min(2, max(1, len(tiles)))
     rows = (len(tiles) + columns - 1) // columns
     panel = Image.new("RGB", (columns * tile_w, rows * tile_h), (235, 235, 235))
     for index, tile in enumerate(tiles):
@@ -144,8 +146,8 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
                    "instruction": member["instruction"], "instruction_spec": member["instruction_spec"],
                    "support_mask": member["support_mask"]}
             rows.append(_target_panel(row, panel_dir))
-        comparison = _member_comparison([m["edited_image"] for m in group["members"]],
-                                        panel_dir / f"{group['twin_id']}_comparison.jpg")
+        comparison = _member_comparison(rows,
+                                        panel_dir / f"{group['twin_id']}_comparison.jpg", crop_panels=True)
         refs.append(group)
         marked = _marked_scene(group)
         images = [group["source_image"]]

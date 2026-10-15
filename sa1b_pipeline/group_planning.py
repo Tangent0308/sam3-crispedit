@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -21,13 +22,19 @@ COLORS = [(255, 66, 66), (54, 180, 255), (255, 190, 40), (144, 88, 255), (35, 20
 
 TWIN_PROMPT = r'''Plan one counterfactual twin edit group. Image 1 is the clean original scene. Image 2 has one row per candidate: a clean source crop on the LEFT and its aligned black-and-white mask on the RIGHT. White identifies the target; black is excluded. Unit and object IDs are printed above each row. Judge appearance only from clean photographs; the mask and headers are localization aids.
 
-The candidates are already prefiltered as two or three distinct visible instances of the same noun. Use the original pixels and the masks to verify the noun and write a short, unique natural reference for each candidate. One shared edit must be natural for every member. The operation is assigned and cannot be changed or silently rejected as another operation. If the assigned operation is not natural for all members, return feasible=false.
+The candidates are provisional geometric/category matches, not verified semantic instances. Dense labels may be wrong; verify that all white masks actually cover distinct instances of the same noun. Use the original pixels and the masks to verify the noun and write a short, unique natural reference for each candidate. One shared edit must be natural for every member. The operation is assigned and cannot be changed or silently rejected as another operation. If the assigned operation is not natural for all members, return feasible=false.
 
 The no-ref instruction must be identical for all members and be rendered from one shared structured specification. References are concise noun phrases that distinguish members in the unmarked original image. Do not mention annotation colors, IDs, masks or crops. Genuine source colors and concise image-left/image-right references are allowed when needed for unique identification. For twin add, use only a directly supporting host/attachment site shared by every member; reference anchors are not allowed. Reject the group if no natural directly attached addition works for all members. For remove, never remove human anatomy or an essential support. For replace, change visible form/design, not only color. For attribute, change one plausible requested property that is visibly different on every member.
 
 Return JSON only:
 {"feasible":true,"operation":"...","scope":"short shared noun","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","members":[{"object_id":"...","ref_phrase":"the ...","source_color":"","evidence":"brief"},...],"evidence":"brief"}
 The operation must be the assigned operation. attributes is [{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}] only for attribute. placement for add is {"relation":"on|in|around|to|...","site":"optional noun","anchor_mode":"support"}; direct support is required for twins. remove_mode is whole, part, contents, contents_only, lowerlegs or hem. Keep the edit one concise sentence after rendering.
+FIELD CONTRACT: scope is ONE shared singular object/part noun, e.g. wheel rim, never a full sentence or metadata alias list. It must describe the visible white mask itself, not an imagined subpart or the whole host of a part mask. target_part MUST be "": these candidates have no additional resolved execution sub-mask. If the mask is already a rim, use scope="wheel rim" and target_part="". Do not reinterpret a building mask as only its facade or a person mask as only their clothes.
+For remove: payload="", target_part="", attributes=[], placement=null, qualifier="". Example shared fields: scope="street lamp", operation="remove". Never put the instruction sentence in payload.
+For attribute: payload="", attributes=[{"property":"color","value":"blue"}], target_part="", placement=null, qualifier="". The property must naturally apply to the selected mask, preserve other surfaces, and differ from EVERY member's original appearance.
+For replace: payload names a different physical object/design (e.g. "a five-spoke alloy wheel"), never just "magenta" or a different paint color. target_part="", attributes=[], placement=null, qualifier="".
+For add: payload names a conventional new physical item, placement describes its direct support/attachment to each selected host; attributes=[], target_part="", qualifier="". Do not plant a shrub directly in solid rock or attach items to a painted line. No vague "small"/"identical" qualifiers: encode necessary size/design in payload.
+Use natural edit content. A plausible refusal is better than inventing a source object, narrowing the mask, or requesting an operation that does not fit. Return feasible=false with a concrete reason if any member cannot satisfy the assigned operation.
 '''
 
 
@@ -171,18 +178,24 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
     by_id = {str(m.get("object_id")): m for m in members}
     if len(by_id) != len(members):
         raise ValueError("duplicate twin object ids")
-    # The no-ref sentence is shared across members.  Use the common source
-    # category for its scope so a model cannot leak one member's color/material
-    # into the instruction used for another member.
-    categories = [str(obj.get("category") or "object").split(",", 1)[0].strip() for obj in objects]
-    shared_scope = categories[0] if categories and all(c.lower() == categories[0].lower() for c in categories) else str(plan.get("scope") or "object")
+    # The planner verifies one noun for all masks. Dense categories are hints,
+    # not authoritative scope names (e.g. corrugated slat versus a full shutter).
+    shared_scope = str(plan.get("scope") or "").strip()
+    if not shared_scope:
+        raise ValueError("missing shared twin scope")
     if plan.get("operation") == "attribute":
         attrs = plan.get("attributes") or []
         target_values = [str(a.get("value", "")).strip().lower() for a in attrs if isinstance(a, dict)]
         for item in members:
-            evidence = f"{item.get('ref_phrase', '')} {item.get('source_color', '')} {item.get('evidence', '')}".lower()
-            if any(value and value in evidence for value in target_values):
+            evidence = f"{item.get('ref_phrase', '')} {item.get('source_color', '')}".lower()
+            if any(value and re.search(r"(?<!\w)" + re.escape(value) + r"(?!\w)", evidence)
+                   for value in target_values):
                 raise ValueError("attribute value is already present in a twin member description")
+    if len(objects) not in (2, 3) or len(mask_paths) != len(objects) or len(geometry) != len(objects):
+        raise ValueError("twin mask/geometry count mismatch")
+    areas = [float(g.get("area_fraction", 0)) for g in geometry]
+    if min(areas) <= 0 or max(areas) > 3 * min(areas):
+        raise ValueError("twin exact mask area ratio exceeds 3")
     units = []
     for index, (obj, mask_path, geom) in enumerate(zip(objects, mask_paths, geometry), 1):
         item = by_id.get(str(obj["object_id"]))

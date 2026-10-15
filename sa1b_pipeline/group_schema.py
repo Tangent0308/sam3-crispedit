@@ -128,6 +128,11 @@ def validate_twin_record(record: dict[str, Any], *, expected_split: str | None =
     members = record.get("members")
     if not isinstance(members, list) or len(members) not in (2, 3):
         raise ValueError("twins require two or three members")
+    if record.get("split") == "eval" and len(members) != 2:
+        raise ValueError("evaluation twins require exactly two members")
+    areas = [float(m.get("area_fraction", 0)) for m in members]
+    if min(areas) <= 0 or max(areas) > 3 * min(areas):
+        raise ValueError("twin exact mask area ratio exceeds 3")
     if len({m.get("object_id") for m in members}) != len(members):
         raise ValueError("twin members must be distinct objects")
     if record.get("instruction_noref") != members[0].get("instruction_noref"):
