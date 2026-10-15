@@ -130,7 +130,11 @@ def test_nested_media_are_copied_not_linked_and_move_with_root(tmp_path):
 
 
 def prepared_final(root):
-    atomic_json(root/'config.json', {'target_total': 16, 'code_hashes': {}})
+    from sa1b_pipeline.production_state import file_hash
+    from sa1b_pipeline.production_generation import REPO
+    hashes = {f'sa1b_pipeline/{name}.py': file_hash(REPO/f'sa1b_pipeline/{name}.py')
+              for name in ('production_state', 'operation_balance', 'shared_operation_quota')}
+    atomic_json(root/'config.json', {'target_total': 16, 'nodes': 4, 'code_hashes': hashes})
     atomic_json(root/'inputs/ready.json', {})
     for rank in range(4):
         directory = root/f'nodes/node{rank}'
@@ -141,7 +145,10 @@ def prepared_final(root):
         for row in rows:
             row['edited_image'] = path.relative_to(root).as_posix()
         write_rows(directory/'auto_pass.jsonl', rows)
-        atomic_json(directory/'done.json', {})
+        done = {'rank': rank, 'status': 'complete',
+                'automatically_passed': dict.fromkeys(OPERATIONS, 1)}
+        atomic_json(directory/'done.json', done)
+        atomic_json(directory/'progress.json', done)
 
 
 def test_four_node_finalize_exact_balanced_unique_and_portable(tmp_path):
@@ -150,6 +157,22 @@ def test_four_node_finalize_exact_balanced_unique_and_portable(tmp_path):
     rows = read_rows(tmp_path/'final/auto_pass.jsonl')
     assert len(rows) == 16
     assert json.loads((tmp_path/'final/summary.json').read_text())['operations'] == dict.fromkeys(OPERATIONS, 4)
+
+
+def test_finalize_recovers_mount_lock_failure_preserving_history(tmp_path, monkeypatch):
+    import fcntl
+    prepared_final(tmp_path)
+    def unsupported(*args):
+        raise OSError(38, 'Function not implemented')
+    monkeypatch.setattr(fcntl, 'flock', unsupported)
+    node = tmp_path/'nodes/node2'
+    failure = {'error': '[Errno 38] Function not implemented', 'time': 123}
+    atomic_json(node/'failure.json', failure)
+    atomic_json(node/'progress.json', {'status': 'failed', **failure})
+    finalize(tmp_path)
+    assert json.loads((node/'progress.json').read_text())['status'] == 'complete'
+    assert json.loads((node/'failure.json').read_text()) == failure
+    assert not (tmp_path/'final/finalize.lock.d').exists()
 
 
 @pytest.mark.parametrize('damage', ['missing_rank', 'duplicate_mask', 'wrong_type', 'failed_audit', 'missing_image'])
@@ -236,6 +259,12 @@ def test_four_rank_two_wave_orchestration_refills_only_failed_type(tmp_path, mon
     config = {'target_total': 16, 'target_per_node_per_type': 1, 'batch_sources': 1,
               'planner_model': str(model), 'audit_model': str(model), 'editor_model': str(model),
               'source_root': '/unused', 'code_hashes': {}}
+    from sa1b_pipeline.production_state import file_hash
+    from sa1b_pipeline.production_generation import REPO
+    config['nodes'] = 4
+    config['code_hashes'] = {f'sa1b_pipeline/{name}.py': file_hash(REPO/f'sa1b_pipeline/{name}.py')
+                             for name in ('production_state', 'operation_balance', 'shared_operation_quota')}
+    atomic_json(root/'config.json', config)
     atomic_json(root/'inputs/exclusion.json', {})
     monkeypatch.setattr(runner, 'load_config', lambda _: dict(config))
     monkeypatch.setattr(runner.signal, 'signal', lambda *_args: None)

@@ -286,25 +286,8 @@ def finalize(root, require_complete=True):
         if require_complete:
             raise ValueError('not all four nodes have completed their quotas')
         return
-    (root/'final').mkdir(exist_ok=True)
-    with (root/'final/finalize.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        rows = [r for i in range(4) for r in read_rows(root/f'nodes/node{i}/auto_pass.jsonl')]
-        ids, masks = [r['job_id'] for r in rows], [mask_key(r) for r in rows]
-        counts = Counter(r['operation'] for r in rows)
-        if (len(rows) != config['target_total'] or len(set(ids)) != len(rows) or len(set(masks)) != len(rows)
-                or any(counts[op] != config['target_total']//4 for op in OPERATIONS)
-                or not all(automatic_pass(r, require_operation=True) for r in rows)):
-            raise ValueError('final count, type, uniqueness, or audit validation failed')
-        # Re-resolve every media field under the root; failure blocks publication.
-        media_cache = {}
-        for row in rows:
-            if portable(row, root, cache=media_cache) != row:
-                raise ValueError('final media field is not portable within dataset root')
-        write_rows(root/'final/auto_pass.jsonl', rows)
-        atomic_json(root/'final/summary.json', {'status': 'complete', 'count': len(rows), 'operations': counts,
-                    'unique_source_masks': len(set(masks)), 'manual_review': 'not_performed',
-                    'all_media_inside_dataset_root': True, 'completed_unix': time.time()})
+    from scripts.finalize_production_exports import finalize_exports
+    finalize_exports(root)
 
 
 def status(root):
