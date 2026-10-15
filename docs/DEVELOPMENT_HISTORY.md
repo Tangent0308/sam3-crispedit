@@ -85,3 +85,7 @@ Qwen3-VL-8B 规划小批中，修复后 2 组保留 1 组；该组用 Qwen-Image
 Flash-Next 审核实验增加同模型 paired prompt 对照：baseline 保持原审核提示；grounded 仅追加先识别白色 mask 实际部件、排除黑色孔洞、全图核对 ref、核对新增物体接触面等具体核验顺序。结果写到独立 `audit12/baseline` 和 `audit12/grounded`，保存每次请求、原始回答及耗时；不改变生产默认审核标准。首轮启动触发 FlashInfer 多卡通信算子 JIT 编译，冷启动耗时必须与常态推理分开解释。
 
 独立 32 组的原 27B 版本已完成 61 张目标图（29 个有效计划），生图阶段 1,387.68 秒，22.75 秒/张；21 组通过确定性筛选（attribute 7、add 6、replace 5、remove 3），进入语义审核。这是生成/确定性统计，不是最终质量通过数。
+
+2026-10-15：Flash-Next 规划回归完成。相同 32 组输入下，Flash-Next 规划 29/32，remove 8、attribute 7、add 7、replace 7；27B 全图定位回归 28/32，attribute 8、remove 7、replace 7、add 6。逐项查看 Flash-Next 文本和代表性局部 mask 后，人物/左右方位/直接附着描述有所改善，但柜台材料被写成 replace、车轮/功能件 remove、极小水滴和部件层级仍需拦截。该结果只评价规划，不等价于最终成图通过率。
+
+2026-10-15：Flash-Next 审核 paired prompt 完成。12 组既有结果的 baseline 完整组级通过 6/12，加入白色 mask、黑色孔洞、全图 ref、add 接触面和 remove/replace 语义核验顺序后的 grounded 仍为 6/12，但语义字段通过由 7/12 提升到 8/12；请求墙钟由 415.25 秒降至 356.51 秒（模型加载 186.86 秒另计）。因此将 grounded 核验顺序并入默认组级 prompt，但仍要求人工视觉复核；当前推荐 Flash-Next 做规划、grounded 审核作为候选，不将自动通过直接发布。
