@@ -94,6 +94,7 @@ def deterministic_check(row: dict[str, Any]) -> dict[str, Any]:
     # support contract is the correct leakage check for add.
     support_path = row.get("support_mask")
     support_inside = support_outside = None
+    support = None
     if support_path and Path(str(support_path)).exists():
         support = load_mask({"mask_path": str(support_path)}, (source.shape[1], source.shape[0]))
         support_inside = _fraction(delta, support)
@@ -109,6 +110,12 @@ def deterministic_check(row: dict[str, Any]) -> dict[str, Any]:
         execution = load_mask({'mask_path': row['execution_mask_path']}, (source.shape[1], source.shape[0]))
         change_fraction = _fraction(delta, execution)
     reasons = []
+    # Add may leave almost the entire host unchanged. Use an absolute, very
+    # small noise floor within its writable support, never a host-area ratio.
+    # A one-pixel numerical difference is not evidence of a new object.
+    add_changed_pixels = int(np.count_nonzero(delta & support)) if support is not None else int(np.count_nonzero(delta))
+    if row["operation"] == "add" and add_changed_pixels < 4:
+        reasons.append("no_visible_addition")
     if partial and change_fraction == 0:
         reasons.append('no_visible_target_change')
     if row["operation"] == "remove" and not partial and change_fraction < 0.50:
@@ -120,6 +127,8 @@ def deterministic_check(row: dict[str, Any]) -> dict[str, Any]:
     if support_outside is not None and support_outside > 0.02:
         reasons.append("support_leakage")
     deterministic = {"inside_changed_fraction": inside, "outside_changed_fraction": outside}
+    if row["operation"] == "add":
+        deterministic["add_changed_pixels"] = add_changed_pixels
     if support_inside is not None:
         deterministic.update({
             "support_changed_fraction": support_inside,

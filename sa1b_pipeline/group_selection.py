@@ -126,7 +126,7 @@ def _cheap_operation_allowed(obj: dict[str, Any], operation: str, size: tuple[in
         # violates the benchmark's remove semantics even when the mask is
         # geometrically clean.
         if any(re.search(r"(?<![a-z])" + token + r"(?![a-z])", category)
-               for token in ("arm", "hand", "leg", "foot", "finger", "head", "face", "person",
+               for token in ("arm", "hand", "leg", "foot", "finger", "head", "face",
                              "cheek", "eye", "ear", "nose", "mouth", "lip", "neck", "torso")):
             return False
     if operation == "add":
@@ -145,8 +145,6 @@ def _cheap_operation_allowed(obj: dict[str, Any], operation: str, size: tuple[in
     # Dense labels use xyxy; tolerate xywh by falling back to positive extents.
     width, height = max(1.0, x1 - x0), max(1.0, y1 - y0)
     image_area = max(1.0, float(size[0] * size[1]))
-    if operation in {"replace", "remove"} and (x0 <= 0 or y0 <= 0 or x1 >= size[0] or y1 >= size[1]):
-        return False
     return width * height >= image_area * (0.00015 if operation == "add" else 0.00005)
 
 
@@ -179,6 +177,7 @@ def twin_operation_priority(objects: list[dict[str, Any]], operation: str) -> in
             {'shirt','jacket','coat','dress','sweater','garment'},
             {'backpack','bag','sack','suitcase','package'},
             {'lamp','light','lantern'},
+            {'sign','poster','banner','placard'},
         ]
         if operation == 'add':
             families += [{'table','desk','shelf','cart','chair','armchair','bench'},
@@ -377,6 +376,7 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
             size = _image_size(c)
         except (OSError, ValueError):
             continue
+        source_row_start = len(rows)
         groups = defaultdict(list)
         for obj in c.get("objects", []):
             ok, _ = category_allowed(obj.get("category", ""))
@@ -418,8 +418,14 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
             if len(values) < 2:
                 continue
             rng.shuffle(values)
+            # Rank before the bounded combination search, so functional pairs
+            # are not buried behind the first random 2,000 combinations.
+            values.sort(key=lambda obj: twin_operation_priority([obj],operation), reverse=True)
             pair_attempts = 0
-            for group_objects in combinations(values, member_count):
+            from itertools import islice
+            proposals = list(islice(combinations(values, member_count), 12000))
+            proposals.sort(key=lambda pair: twin_operation_priority(list(pair), operation), reverse=True)
+            for group_objects in proposals:
                 categories = {candidate_category(obj) for obj in group_objects}
                 relation = "same" if len(categories) == 1 else "cross"
                 if category_relation != "any" and relation != category_relation:
@@ -466,9 +472,9 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
                                  "scope_level": scope_level, "category_relation": relation,
                                  "candidate_granularity": candidate_granularity(group_objects[0]),
                                  "operation": operation})
-                    if len(rows) >= target * 8:
+                    if len(rows) - source_row_start >= 64:
                         break
-            if len(rows) >= target * 8:
+            if len(rows) - source_row_start >= 64:
                 break
             if attempted_total > 50000:
                 break

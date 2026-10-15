@@ -8,13 +8,14 @@ from __future__ import annotations
 from .instruction_protocol import BLIND_RULE
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from .audit_backend import VLLMAuditor
-from .validate import _target_panel, audit_prompt
+from .validate import _target_panel, audit_prompt, deterministic_check
 
 
 TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. Image 1 is the clean original full scene. Image 2 contains one row per member: SOURCE original crop (left), RESULT edited crop (middle), and MASK ONLY black-and-white selector (right). Judge generated appearance ONLY from the middle RESULT column. The right column is never a result. White selects the source object and black excludes it. The source scene and the member result images are provided. Different categories are allowed; comparable means all whole objects or all parts, with the shared edit natural for every member. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Before deciding, match each white selector to the actual source part and exclude black holes and neighboring objects. Check every ref against all similar instances in the full scene; image-left/image-right refer to the original scene, never crop row order. For add, verify direct physical contact with the selected host/site, not a nearby surface. For remove, check for target remnants and unsupported remnants; deleting a wheel, door, support or other functional part is not natural unless the image clearly supports it. For replace, require a visibly different physical form/design, not only a color or material change. For attribute, verify the requested surface changed while geometry, markings and unrelated materials remain. Judge only visible evidence and fail a member with a concrete mismatch. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
@@ -78,10 +79,11 @@ def _member_comparison(paths: list[str], out: Path, *, crop_panels: bool = False
     tile_w, tile_h = (1536, 480) if crop_panels else (768, 520)
     tiles = []
     for index, panel in enumerate(panels, 1):
-        panel.thumbnail((tile_w, tile_h - 28), Image.Resampling.LANCZOS)
+        panel.thumbnail((tile_w, tile_h - 64), Image.Resampling.LANCZOS)
         tile = Image.new("RGB", (tile_w, tile_h), "white")
-        ImageDraw.Draw(tile).text((8, 6), f"MEMBER {index}", fill="black")
-        tile.paste(panel, ((tile_w - panel.width) // 2, 28 + (tile_h - 28 - panel.height) // 2))
+        ImageDraw.Draw(tile).text((12, 6), f"U{index} | MEMBER {index}", fill="black",
+                                  font=ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36))
+        tile.paste(panel, ((tile_w - panel.width) // 2, 64 + (tile_h - 64 - panel.height) // 2))
         tiles.append(tile)
     columns = 1 if crop_panels else min(2, max(1, len(tiles)))
     rows = (len(tiles) + columns - 1) // columns
@@ -186,48 +188,57 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
     return results
 
 
-JOINT_TWIN_PROMPT = '''Audit a counterfactual twin group from visible evidence, without trusting the plan.
-Image 1: original full scene. Image 2: one aligned row per member, SOURCE / RESULT / BINARY MASK.
-White selects the original target, black excludes it, including holes. Image 3: full RESULT images
-in member order. Each result should edit ONLY its own member, starting from the same original.
-For each member first identify the actual white-mask entity and extent. A door leaf is not a double
-door; a rim excludes the tire; multiple leaves are not one leaf. Then test its reference against ALL
-similar instances in image 1. Left/right in a ref means the full original scene, not row order.
-Reject collections, unequal instance granularity, enlarged ref scopes, ambiguous refs, and wrong targets. Different categories are allowed: judge whether the exact shared request is natural for EVERY member, not whether category nouns match.
-The delivered mask is the actual edited source region. For add it is the attachment SITE,
-not necessarily the entire host named in Ref. Verify the site lies on that named host.
-No-ref deliberately supplies NO entity identity; do not infer the masked noun from it.
-For each member first describe white pixels independently of Ref, then compare to Ref.
-A door hinge is not a handle. A bag fragment is not a whole bag; check printed remnants.
-Never excuse a mismatch merely because the generated image looks natural.
-Check the actual requested operation: attribute changes only the requested property and retains
-unrequested lettering, logos, geometry and other surfaces. Replace requires a different physical
-form/design; merely changing material or color is attribute. Add requires visible contact at the
-specified site on the selected host, with sensible scale and no obstruction of essential function.
-Remove must erase the selected entity naturally without moving wheels or leaving unsupported parts.
-Use the result crops to judge completion and fine details; use full results for global naturalness.
-A good-looking image with a wrong mask/ref/type is a FAIL. Minor texture variation alone is not a failure.
-Do not start with a verdict. First write observed_entity (what the WHITE mask actually selects),
-ref_entity (what the words literally name), and observed_change (what visibly changed in RESULT).
-Compare those observations before judging. A ref may identify the right neighborhood yet name too
-large an entity. A one-leaf mask versus a whole double door is a scope failure even if the edit looks good.
-A group of several leaves is not a single leaf. For replacement, name the visible shape/design change;
-if you can only identify a material/color change, operation_correct must be fail. For add, name the
-actual contact site visible in the result; a side attachment does not satisfy a top-edge instruction.
-Output JSON, with EVERY member in original order, using this schema (replace enum choices):
+JOINT_TWIN_PROMPT = '''Audit one counterfactual twin group independently of the planner, using the photographs.
+Image 1 is the clean full source. Image 2 has one row per member: SOURCE / RESULT / BINARY MASK.
+Image 3 shows full member results. Each result starts from the SAME source and edits ONE member.
+For each row identify the actual white-mask entity, compare SOURCE against RESULT, then judge.
+Judge the edited object AND its immediate physical context; never repeat the requested change as an observation.
+
+Reject concrete serious defects: wrong/ambiguous referent, wrong source region or extent, unchanged target,
+wrong operation, missing substantial requested content, editing another member, major collateral damage,
+implausible physical support/contact, or a shared request inappropriate for any member.
+For remove check visible remnants, occupied seats and load-bearing/support relations. For replace check
+actual shape change and whether the replacement fits each location's function and mounting; a generic
+handle is not automatically appropriate to every host. Attribute must be a plausible appearance change,
+not painted-looking food/skin; preserve glass, labels and unrelated materials. For add check the actual
+contact footprint on the selected source site, size and support, not just proximity to the host.
+Check refs against ALL similar objects in the full source, not just these members. Small/clipped/occluded
+objects are valid if identity, scope and the edit are clear. Different categories are valid when the SAME
+request is natural for both. Do not demand identical object names or identical attachment-site names.
+
+Do NOT fail for mild texture/edge variation, minor local lighting changes, subjective style preferences,
+or a slightly longer but clear instruction. Put those in warnings. Floating/unsupported objects, missing edits and wrong targets are ALWAYS failures, never minor warnings. Do not require physical perfection.
+Uncertain means the CORE edit/reference cannot be judged, not inability to prove every pixel unchanged.
+For each member write short observed_entity, ref_entity, observed_change (max 12 words each), followed by checks.
+If a check fails give the visible contradiction; pass when the core requirement is visibly met.
+Return JSON only, EVERY member in order:
 {"members":[{"unit_id":"U1","observed_entity":"...","ref_entity":"...","observed_change":"...",
 "checks":{"reference_correct":"pass|fail|uncertain","single_instance":"pass|fail|uncertain",
 "scope_correct":"pass|fail|uncertain","operation_correct":"pass|fail|uncertain",
 "target_done":"pass|fail|uncertain","non_target_preserved":"pass|fail|uncertain",
-"natural":"pass|fail|uncertain"},"failure_reasons":[]}],
+"natural":"pass|fail|uncertain"},"failure_reasons":[],"warnings":[]}],
 "comparable_granularity":"pass|fail|uncertain","shared_edit_valid":"pass|fail|uncertain","evidence":"brief"}.
-Use fail for a concrete contradiction, uncertain for insufficient visual evidence, pass only when
-supported by your observations. Evaluate independently: earlier members' success proves nothing
-about later members. Do not copy the requested change as observed_change without checking pixels.
 '''
 
 JOINT_MEMBER_FIELDS = ("reference_correct", "single_instance", "scope_correct", "operation_correct",
                        "target_done", "non_target_preserved", "natural")
+
+
+def _acknowledged_hard_defects(warnings):
+    """Do not downgrade an explicitly reported serious defect to a soft note.
+
+    This does not invent visual evidence: it only resolves contradictory model
+    output. Negated statements are ignored. Style/texture comments stay soft.
+    """
+    defects=[]
+    for item in warnings if isinstance(warnings,list) else []:
+        text=str(item).strip();low=text.lower()
+        if re.search(r"\b(no|without|not) (?:visible |obvious |significant |any )?(?:floating|unsupported|wrong|missing)\b",low):continue
+        if (re.search(r"\b(?:person|object|item|part|plant|cup|glass|body)\b.{0,55}\b(?:floating|unsupported)\b",low)
+                or re.search(r"\bwrong (?:target|object|region|referent)\b",low)
+                or re.search(r"\b(?:target|object|item)\b.{0,40}\b(?:unchanged|not removed|not replaced|not edited)\b",low)):
+            defects.append(text)
+    return defects
 
 
 def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> None:
@@ -237,6 +248,11 @@ def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> No
         rows = [{**r, **{k: (r.get("checks") or {}).get(k) == "pass" for k in JOINT_MEMBER_FIELDS}}
                 for r in rows]
         for row in rows:
+            contradictions = _acknowledged_hard_defects(row.get("warnings", []))
+            if contradictions:
+                row["failure_reasons"] = list(row.get("failure_reasons") or []) + contradictions
+            if row.get("failure_reasons"):
+                row["natural"] = False
             if not all(str(row.get(k, "")).strip() for k in ("observed_entity", "ref_entity", "observed_change")):
                 row["scope_correct"] = False
         audit = {**audit, "members": rows, "comparable_granularity": audit.get("comparable_granularity") == "pass",
@@ -245,7 +261,8 @@ def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> No
     valid_rows = isinstance(rows, list) and all(isinstance(r, dict) for r in rows)
     ids_match = valid_rows and [r.get("unit_id") for r in rows] == expected
     members_pass = bool(ids_match) and all(all(r.get(k) is True for k in JOINT_MEMBER_FIELDS) for r in rows)
-    if result.get("finish_reason") == "length" or audit.get("decision") == "fail" or audit.get("_parse_error"):
+    if (result.get("finish_reason") == "length" or audit.get("decision") == "fail"
+            or audit.get("_parse_error") or audit.get("failure_reasons")):
         members_pass = False
     semantic_pass = members_pass and audit.get("comparable_granularity") is True and audit.get("shared_edit_valid") is True
     for index, member in enumerate(group["members"]):
@@ -256,19 +273,41 @@ def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> No
     checks.update({"member_semantic_audit_pass": members_pass,
                    "semantic_audit_pass": semantic_pass,
                    "semantic_audit": {**audit, "decision": "pass" if semantic_pass else "fail"},
-                   "audit_mode": "joint-observation-v3", "audit_calls": 1,
+                   "audit_mode": "joint-core-defects-v4", "audit_calls": 1,
                    "audit_request": {k: result.get(k) for k in
                                      ("semantic_audit_raw", "input_tokens", "output_tokens", "finish_reason")}})
     checks["group_pass"] = (checks.get("blind_disambiguation", {}).get("pass") is True) and semantic_pass and all(checks.get(k, {}).get("pass") is True for k in
         ("deterministic", "cross_target_preservation", "support_gap"))
 
 
+def refresh_twin_add_checks(group: dict[str, Any]) -> bool:
+    """Apply the add presence gate to cached groups without another MLLM call."""
+    checks = group.setdefault("group_checks", {})
+    if group.get("operation") != "add" or checks.get("add_presence_version") == 1:
+        return checks.get("deterministic", {}).get("pass") is not False
+    results = []
+    for member in group["members"]:
+        result = deterministic_check(_member_audit_row(group, member, kind="twins"))
+        member["deterministic"] = result
+        results.append(result)
+    # A new check must never erase an existing rejection from another gate.
+    passed = checks.get("deterministic", {}).get("pass") is not False and all(
+        row["decision"] != "fail" for row in results)
+    checks["deterministic"] = {"pass": passed, "members": results}
+    checks["add_presence_version"] = 1
+    if not passed:
+        checks["group_pass"] = False
+    return passed
+
+
 def audit_twin_groups_joint(groups: list[dict[str, Any]], model: VLLMAuditor,
                             panel_dir: str | Path) -> list[dict[str, Any]]:
     """One visual request per group; deterministic gates remain independent."""
     panel_dir = Path(panel_dir)
-    jobs = []
+    jobs, audited_groups = [], []
     for group in groups:
+        if not refresh_twin_add_checks(group):
+            continue
         panels = [_target_panel(_member_audit_row(group, member, kind="twins"), panel_dir,
                                 binary_locator=True) for member in group["members"]]
         comparison = _member_comparison(panels, panel_dir / f"{group['twin_id']}_local.jpg", crop_panels=True)
@@ -276,7 +315,8 @@ def audit_twin_groups_joint(groups: list[dict[str, Any]], model: VLLMAuditor,
                                  panel_dir / f"{group['twin_id']}_full.jpg")
         jobs.append({"job_id": group["twin_id"], "images": [group["source_image"], comparison, full],
                      "prompt": JOINT_TWIN_PROMPT + "\n" + BLIND_RULE + "\nTarget contract:\n" + _target_contract(group, kind="twins")})
-    for group, result in zip(groups, _call_batched(model, jobs)):
+        audited_groups.append(group)
+    for group, result in zip(audited_groups, _call_batched(model, jobs)):
         _apply_joint_twin_audit(group, result)
     return groups
 

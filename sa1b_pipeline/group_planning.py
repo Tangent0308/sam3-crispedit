@@ -29,18 +29,19 @@ First identify EACH mask independently from pixels. Candidate labels are deliber
 
 Then decide whether ALL masks represent distinct editable instances at COMPARABLE granularity (all whole objects or all parts), possibly DIFFERENT categories, and whether the assigned operation is natural for ALL. Reject a mismatched group with feasible=false and one concrete reason. Never change the assigned operation or omit a member. Do not select new targets.
 
+Before choosing words, find the intersection of practical edits appropriate to EVERY member in its current scene. Optimize for an ordinary photo-editing request, not a novel transformation merely possible to render. Different categories are welcome; shared FUNCTION, physical support and current state matter more than names. Reject only a concrete incompatibility, not small size, occlusion, clipping, unconventional but plausible taste, or a different category. Do not force a payload just to satisfy a quota.
 For feasible groups choose ONE shared edit:
 - add: a conventional object directly supported by every host, at an actually visible shared attachment site. scope/ref name the INITIAL mask entity; placement.site names its necessary subpart (e.g. seat). The pipeline later derives the source site mask from target difference intersected with host. Do not call the whole host its subpart. No distant/adjacent reference anchors. Keep site empty only when the selected entity itself is the direct site.
-- replace: a compatible new physical form/design at the same extent, not merely another color/material. Include the new design in payload; replacement_form is a short internal explanation.
+- replace: a compatible new physical form/design at the same extent, not merely another color/material. The new object must fit the function, scale and mounting of EACH original location. Name the functional object explicitly rather than generic hardware. Include the new design in payload; replacement_form is a short internal explanation.
 - remove: erase the selected independent object/part naturally. Do not remove human anatomy, essential supports or only a carrying strap while leaving its bag unsupported. Do not broaden a fragment mask into the whole object.
-- attribute: one plausible property with a new value different from EVERY member's current value. Preserve unrequested shape, markings and other components. Do not reinterpret a person as clothes or an entire mixed object as one surface.
+- attribute: one plausible property with a new value different from EVERY member's current value. Prefer an everyday appearance variation suitable for the material and use (e.g. paintable products or fabric); do not recolor raw food/skin as paint or turn transparent windows into opaque paint. Preserve unrequested shape, markings and other components. Do not reinterpret a person as clothes or an entire mixed object as one surface.
 
 Each ref is the shortest noun phrase that uniquely identifies its mask in the ORIGINAL scene. Prefer one verified distinguishing modifier; use an ordinal only with a clear counting set. For several similar objects on the same side, left/right alone is insufficient. No relative clauses, explanatory afterthoughts or invented landmarks. All members share the exact same no-ref sentence; each member keeps its own truthful scope. Never rename different objects as one class. The shared payload/value must be equally natural at EVERY member: chair and stool can share a bar-stool replacement; a car and bag cannot share leather material; removing an occupied chair leaves a person unsupported. Reject requests that clearly imply only one member. Actual source-mask areas must stay within a factor of three. Payload names new content explicitly, without 'a matching one' or 'like it'.
 
 Return valid JSON. Put members FIRST so each visual identification precedes the common edit. For every supplied ID include exactly one entry:
-{"members":[{"object_id":"ID","scope":"own singular category","ref_phrase":"the ...","placement_site":"own attachment site or empty","grounding":{"entity":"independently identified noun","kind":"object|part","host":"host noun or empty","current_value":"source property or empty","distinction":"brief visible unique fact","mask_description":"white includes ...; excludes ...","site_visible":true,"edit_feasible":true}}],"feasible":true,"grounding_version":3,"operation":"ASSIGNED","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","replacement_form":"","evidence":"brief"}
+{"members":[{"object_id":"ID","scope":"own singular category","ref_phrase":"the ...","placement_site":"own attachment site or empty","grounding":{"entity":"independently identified noun","kind":"object|part","host":"host noun or empty","current_value":"source property or empty","distinction":"brief visible unique fact","mask_description":"white includes ...; excludes ...","site_visible":true,"edit_feasible":true}}],"feasible":true,"grounding_version":4,"operation":"ASSIGNED","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","replacement_form":"","shared_fit":[{"object_id":"ID","natural":true,"reason":"specific fit of chosen edit in this scene, at most 12 words"}],"evidence":"brief"}
 
-Fields: target_part and qualifier are empty because these source candidates have no resolved additional part mask. remove_mode=whole. For add/replace payload is the concrete new object; for remove/attribute payload is empty. For attribute attributes=[{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}], otherwise attributes=[]. Only add has placement={"relation":"on|in|attached to|...","site":"part or empty","anchor_mode":"support"}; otherwise null. For non-add site_visible=true. Each grounding.entity must agree with its OWN member.scope. Different scopes are allowed. All grounding.kind values must agree. For add, each member.placement_site may differ; only relation/payload are shared. Do not force identical site nouns onto different hosts. Keep all internal evidence brief. A rejected response needs only {"feasible":false,"reason":"specific visible incompatibility"}.
+Fields: target_part and qualifier are empty because these source candidates have no resolved additional part mask. remove_mode=whole. For add/replace payload is the concrete new object; for remove/attribute payload is empty. For attribute attributes=[{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}], otherwise attributes=[]. Only add has placement={"relation":"on|in|attached to|...","site":"part or empty","anchor_mode":"support"}; otherwise null. For non-add site_visible=true. Each grounding.entity must agree with its OWN member.scope. Different scopes are allowed. All grounding.kind values must agree. For add, each member.placement_site may differ; only relation/payload are shared. Do not force identical site nouns onto different hosts. After choosing the shared payload/value, provide shared_fit for EVERY ID. Check each member against that EXACT edit, including existing items, occupancy, support, installation, and unchanged materials. A generic statement such as "both can be edited" is not evidence. Payload is a concise noun phrase with an article; omit optional stylistic specifications. Keep all internal evidence brief. A rejected response needs only {"feasible":false,"reason":"specific visible incompatibility"}.
 '''
 
 
@@ -67,8 +68,16 @@ empty list, or null value for a field required by its operation.
 
 def validate_twin_grounding(plan: dict[str, Any]) -> None:
     """Validate explicit contradictions, never treat self-reported fields as visual proof."""
-    if plan.get("grounding_version") not in (2, 3):
+    if plan.get("grounding_version") not in (2, 3, 4):
         raise ValueError("missing twin visual grounding")
+    if plan.get("grounding_version") == 4:
+        fit = plan.get("shared_fit")
+        expected = {str(m.get("object_id")) for m in plan.get("members", [])}
+        if (not isinstance(fit, list) or len(fit) != len(expected)
+                or not all(isinstance(x, dict) for x in fit)
+                or {str(x.get("object_id")) for x in fit} != expected
+                or not all(x.get("natural") is True and str(x.get("reason", "")).strip() for x in fit)):
+            raise ValueError("shared edit lacks per-member naturalness evidence")
     kinds = set()
     operation = plan.get("operation")
     for member in plan.get("members", []):
@@ -78,6 +87,12 @@ def validate_twin_grounding(plan: dict[str, Any]) -> None:
             raise ValueError("mask entity differs from member scope")
         if binding.get("kind") not in {"object", "part"}:
             raise ValueError("twin selector is not one object or part")
+        if plan.get("grounding_version") == 4 and binding.get("host") and binding["kind"] == "object":
+            # Explicit attached component nouns cannot become whole objects
+            # merely because the model labels both members "object".
+            from .group_geometry import candidate_granularity
+            if candidate_granularity({"category": scope}) == "part":
+                raise ValueError("attached component labeled as whole object")
         kinds.add(binding["kind"])
         if not str(binding.get("distinction", "")).strip():
             raise ValueError("missing full-scene distinction")
@@ -309,7 +324,7 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         raise ValueError("twin add requires a direct support anchor")
     if plan.get("feasible") is not True or plan.get("operation") not in {"add", "replace", "remove", "attribute"}:
         raise ValueError("infeasible or invalid twin plan")
-    if require_grounding or plan.get("grounding_version") in (2, 3):
+    if require_grounding or plan.get("grounding_version") in (2, 3, 4):
         validate_twin_grounding(plan)
     _validate_group_edit_fields(plan)
     members = plan.get("members")
