@@ -28,6 +28,19 @@ def _semantic_group_pass(audit: dict[str, Any], fields: tuple[str, ...]) -> bool
         audit.get(field) is True for field in fields)
 
 
+def _call_batched(model: VLLMAuditor, jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use the auditor's configured batch size while preserving job order."""
+    size = max(1, int(getattr(model, "batch_size", 1)))
+    results = []
+    for start in range(0, len(jobs), size):
+        batch = jobs[start:start + size]
+        outputs = model.call_batch(batch)
+        if len(outputs) != len(batch):
+            raise RuntimeError("group audit backend returned an incomplete batch")
+        results.extend(outputs)
+    return results
+
+
 def _marked_scene(group: dict[str, Any]) -> str | None:
     views = (group.get("planning") or {}).get("views") or []
     if views and Path(views[0]).is_file():
@@ -98,8 +111,7 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
     # The source plus one tiled comparison stays within the three-image limit
     # while showing every member, including optional three-member groups.
     results = []
-    for group, job in zip(refs, jobs):
-        result = model.call_batch([job])[0]
+    for group, result in zip(refs, _call_batched(model, jobs)):
         audit = result["semantic_audit"]
         checks = group.setdefault("group_checks", {})
         checks["semantic_audit"] = audit
@@ -118,7 +130,7 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
 
 def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_dir: str | Path) -> list[dict[str, Any]]:
     panel_dir = Path(panel_dir)
-    results = []
+    jobs = []
     for group in groups:
         images = [group["source_image"]]
         marked = _marked_scene(group)
@@ -132,9 +144,11 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
             comparison_paths.append(group["joint_target"])
         if comparison_paths:
             images.append(_member_comparison(comparison_paths, panel_dir / f"{group['multi_id']}_comparison.jpg"))
-        result = model.call_batch([{"job_id": group["multi_id"], "images": images[:3],
-                                    "prompt": MULTI_GROUP_PROMPT + "\nTarget contract:\n" +
-                                    _target_contract(group, kind="multi")}])[0]
+        jobs.append({"job_id": group["multi_id"], "images": images[:3],
+                     "prompt": MULTI_GROUP_PROMPT + "\nTarget contract:\n" +
+                     _target_contract(group, kind="multi")})
+    results = []
+    for group, result in zip(groups, _call_batched(model, jobs)):
         audit = result["semantic_audit"]
         joint = group["joint_audit"]
         joint["semantic_audit"] = audit
