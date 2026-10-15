@@ -103,6 +103,19 @@ def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometr
                 raise ValueError('material payload is only a color/finish, not a material')
             if attr['property'] in {'color', 'tint'} and _clean(raw.get('source_color')).lower() == value.lower():
                 raise ValueError('requested color is already present in the clean source')
+            # Reject planner no-ops such as "change the red SUV to red".
+            # The reference and scope are trusted source selectors, so a
+            # repeated visible descriptor is evidence that the requested
+            # property is already present even when source_color is absent.
+            if attr['property'] in {'color', 'tint', 'material', 'finish', 'pattern', 'texture'}:
+                value_norm = re.sub(r'\s+', ' ', value).strip().lower()
+                source_descriptors = ' '.join(
+                    _clean(raw.get(key)) for key in ('ref_phrase', 'scope', 'source_color')
+                ).lower()
+                if value_norm and re.search(
+                        r'(?<![a-z0-9])' + re.escape(value_norm) + r'(?![a-z0-9])',
+                        source_descriptors):
+                    raise ValueError('requested attribute value is already present in the source selector')
         attribute_kind = spec['attributes'][0]['property'] if len(spec['attributes']) == 1 else 'multiple'
     else:
         attribute_kind = None

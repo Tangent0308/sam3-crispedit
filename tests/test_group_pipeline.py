@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image
 
 from sa1b_pipeline.group_geometry import precise_point, twin_pair_gate, adjacent_pair_gate
-from sa1b_pipeline.group_planning import build_twin_group, group_views
+from sa1b_pipeline.group_planning import build_multi_group, build_twin_group, group_views
 from sa1b_pipeline.group_schema import validate_twin_record, validate_multi_record
 from sa1b_pipeline.group_selection import select_twin_candidates, select_multi_candidates
 from sa1b_pipeline.source_isolation import assert_no_eval_leakage
@@ -115,4 +115,30 @@ def test_multi_selection_supports_fast_capacity_and_strict_modes(tmp_path):
     assert len(fast) == len(strict) == 1
     assert fast[0]["adjacent_pairs"][0]["geometry_exact"] is False
     assert strict[0]["adjacent_pairs"][0]["geometry_exact"] is True
+
+
+def test_multi_attribute_rejects_value_repeated_in_source_selector(tmp_path):
+    image, objects = _source(tmp_path)
+    objects[0]["category"] = "red SUV"
+    candidate = {"source_id": "multi-attr", "image_path": str(image), "objects": objects}
+    _, mask_paths, _ = group_views(candidate, objects[:1], tmp_path / "attr_views")
+    mask = np.asarray(Image.open(mask_paths[0])) > 0
+    ys, xs = np.where(mask)
+    geometry = [{"bbox": [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)],
+                 "point": precise_point(mask), "area_fraction": float(mask.mean())}]
+    plan = {"feasible": True, "generation_order": ["U1"], "targets": [{
+        "unit_id": "U1", "object_id": "0", "operation": "attribute",
+        "scope": "red SUV", "ref_phrase": "the red SUV", "payload": "",
+        "target_part": "", "remove_mode": "whole", "placement": None,
+        "attributes": [{"property": "color", "value": "red"}], "qualifier": "",
+        "evidence": "same red source"
+    }]}
+    try:
+        build_multi_group(candidate, objects[:1], plan, mask_paths, split="train",
+                          group_id="multi-attr-test", geometry=geometry,
+                          assignments={"0": "attribute"})
+    except ValueError as exc:
+        assert "already present" in str(exc)
+    else:
+        raise AssertionError("source attribute no-op was accepted")
 
