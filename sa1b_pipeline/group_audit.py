@@ -19,6 +19,14 @@ TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. The sourc
 
 MULTI_GROUP_PROMPT = '''You are auditing a joint multi-target edit group. The original scene, each chain step, and the final result are provided. Check that each original ref identifies one target, every assigned operation is completed in its step and remains correct later, adjacent targets do not bleed into each other, and the final image is natural. Return JSON only: {"decision":"pass|fail","unique_refs":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
+TWIN_REQUIRED_AUDIT_FIELDS = ("unique_refs", "all_targets_done", "members_preserved", "comparable", "natural")
+MULTI_REQUIRED_AUDIT_FIELDS = ("unique_refs", "all_targets_done", "no_crosstalk", "outside_preserved", "natural")
+
+
+def _semantic_group_pass(audit: dict[str, Any], fields: tuple[str, ...]) -> bool:
+    return isinstance(audit, dict) and audit.get("decision") == "pass" and all(
+        audit.get(field) is True for field in fields)
+
 
 def _marked_scene(group: dict[str, Any]) -> str | None:
     views = (group.get("planning") or {}).get("views") or []
@@ -93,8 +101,15 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
     for group, job in zip(refs, jobs):
         result = model.call_batch([job])[0]
         audit = result["semantic_audit"]
-        group.setdefault("group_checks", {})["semantic_audit"] = audit
-        group["group_checks"]["semantic_audit_pass"] = audit.get("decision") == "pass"
+        checks = group.setdefault("group_checks", {})
+        checks["semantic_audit"] = audit
+        semantic_pass = _semantic_group_pass(audit, TWIN_REQUIRED_AUDIT_FIELDS)
+        checks["semantic_audit_pass"] = semantic_pass
+        checks["group_pass"] = bool(
+            checks.get("deterministic", {}).get("pass") is True
+            and checks.get("cross_target_preservation", {}).get("pass") is True
+            and checks.get("support_gap", {}).get("pass") is True
+            and semantic_pass)
         for member in group.get("members", []):
             member["semantic_audit"] = audit
         results.append(group)
@@ -121,8 +136,13 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
                                     "prompt": MULTI_GROUP_PROMPT + "\nTarget contract:\n" +
                                     _target_contract(group, kind="multi")}])[0]
         audit = result["semantic_audit"]
-        group["joint_audit"]["semantic_audit"] = audit
-        group["joint_audit"]["semantic_audit_pass"] = audit.get("decision") == "pass"
+        joint = group["joint_audit"]
+        joint["semantic_audit"] = audit
+        semantic_pass = _semantic_group_pass(audit, MULTI_REQUIRED_AUDIT_FIELDS)
+        joint["semantic_audit_pass"] = semantic_pass
+        step_pass = all(x.get("decision") != "fail" for x in joint.get("steps", []))
+        joint["pass"] = bool(step_pass and joint.get("outside_union_support_fraction", 1.0) <= 0.02
+                              and semantic_pass)
         for member in group.get("units", []):
             member["semantic_audit"] = audit
         results.append(group)
