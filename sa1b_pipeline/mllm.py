@@ -38,7 +38,7 @@ def _safe_parse(text: str, *, stage: str) -> dict[str, Any]:
         return parse_json(text)
     except (ValueError, json.JSONDecodeError) as exc:
         if stage == "audit":
-            return {"decision": "fail", "failure_reasons": ["malformed_mllm_json"], "evidence": str(exc)}
+            return {"decision": "fail", "failure_reasons": ["malformed_mllm_json"], "evidence": str(exc), "_raw_output": text}
         return {"accept": False, "_parse_error": str(exc), "_raw_output": text}
 
 
@@ -183,7 +183,15 @@ class VLLMSelector:
             prompt, images = self._multi_messages(paths, text)
             requests.append({"prompt": prompt, "multi_modal_data": {"image": images}})
         outputs = self.llm.generate(requests, self.params, use_tqdm=False)
-        return [_safe_parse(output.outputs[0].text if output.outputs else "", stage="audit") for output in outputs]
+        results = []
+        for output in outputs:
+            result = output.outputs[0] if output.outputs else None
+            raw = result.text if result else ""
+            parsed = _safe_parse(raw, stage="audit")
+            parsed['_generation_metadata'] = {'output_tokens': len(result.token_ids) if result else 0,
+                'finish_reason': result.finish_reason if result else None, 'raw_output': raw}
+            results.append(parsed)
+        return results
 
 
 def _required_operation_rule(operation: str | None) -> str:
@@ -245,7 +253,7 @@ ATTRIBUTE SURFACE CONTRACT: Identify the real editable object/part, never silent
 
 
 Each selected object can become at most one independent unit. Choose exactly one suitable operation for each accepted object from add, replace, remove, attribute, using the operation_quality table below. If no natural, locally feasible edit exists, omit that object from units and report its object_id and reason in skipped_objects; never force a payload to fill a quota. Prefer different operation types when the mask is eligible, but never force an unsuitable operation merely to balance a scene; global operation assignments are made before selection; preserve the assigned type even when rejecting a target. Use the visible selected mask as the source semantic selector; never invent a mask or count fragments as separate objects.
-UNIFIED INSTRUCTION PROTOCOL 1.0: Return object_id, operation, ref_phrase (source-instance phrase), scope (visually verified short source-instance noun, not a blindly copied metadata alias), payload, target_part (optional named part of the selected host), remove_mode (whole/part/contents/contents_only/lowerlegs/hem), placement (for add: relation, optional site, anchor_mode=support/reference), attributes (for attribute: list of property/value records), edit_surface, source_color, evidence. For simple attribute, attribute_kind plus payload is accepted. For other operations attributes must be empty. Defaults: no target_part; remove_mode=whole; add relation=to. For remove leave payload empty; encode the part and extent in target_part/remove_mode/qualifier. With placement.site, choose a concrete spatial relation rather than to. Ref/no-ref are deterministically rendered from these SAME slots, replacing only the source-instance phrase with the selected <scope>; retain all part, count, result and placement semantics. Do not return two independently authored instructions.
+UNIFIED INSTRUCTION PROTOCOL 2.0: Return object_id, operation, ref_phrase (source-instance phrase), scope (visually verified short source-instance noun, not a blindly copied metadata alias), payload, target_part (optional named part of the selected host), remove_mode (whole/part/contents/contents_only/lowerlegs/hem), placement (for add: relation, optional site, anchor_mode=support/reference), attributes (for attribute: list of property/value records), edit_surface, source_color, evidence. For simple attribute, attribute_kind plus payload is accepted. For other operations attributes must be empty. Defaults: no target_part; remove_mode=whole; add relation=to. For remove leave payload empty; encode the part and extent in target_part/remove_mode/qualifier. With placement.site, choose a concrete spatial relation rather than to. Ref/no-ref are deterministically rendered from these SAME slots, replacing the entire location (entity, part, site, position) with the selected region; keep payload, values, attachment relation and result semantics. Do not return two independently authored instructions.
 {INSTRUCTION_STYLE}
 Forms: Add <item> <relation> <anchor>. Replace <target> with <replacement>. Remove <target>. Remove <part> from <host>. Remove <target>, including its contents. Remove the contents from <host>. Remove the lower section of <target> to make it knee-length. Change the <property> of <target> to <value>. Tint <target> <color>. Make <target> translucent/opaque. Text values are exact strings; do not add quotation marks to the stored value. One source unit has one operation; compatible attributes on that same target may be combined, but do not mix operations. Keep one short sentence; aim for ref<=26 and no-ref<=16 words without dropping necessary meaning. No minimum word count.
 ADD PLACEMENT: payload is only the new physical item plus necessary count/appearance. Put relation and site in placement instead of embedding ambiguous its/it references in payload. Example: payload=a beige cushion, placement relation=on, site=seat, anchor_mode=support. Preserve the source anchor. A reference placement such as beside requires resolved_execution_region_available=true; otherwise skip. Add a physical patch = add; change a printed surface pattern = attribute; erase an existing logo/text = remove; change the existing text content = attribute.text. No moving objects or pose editing under these four labels.

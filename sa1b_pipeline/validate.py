@@ -20,7 +20,7 @@ Return JSON only: {\"decision\":\"pass\"|\"fail\",\"target_done\":bool,\"non_tar
 The cyan pixels in the third panel are an artificial location annotation, NEVER output pixels or an artifact. Judge rendering only on the clean source and edited views. Locate the intended instance from the mask and then verify that the instruction's source description actually matches it; reject a wrong source color or a whole-person color request that silently means clothing. Do not confuse the mask overlay with an edited result.
 Failure-first rules: wrong instance, missing/partial edit, extra duplicate, changed neighboring instance, broken occlusion/contact, or visible artifact is fail. For add the host remains and the item is attached. For remove the entire visible target disappears. For replace the old identity disappears and a distinct new identity appears. For attribute geometry and identity remain.
 The natural verdict must assess both photographic rendering and contextual plausibility. Even a seamless edit fails natural if the requested content is implausible for the visible scene. For add, check a conventional host-item relationship, usable attachment site and realistic scale without blocking the host's function. For replace, check compatible scene role, available space and existing support. For attribute, check credible requested properties, preserved unrequested markings and component boundaries, and natural shading rather than flat paint. Do not reject unusual taste alone; use visible physical or contextual contradictions. Report contextual mismatch as implausible_edit_content with concrete visual evidence, distinguishing it from rendering artifacts. Do not excuse implausible content merely because the instruction requested it.
-Protocol rules: the source mask is a semantic selector, not the entire required change area. For named part removal/trim, remove only that part and retain the host. Obey explicit item counts and placement relations, including relative reference placement. For attribute, change requested text/pattern/finish/opacity when stated and preserve only unrequested properties; tint preserves transparency. Never penalize a required small part edit just because most host pixels remain unchanged.
+Protocol 2.0: source mask selects the actual edited source region, or the direct attachment site for add. It is not the new-object silhouette or the entire output difference. For named part removal/trim, remove only that part and retain the host. Obey explicit item counts and placement relations, including relative reference placement. For attribute, change requested text/pattern/finish/opacity when stated and preserve only unrequested properties; tint preserves transparency. For a part edit, the mask must identify that part rather than its entire host.
 Instruction: {instruction}
 Target mask file is supplied for localization only; it is not a pixel-difference ground truth."""
 
@@ -71,7 +71,8 @@ def audit_prompt(instruction: str, *, binary_locator: bool = False, operation: s
             raise ValueError('unknown expected operation')
         prompt = prompt.replace('"target_done":bool', '"operation_correct":bool,"target_done":bool', 1)
         prompt += OPERATION_AUDIT_RULES.replace('{operation}', operation)
-    return prompt.replace('{instruction}', instruction)
+    from .instruction_protocol import BLIND_RULE
+    return prompt.replace('{instruction}', instruction) + "\n" + BLIND_RULE
 
 
 def _fraction(a: np.ndarray, mask: np.ndarray) -> float:

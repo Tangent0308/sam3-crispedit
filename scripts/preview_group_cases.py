@@ -43,6 +43,8 @@ def status(group, kind):
            ("deterministic", "support_gap", "cross_target_preservation")):
         return "DETERMINISTIC GROUP CHECK: FAIL | DIAGNOSTIC, UNPUBLISHED", "#a63838"
     semantic = checks.get("semantic_audit") or {}
+    if semantic.get("decision") == "pending":
+        return "AUTOMATIC GROUP AUDIT: PENDING | REVISED MASK, UNPUBLISHED", "#866319"
     if (checks.get("semantic_audit_pass") is False or semantic.get("decision") == "fail"
             or checks.get("member_semantic_audit_pass") is False):
         return "AUTOMATIC GROUP AUDIT: FAIL | DIAGNOSTIC, UNPUBLISHED", "#a63838"

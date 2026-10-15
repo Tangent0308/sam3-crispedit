@@ -95,8 +95,15 @@ def _planner(args):
         return HFSelector(model_id=args.planner_model, max_new_tokens=args.max_new_tokens,
                           device_map=args.planner_device_map)
     from sa1b_pipeline.mllm import VLLMSelector
-    return VLLMSelector(args.planner_model, tensor_parallel_size=args.planner_tp,
+    model = VLLMSelector(args.planner_model, tensor_parallel_size=args.planner_tp,
                         max_new_tokens=args.max_new_tokens, batch_size=args.planner_batch_size)
+    if args.structured_planning_json:
+        if model.params is None:
+            model.close()
+            raise ValueError('structured planning requires SA1B_FORCE_DIRECT_VLLM=1')
+        from vllm.sampling_params import StructuredOutputsParams
+        model.params.structured_outputs = StructuredOutputsParams(json_object=True)
+    return model
 
 
 def _editor(args):
@@ -382,6 +389,8 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=20261014)
     p.add_argument("--reservation", type=Path, help="source isolation reservation JSON")
     p.add_argument("--planner-model")
+    p.add_argument("--structured-planning-json", action="store_true",
+                   help="use vLLM JSON-constrained output in the same planning request")
     p.add_argument("--planner-backend", choices=["hf", "vllm"], default="vllm")
     p.add_argument("--planner-device-map", default="auto",
                    help="Transformers device map for the HF planner; auto shards large MoE models across visible GPUs")
@@ -390,6 +399,8 @@ def main(argv=None):
     p.add_argument("--planner-batch-size", type=int, default=8,
                    help="number of multimodal planning requests submitted per vLLM batch")
     p.add_argument("--editor-model")
+    p.add_argument("--site-model", default=os.environ.get("SA1B_SITE_MODEL"),
+                   help="optional local SAM3 model for add site refinement before the existing audit")
     p.add_argument("--editor-dtype", default="bf16")
     p.add_argument("--editor-devices", help="explicit GPU IDs for persistent parallel editors, e.g. 0,1; generation-only")
     p.add_argument("--audit-model")
@@ -429,6 +440,8 @@ def main(argv=None):
         p.error("--target must be positive")
     if args.editor_devices and not args.generate_only:
         p.error("--editor-devices requires --generate-only to isolate GPU runtime ownership")
+    if args.site_model:
+        os.environ["SA1B_SITE_MODEL"] = str(Path(args.site_model).resolve())
     root = args.output_root.resolve(); root.mkdir(parents=True, exist_ok=True)
     if root == FROZEN_ROOT or FROZEN_ROOT in root.parents or root in FROZEN_ROOT.parents:
         raise RuntimeError("refusing to write inside the protected 50k run root")
@@ -436,7 +449,10 @@ def main(argv=None):
     immutable_json(root / "config.json", {"kind": args.kind, "target": args.target, "split": args.split,
                                            "seed": args.seed, "manifest": str(args.manifest.resolve()),
                                            "reservation": str(args.reservation.resolve()) if args.reservation else None,
-                                           "protocol": "1.0", "mask_semantics": "1.1", "steps": 40})
+                                           "protocol": "2.0", "mask_semantics": "2.0",
+                                           "instruction_style": "benchmark-concise-3-blind-1", "steps": 40,
+                                           **({"structured_planning_json": True} if args.structured_planning_json else {}),
+                                           **({"site_model": str(Path(args.site_model).resolve())} if args.site_model else {})})
     candidates = _candidate_rows(args, reservation_ids)
     selected_path = root / "inputs/selected.jsonl"
     selected_path.parent.mkdir(parents=True, exist_ok=True)
@@ -638,7 +654,7 @@ def main(argv=None):
                     if not args.editor_devices:
                         group = generate_multi_group(group, out, editor, seed=0)
                     joint = group.get("joint_audit", {})
-                    accepted = (all(x.get("decision") != "fail" for x in joint.get("steps", []))
+                    accepted = (joint.get("blind_protocol", {}).get("pass") is True and all(x.get("decision") != "fail" for x in joint.get("steps", []))
                                 and joint.get("outside_union_support_fraction", 1.0) <= 0.02)
                 # Preserve rejected groups too, including the exact gates that failed.
                 atomic_json(out / "group.json", group)

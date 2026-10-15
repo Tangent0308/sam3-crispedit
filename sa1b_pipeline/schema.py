@@ -73,6 +73,12 @@ class EditUnit:
     surface_type: str | None = None
     target_rgb: list[float] | None = None
 
+    instruction_style_version: str = "benchmark-concise-3-blind-1"
+    blind_eligible: bool | None = None
+    blind_ineligible_reason: str | None = None
+    mask_path_v1: str | None = None
+    bbox_v1: list[int] | None = None
+    point_v1: list[int] | None = None
     instruction_protocol_version: str | None = None
     instruction_spec: dict[str, Any] = field(default_factory=dict)
     instruction_length_advice: list[str] = field(default_factory=list)

@@ -15,7 +15,7 @@ def test_discriminator_is_in_both_structured_reference_and_rendered_ref():
  u=build_unit(raw,{'object_id':'7','category':'petal'},'/mask.png',{'bbox':[1,2,3,4],'point':[2,3]},[])
  assert row()['distinguish'] in u.instruction_ref
  assert 'immediately' not in u.instruction_noref
- assert u.instruction_noref=='Change the color of the selected petal to yellow.'
+ assert u.instruction_noref=='Change the color of the selected region to yellow.'
 
 
 def test_anatomy_removal_is_not_made_acceptable_by_conversion():
@@ -82,7 +82,7 @@ def test_add_host_pronoun_is_grammatical_cleanup_in_ref_and_noref():
  assert raw['compact_output']['change']['site']=='its upper surface'
  assert raw['placement']['site']=='upper surface'
  assert unit.instruction_ref.startswith('Add a small water droplet on the upper surface of the orange petal ')
- assert unit.instruction_noref=='Add a small water droplet on the upper surface of the selected petal.'
+ assert unit.instruction_noref=='Add a small water droplet on the selected region.'
  # Do not alter references to another object or a meaningful subpart.
  original['change']['site']='surface beside its stem'
  assert expand_compact(original,'7')['placement']['site']=='surface beside its stem'
@@ -97,7 +97,7 @@ def test_unique_target_needs_no_forced_extra_locator():
  validate_single_plan(raw,'7',['attribute'])
  unit=build_unit(raw,{'object_id':'7','category':'shoebox'},'/mask.png',{'bbox':[1,2,3,4],'point':[2,3]},[])
  assert unit.instruction_ref=='Change the color of the blue shoebox to yellow.'
- assert unit.instruction_noref=='Change the color of the selected shoebox to yellow.'
+ assert unit.instruction_noref=='Change the color of the selected region to yellow.'
  assert raw['compact_output']==original
 
 
@@ -113,7 +113,7 @@ def test_adjacent_add_cannot_masquerade_as_direct_contact():
   build_unit(raw,{'object_id':'7','category':'chair'},'/mask.png',{'bbox':[1,2,3,4],'point':[2,3]},[])
  obj={'object_id':'7','category':'chair','metadata':{'execution_mask_path':'/resolved.png'}}
  unit=build_unit(raw,obj,'/mask.png',{'bbox':[1,2,3,4],'point':[2,3]},[])
- assert unit.instruction_noref=='Add a small basket beside the selected chair.'
+ assert unit.instruction_noref=='Add a small basket beside the selected region.'
  assert unit.execution_mask_path=='/resolved.png'
 
 
@@ -123,7 +123,7 @@ def test_landmark_in_reference_does_not_turn_direct_add_into_reference_add():
  unit=build_unit(raw,{'object_id':'7','category':'bag'},'/mask.png',{'bbox':[1,2,3,4],'point':[2,3]},[])
  assert unit.instruction_spec['placement']['anchor_mode']=='support'
  assert unit.instruction_ref=='Add a luggage tag attached to the handle of the bag beside the chair.'
- assert unit.instruction_noref=='Add a luggage tag attached to the handle of the selected bag.'
+ assert unit.instruction_noref=='Add a luggage tag attached to the selected region.'
 
 
 def test_single_phrase_replacement_keeps_public_result_and_internal_evidence_separate():
@@ -134,7 +134,7 @@ def test_single_phrase_replacement_keeps_public_result_and_internal_evidence_sep
  validate_single_plan(raw,'7',['replace'])
  unit=build_unit(raw,{'object_id':'7','category':'button'},'/mask.png',{'bbox':[1,2,3,4],'point':[2,3]},[])
  assert unit.instruction_ref=='Replace the lowest shirt button with a square four-hole button.'
- assert unit.instruction_noref=='Replace the selected button with a square four-hole button.'
+ assert unit.instruction_noref=='Replace the selected region with a square four-hole button.'
  assert raw['compact_output']==original
  assert 'round two-hole' not in unit.instruction_ref
 

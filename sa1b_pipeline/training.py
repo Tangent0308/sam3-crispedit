@@ -28,12 +28,16 @@ def inline_mask(instruction: str, phrase: str, code: str) -> str:
 
 
 def build_training_rows(pair: dict[str, Any], mask_code: str) -> list[dict[str, Any]]:
+    if pair.get("blind_eligible") is False or pair.get("blind_ineligible_reason"):
+        raise ValueError("unresolved source region cannot produce token training rows")
     match = MASK_SPAN.fullmatch(mask_code)
     if not match or not (0 <= int(match.group(1)) <= 255 and 256 <= int(match.group(2)) <= 511):
         raise ValueError("mask_code must contain one SAMTok span with codes 0000-0255 and 0256-0511")
     spec = pair.get('instruction_spec') or {}
     if spec:
-        from .instruction_protocol import validate_pair
+        from .instruction_protocol import validate_pair, mask_contract
+        if mask_contract(spec)['source_region_resolution_required'] and pair.get('blind_eligible') is not True:
+            raise ValueError('unresolved source region cannot produce token training rows')
         validate_pair(spec, pair['instruction'], pair['instruction_noref'])
     ref = pair["instruction"]
     phrase = pair.get("ref_phrase") or _infer_phrase(pair)
@@ -42,8 +46,8 @@ def build_training_rows(pair: dict[str, Any], mask_code: str) -> list[dict[str, 
         from .instruction_protocol import render
         # Bind the semantic selector slot, not a substring that may also occur
         # inside an exact requested text value.
-        ref_inline = render({**spec, 'ref': spec['ref'] + ' ' + mask_code})
-        no_ref_inline = render({**spec, 'scope': spec['scope'] + ' ' + mask_code}, False)
+        ref_inline = render(spec, selector_token=mask_code)
+        no_ref_inline = render(spec, False, selector_token=mask_code)
     else:
         ref_inline = inline_mask(ref, phrase, mask_code)
         no_ref_inline = inline_mask(no_ref, _infer_noref_phrase(no_ref), mask_code)

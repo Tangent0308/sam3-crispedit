@@ -107,6 +107,11 @@ def _validate_member(member: dict[str, Any], *, twin: bool = False) -> None:
         raise ValueError("member ref differs from instruction_spec")
     if not member["instruction"].strip() or not member["instruction_noref"].strip():
         raise ValueError("member instructions must be nonempty")
+    if member["instruction_spec"].get("version") == "2.0":
+        from .instruction_protocol import validate_pair
+        validate_pair(member["instruction_spec"], member["instruction"], member["instruction_noref"])
+        if member.get("blind_eligible") is not True:
+            raise ValueError("unresolved protocol 2.0 source region")
     if twin and member["instruction"] == member["instruction_noref"]:
         # Ref and no-ref may coincide only if the source ref is genuinely the
         # protocol's selected placeholder; group data always has a real ref.

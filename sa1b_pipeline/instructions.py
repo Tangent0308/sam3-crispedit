@@ -21,7 +21,7 @@ def _lower_article(value: str) -> str:
 
 
 def _scope_phrase(raw_scope: str, category: str) -> str:
-    """Return the short noun phrase used by v2 no-ref instructions."""
+    """Return the verified internal source noun (never exposed in blind no-ref)."""
     value = _clean(raw_scope)
     if not value:
         value = _clean(category).split(',', 1)[0]
@@ -91,10 +91,10 @@ def build_unit(raw: dict[str, Any], obj: dict[str, Any], mask_path: str, geometr
         raise ValueError('add payload must introduce a new physical item')
     part = _clean(raw.get('target_part'))
     # Some planners use ``target_part`` for an add host's attachment site
-    # even though protocol 1.0 stores that information under placement.site.
+    # protocol 2.0 stores that information under placement.site.
     # Promote this equivalent representation before applying executability
-    # gates; the add mask remains the host anchor and no extra region is
-    # invented. A genuine add subpart mask is therefore never required.
+    # gates. Generation uses the host; grouped postprocessing must resolve a
+    # separate site selector before any blind training export.
     placement_raw = raw.get('placement')
     if operation == 'add' and part:
         placement_raw = {**(placement_raw if isinstance(placement_raw, dict) else {}), 'site': part}

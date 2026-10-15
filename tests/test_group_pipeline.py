@@ -60,6 +60,7 @@ def test_group_views_and_twin_record_contract(tmp_path):
     for m in record["members"]:
         m["support_mask"] = m["mask"]
         m["edited_image"] = str(image)
+        m["blind_eligible"] = True
     validate_twin_record(record)
     assert record["members"][0]["instruction_noref"] == record["members"][1]["instruction_noref"]
 
@@ -311,7 +312,7 @@ def test_multi_step_audit_compares_each_actual_input_and_output(tmp_path):
               "step_output_image": str(mid if i == 0 else final)} for i, obj in enumerate(objects)]
     group = {"multi_id": "mu", "source_image": str(image), "units": units,
              "joint_target": str(final), "joint_audit": {"steps": [{"decision": "pending_semantic_audit"}]*2,
-             "outside_union_support_fraction": 0.0}}
+             "outside_union_support_fraction": 0.0, "blind_protocol": {"pass": True}}}
     class Model:
         batch_size = 2
         def call_batch(self, jobs):
@@ -342,7 +343,7 @@ def test_twin_noop_uses_source_fields_and_word_boundaries(tmp_path):
     group = build_twin_group({"source_id": "s", "image_path": str(image)}, objects, plan,
                             [o["mask_path"] for o in objects], split="train", scope_level="object",
                             group_id="tw", geometry=geometry, assigned_operation="attribute")
-    assert "selected backpack" in group["instruction_noref"]
+    assert "selected region" in group["instruction_noref"]
     import pytest
     plan["members"][0]["source_color"] = "red"
     with pytest.raises(ValueError, match="already present"):
@@ -424,12 +425,12 @@ def test_optional_contour_keeps_clean_pixels_and_stays_outside_mask(tmp_path):
     outlined, _, outline_digest = group_views(candidate, objects, tmp_path / "views", locator_outline=True)
     before = np.asarray(Image.open(base[1]))
     after = np.asarray(Image.open(outlined[1]))
-    assert np.array_equal(before, after[:, :1024])
+    assert np.array_equal(before, after[:, :1280])
     assert base_digest != outline_digest
-    for top in (32, 384):
-        mask = np.asarray(Image.open(outlined[1]))[top:top+320,512:1024,0] == 255
-        clean = after[top:top+320,:512]
-        guided = after[top:top+320,1024:]
+    for top in (32, 464):
+        mask = np.asarray(Image.open(outlined[1]))[top:top+400,640:1280,0] == 255
+        clean = after[top:top+400,:640]
+        guided = after[top:top+400,1280:]
         assert np.array_equal(clean[mask], guided[mask])
         assert np.any(clean[~mask] != guided[~mask])
 
