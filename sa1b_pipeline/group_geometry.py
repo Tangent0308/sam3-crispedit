@@ -4,6 +4,7 @@ from __future__ import annotations
 from itertools import combinations
 import math
 import os
+import re
 from typing import Any
 
 import numpy as np
@@ -14,9 +15,11 @@ from .geometry import load_mask, mask_geometry
 BANDED_CATEGORIES = {
     "stone", "stones", "leaf", "leaves", "brick", "bricks", "tile", "tiles",
     "grass", "grasses", "pebble", "pebbles", "sand", "gravel", "hair", "fur",
+    "boulder", "boulders", "rock", "rocks",
 }
 BACKGROUND_CATEGORIES = {
     "sky", "ground", "floor", "wall", "road", "water", "background", "snow",
+    "walls", "embankment", "embankments", "riverbank", "riverbanks", "terrain", "pavement",
 }
 
 
@@ -105,9 +108,13 @@ def normalized_category(value: str) -> str:
 
 def category_allowed(value: str) -> tuple[bool, str | None]:
     category = normalized_category(value)
-    if category in BANDED_CATEGORIES:
+    # Dense labels commonly add modifiers: "artificial autumn leaves" and
+    # "brick wall" must not evade the explicit twin exclusions. Inspect noun
+    # endings rather than every token so "stone fountain" remains eligible.
+    heads = {alias.strip().split()[-1] for alias in re.split(r"[,;/]", category) if alias.strip()}
+    if heads & BANDED_CATEGORIES:
         return False, "texture_or_crowd_category"
-    if category in BACKGROUND_CATEGORIES:
+    if heads & BACKGROUND_CATEGORIES:
         return False, "background_category"
     return True, None
 
