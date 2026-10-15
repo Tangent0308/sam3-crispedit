@@ -87,6 +87,7 @@ class VLLMSelector:
             )
         self.SamplingParams = SamplingParams
         self.processor = AutoProcessor.from_pretrained(model_id, padding_side="left")
+        from .mllm_runtime import architecture_options
         llm_kwargs = dict(model=model_id, dtype="bfloat16", tensor_parallel_size=tensor_parallel_size,
                           max_model_len=max_model_len, trust_remote_code=True,
                           max_num_seqs=8, max_num_batched_tokens=8192,
@@ -99,6 +100,7 @@ class VLLMSelector:
         mm_backend = os.environ.get("SA1B_MM_ENCODER_ATTN_BACKEND")
         if mm_backend:
             llm_kwargs["mm_encoder_attn_backend"] = mm_backend
+        llm_kwargs.update(architecture_options(model_id, tensor_parallel_size))
         self.llm = LLM(**llm_kwargs)
         self.params = SamplingParams(temperature=temperature, max_tokens=max_new_tokens,
                                      top_p=1.0, stop=["<|im_end|>"])

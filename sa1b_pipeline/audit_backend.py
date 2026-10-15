@@ -26,7 +26,8 @@ def parse_audit(raw):
 
 class VLLMAuditor:
     def __init__(self, model_id, *, batch_size=4, max_model_len=16384,
-                 gpu_memory_utilization=.88, max_tokens=512, cache_inputs=True, check_operation=False):
+                 gpu_memory_utilization=.88, max_tokens=512, cache_inputs=True, check_operation=False,
+                 tensor_parallel_size=1):
         from transformers import AutoProcessor
         from vllm import LLM, SamplingParams
         from .model_cache import resolve_model
@@ -35,8 +36,10 @@ class VLLMAuditor:
             raise ValueError('batch_size must be positive')
         self.processor = AutoProcessor.from_pretrained(model_id)
         cache_options = {} if cache_inputs else {'mm_processor_cache_gb': 0}
+        from .mllm_runtime import architecture_options
+        cache_options.update(architecture_options(model_id, tensor_parallel_size))
         self.llm = LLM(
-            model=model_id, dtype='bfloat16', tensor_parallel_size=1,
+            model=model_id, dtype='bfloat16', tensor_parallel_size=tensor_parallel_size,
             max_model_len=max_model_len, max_num_seqs=batch_size,
             max_num_batched_tokens=8192, gpu_memory_utilization=gpu_memory_utilization,
             enforce_eager=True, trust_remote_code=True,

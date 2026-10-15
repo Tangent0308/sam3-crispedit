@@ -59,7 +59,16 @@ def _row_area_bucket(row: dict[str, Any]) -> str:
             size = rle.get("size")
             try:
                 height, width = int(size[0]), int(size[1])
-                value = float(load_mask(obj, (width, height)).sum()) / max(1, width * height)
+                if isinstance(rle.get("counts"), (str, bytes)):
+                    try:
+                        from pycocotools import mask as coco_mask
+                    except ImportError:
+                        area = float(load_mask(obj, (width, height)).sum())
+                    else:
+                        area = float(coco_mask.area(rle))
+                else:
+                    area = float(load_mask(obj, (width, height)).sum())
+                value = area / max(1, width * height)
             except (TypeError, ValueError, KeyError, IndexError, OSError, RuntimeError):
                 bbox = obj.get("bbox") or [0, 0, 0, 0]
                 try:
@@ -102,7 +111,7 @@ def _auditor(args):
         return None
     from sa1b_pipeline.audit_backend import VLLMAuditor
     return VLLMAuditor(args.audit_model, batch_size=args.audit_batch_size,
-                       max_tokens=512, check_operation=False)
+                       max_tokens=512, check_operation=False, tensor_parallel_size=args.audit_tp)
 
 
 def _manual_review_pass(row: dict[str, Any]) -> bool:
@@ -380,6 +389,7 @@ def main(argv=None):
     p.add_argument("--editor-model")
     p.add_argument("--editor-dtype", default="bf16")
     p.add_argument("--audit-model")
+    p.add_argument("--audit-tp", type=int, default=1)
     p.add_argument("--audit-batch-size", type=int, default=4)
     p.add_argument("--human-review", type=Path,
                    help="JSONL ledger with explicit human decisions; required for --publish")
