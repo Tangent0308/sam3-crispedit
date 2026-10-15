@@ -17,6 +17,49 @@ from .production_state import atomic_json
 from .validate import deterministic_check
 
 
+_WORKER_EDITOR = None
+
+
+def _init_editor_worker(devices, model: str, dtype: str) -> None:
+    import os
+    from multiprocessing.util import Finalize
+    os.environ["CUDA_VISIBLE_DEVICES"] = devices.get()
+    from .editor import DiffusersQwenImageEditor
+    global _WORKER_EDITOR
+    _WORKER_EDITOR = DiffusersQwenImageEditor(model, steps=40, dtype=dtype, crop_instruction=False)
+    Finalize(_WORKER_EDITOR, _WORKER_EDITOR.pipe.close, exitpriority=10)
+
+
+def _generate_worker_job(job):
+    group, directory, kind = job
+    fn = generate_twin_group if kind == "twins" else generate_multi_group
+    result = fn(group, directory, _WORKER_EDITOR, seed=0)
+    atomic_json(Path(directory) / "group.json", result)
+    return result
+
+
+def parallel_group_generation(groups, root, *, kind, model, dtype, devices):
+    """Explicit GPUs, one persistent editor per GPU, dynamically scheduled whole groups."""
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    if not devices or len(set(devices)) != len(devices):
+        raise ValueError("editor devices must be nonempty and unique")
+    context = mp.get_context("spawn")
+    queue = context.Queue()
+    for device in devices:
+        queue.put(str(device))
+    try:
+        with ProcessPoolExecutor(max_workers=len(devices), mp_context=context,
+                                 initializer=_init_editor_worker, initargs=(queue, model, dtype)) as pool:
+            futures = [pool.submit(_generate_worker_job, (group,
+                       str(Path(root) / (group.get("twin_id") or group.get("multi_id"))), kind)) for group in groups]
+            for future in as_completed(futures):
+                yield future.result()
+    finally:
+        queue.close()
+        queue.join_thread()
+
+
 def _write_mask(path: Path, mask: np.ndarray) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
@@ -102,12 +145,37 @@ def _row(group: dict[str, Any], member: dict[str, Any], source: str, edited: str
 def _support_for(editor: Any, source: str, unit: dict[str, Any], path: Path) -> str:
     with Image.open(source) as image:
         size = image.size
-    mask = load_mask({"mask_path": unit["mask_path"]}, size)
     if hasattr(editor, "support_mask"):
         support = editor.support_mask(Image.open(source).convert("RGB"), unit)
     else:
-        support = region_support_mask(mask, unit["operation"], unit.get("support_policy"))
+        from .specialist_editors import writable_mask
+        support = writable_mask(unit, size, require_add_placement=False)
     return _write_mask(path, support)
+
+
+def twin_support_preflight(group: dict[str, Any], output_dir: str | Path,
+                           editor: Any = None) -> dict[str, Any]:
+    """Resolve the actual writable masks before any expensive editor call."""
+    members = group["members"]
+    with Image.open(group["source_image"]) as source:
+        size = source.size
+    supports = []
+    for member in members:
+        path = Path(output_dir) / f"member_{member['unit_id']}" / "support_mask.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        member["support_mask"] = _support_for(editor, group["source_image"], _unit_dict(member), path)
+        supports.append(load_mask({"mask_path": member["support_mask"]}, size))
+    pairs = []
+    for i, left in enumerate(members):
+        for j in range(i + 1, len(members)):
+            right = members[j]
+            short = min(min(m["bbox"][2] - m["bbox"][0], m["bbox"][3] - m["bbox"][1])
+                        for m in (left, right))
+            required = max(16.0, 0.1 * short)
+            gap = gap_pixels(supports[i], supports[j])
+            pairs.append({"members": [left["unit_id"], right["unit_id"]],
+                          "gap_pixels": gap, "required_gap_pixels": required, "pass": gap >= required})
+    return {"pass": bool(pairs) and all(p["pass"] for p in pairs), "pairs": pairs}
 
 
 def _check_cross_preservation(source: str, edited: str, other_mask: str) -> float:
@@ -125,6 +193,11 @@ def generate_twin_group(group: dict[str, Any], output_dir: str | Path, editor: A
     source = group["source_image"]
     if not Path(source).is_file():
         raise FileNotFoundError(source)
+    preflight = twin_support_preflight(group, output_dir, editor)
+    if not preflight["pass"]:
+        group["group_checks"] = {**group.get("group_checks", {}), "support_gap": preflight,
+                                 "generation_skipped": True, "group_pass": False}
+        return group
     outputs = []
     supports = []
     for index, member in enumerate(group["members"], 1):
@@ -135,7 +208,7 @@ def generate_twin_group(group: dict[str, Any], output_dir: str | Path, editor: A
         state = unit_dir / "generation.json"
         started = time.perf_counter()
         context = _render_member(source, unit, output, editor, seed)
-        support = _support_for(editor, source, unit, unit_dir / "support_mask.png")
+        support = member["support_mask"]
         row = _row(group, member, source, str(output), support,
                    generation_context=context)
         row["seed"] = seed
@@ -147,20 +220,7 @@ def generate_twin_group(group: dict[str, Any], output_dir: str | Path, editor: A
         outputs.append(row); supports.append(support)
         atomic_json(state, {"row": row, "fingerprint": hashlib.sha256(json.dumps(unit, sort_keys=True).encode()).hexdigest()})
     cross = []
-    support_gaps = []
-    for i, left in enumerate(group["members"]):
-        for right in group["members"][i + 1:]:
-            with Image.open(source) as image:
-                size = image.size
-            left_support = load_mask({"mask_path": left["support_mask"]}, size)
-            right_support = load_mask({"mask_path": right["support_mask"]}, size)
-            gap = gap_pixels(left_support, right_support)
-            left_short = min(left["bbox"][2] - left["bbox"][0], left["bbox"][3] - left["bbox"][1])
-            right_short = min(right["bbox"][2] - right["bbox"][0], right["bbox"][3] - right["bbox"][1])
-            required = max(16.0, 0.1 * min(left_short, right_short))
-            support_gaps.append({"members": [left["unit_id"], right["unit_id"]],
-                                 "gap_pixels": gap, "required_gap_pixels": required,
-                                 "pass": gap >= required})
+    support_gaps = preflight["pairs"]
     for i, left in enumerate(group["members"]):
         for j, right in enumerate(group["members"]):
             if i == j:

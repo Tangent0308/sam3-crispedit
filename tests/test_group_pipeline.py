@@ -541,3 +541,112 @@ def test_twin_category_exclusions_cover_modified_nouns_not_materials():
         assert not category_allowed(name)[0]
     for name in ("stone fountain", "wall clock", "leaf-shaped pendant", "brick chimney", "shirt sleeve"):
         assert category_allowed(name)[0]
+
+
+def test_twin_grounding_rejects_scope_collection_hidden_site_and_noop():
+    import copy
+    import pytest
+    from sa1b_pipeline.group_planning import validate_twin_grounding
+    base = {"grounding_version": 2, "scope": "screen", "operation": "add", "members": [
+        {"grounding": {"entity": "screen", "kind": "object", "distinction": "on left desk",
+                       "site_visible": True, "edit_feasible": True, "current_value": "black"}},
+        {"grounding": {"entity": "screen", "kind": "object", "distinction": "on right desk",
+                       "site_visible": True, "edit_feasible": True, "current_value": "gray"}}]}
+    validate_twin_grounding(base)
+    for field, value in (("entity", "screen edge"), ("kind", "collection"),
+                         ("site_visible", False), ("edit_feasible", False), ("distinction", "")):
+        bad = copy.deepcopy(base)
+        bad["members"][1]["grounding"][field] = value
+        with pytest.raises(ValueError):
+            validate_twin_grounding(bad)
+    bad = copy.deepcopy(base)
+    bad.update(operation="attribute", attributes=[{"property": "color", "value": "gray"}])
+    with pytest.raises(ValueError, match="already present"):
+        validate_twin_grounding(bad)
+
+
+def test_joint_twin_audit_requires_all_members_and_deterministic_gates():
+    import copy
+    from sa1b_pipeline.group_audit import _apply_joint_twin_audit, JOINT_MEMBER_FIELDS
+    group = {"members": [{"unit_id": "U1"}, {"unit_id": "U2"}], "group_checks": {
+        k: {"pass": True} for k in ("deterministic", "cross_target_preservation", "support_gap")}}
+    result = {"semantic_audit": {"members": [{"unit_id": uid, **{k: True for k in JOINT_MEMBER_FIELDS}}
+              for uid in ("U1", "U2")], "same_scope": True, "shared_edit_valid": True}}
+    good = copy.deepcopy(group)
+    _apply_joint_twin_audit(good, result)
+    assert good["group_checks"]["group_pass"]
+    for mode in ("missing", "scope", "truncated", "gate"):
+        g, r = copy.deepcopy(group), copy.deepcopy(result)
+        if mode == "missing": r["semantic_audit"]["members"].pop()
+        if mode == "scope": r["semantic_audit"]["members"][1]["scope_correct"] = False
+        if mode == "truncated": r["finish_reason"] = "length"
+        if mode == "gate": g["group_checks"]["support_gap"]["pass"] = False
+        _apply_joint_twin_audit(g, r)
+        assert not g["group_checks"]["group_pass"]
+
+
+def test_twin_overlapping_support_skips_editor_before_any_generation(tmp_path):
+    from sa1b_pipeline.group_generation import generate_twin_group
+    image, objects = _source(tmp_path)
+    class NeverEditor:
+        def generate(self, *args, **kwargs):
+            raise AssertionError("generation must not run for overlapping supports")
+    members = [{"unit_id": uid, "object_id": str(i), "mask": objects[0]["mask_path"],
+                "operation": "attribute", "instruction": "Change the backpack to yellow.",
+                "bbox": [12, 20, 36, 48], "instruction_spec": {}}
+               for i, uid in enumerate(("U1", "U2"))]
+    group = generate_twin_group({"source_image": str(image), "members": members}, tmp_path / "out", NeverEditor())
+    assert group["group_checks"]["generation_skipped"]
+    assert not list((tmp_path / "out").rglob("edited.png"))
+
+
+def test_grounded_replace_rejects_material_only_same_entity():
+    import pytest
+    from sa1b_pipeline.group_planning import validate_twin_grounding
+    plan = {"grounding_version": 2, "scope": "hinge", "operation": "replace",
+            "payload": "a polished stainless steel hinge", "replacement_form": "stainless steel hinge",
+            "members": [{"grounding": {"entity": "hinge", "kind": "part",
+                        "distinction": "upper hinge", "edit_feasible": True}}]}
+    with pytest.raises(ValueError, match="only material"):
+        validate_twin_grounding(plan)
+    plan.update(payload="a butterfly hinge", replacement_form="butterfly-shaped plates")
+    validate_twin_grounding(plan)
+
+
+def test_joint_observation_audit_uncertainty_fails_closed():
+    from sa1b_pipeline.group_audit import _apply_joint_twin_audit, JOINT_MEMBER_FIELDS
+    g = {"members": [{"unit_id": "U1"}], "group_checks": {}}
+    row = {"unit_id": "U1", "observed_entity": "door leaf", "ref_entity": "whole door",
+           "observed_change": "red panel", "checks": {k: "pass" for k in JOINT_MEMBER_FIELDS}}
+    row["checks"]["scope_correct"] = "uncertain"
+    _apply_joint_twin_audit(g, {"semantic_audit": {"members": [row], "same_scope": "pass", "shared_edit_valid": "pass"}})
+    assert g["members"][0]["semantic_audit"]["scope_correct"] is False
+    assert not g["group_checks"]["semantic_audit_pass"]
+
+
+def test_operation_priority_preserves_other_candidates_and_rejects_cheek_removal():
+    from sa1b_pipeline.group_selection import twin_operation_priority, _cheap_operation_allowed
+    assert twin_operation_priority([{"category": "backpack,bag"}], "add") > twin_operation_priority([{"category": "concrete"}], "add")
+    assert not _cheap_operation_allowed({"category": "cheek", "bbox": [10, 10, 30, 30]}, "remove", (100, 100))
+    assert _cheap_operation_allowed({"category": "armchair", "bbox": [10, 10, 30, 30]}, "remove", (100, 100))
+
+
+def test_parallel_generation_rejects_duplicate_device_ownership():
+    import pytest
+    from sa1b_pipeline.group_generation import parallel_group_generation
+    with pytest.raises(ValueError, match="unique"):
+        list(parallel_group_generation([], "/tmp/unused", kind="twins", model="unused", dtype="bf16", devices=["0", "0"]))
+
+
+def test_fast_dilation_matches_original_square_kernel_at_edges_and_holes():
+    from sa1b_pipeline.editor import _dilate
+    rng = np.random.default_rng(42)
+    masks = [rng.random((27, 39)) > .9, np.zeros((7, 11), bool), np.ones((7, 11), bool)]
+    for mask in masks:
+        for radius in (0, 1, 8, 16):
+            padded = np.pad(mask, radius)
+            reference = np.zeros_like(mask)
+            for dy in range(2 * radius + 1):
+                for dx in range(2 * radius + 1):
+                    reference |= padded[dy:dy + mask.shape[0], dx:dx + mask.shape[1]]
+            assert np.array_equal(_dilate(mask, radius), reference)

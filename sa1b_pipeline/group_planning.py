@@ -57,6 +57,79 @@ empty list, or null value for a field required by its operation.
 '''
 
 
+TWIN_GROUNDING_CONTRACT = r'''
+GROUNDING v2: in this SAME response, identify each white selector BEFORE choosing the shared edit.
+Add grounding_version=2 to the JSON. Each members entry must also contain:
+"grounding":{"entity":"exact singular noun matching scope", "kind":"object|part|collection",
+"host":"host noun or empty string", "current_value":"current requested property, or empty string",
+"distinction":"short visible fact uniquely distinguishing this instance in the FULL scene",
+"site_visible":true, "edit_feasible":true}.
+entity names the mask itself: one door leaf is not a double door; a rim excludes the tire;
+a strip of a box is not the whole box. A collection or fragments of one shared object cannot
+form independent twin instances. All entities must match the shared scope and have the same kind.
+Do not invent a host to make a ref unique. Use the shortest unambiguous noun phrase; prefer a
+verified host relation over vague left/right when several similar objects share one side.
+An ordinal must enumerate an unambiguous set visible in the original image.
+For attribute, current_value describes the selected property for EACH member. Choose a value
+different from every member. Prefer an editable surface without complicated lettering when there
+are several natural property choices. Preserve existing markings unless explicitly editing them.
+For add, site_visible is true only if the SAME requested attachment/support site is visibly
+available on EACH host. A top edge outside the image is unavailable. First find a shared usable
+site, then choose a conventional accessory. Never expand a partial host mask into a whole host.
+For replace, add top-level replacement_form="brief concrete shape/design difference". A material
+or color difference alone is insufficient. For remove, both objects must be independently removable
+without disabling an essential structure or leaving unsupported fragments.
+For non-add operations set site_visible=true. Set edit_feasible=false if the assigned operation
+cannot be natural for that member; then return feasible=false for the group. Do not change type.
+Keep evidence and grounding concise. These fields are internal and must not lengthen instructions.
+'''
+
+
+def validate_twin_grounding(plan: dict[str, Any]) -> None:
+    """Validate explicit contradictions, never treat self-reported fields as visual proof."""
+    if plan.get("grounding_version") != 2:
+        raise ValueError("missing twin grounding v2")
+    scope = str(plan.get("scope", "")).strip().casefold()
+    kinds = set()
+    operation = plan.get("operation")
+    for member in plan.get("members", []):
+        binding = member.get("grounding") or {}
+        if str(binding.get("entity", "")).strip().casefold() != scope:
+            raise ValueError("mask entity differs from shared scope")
+        if binding.get("kind") not in {"object", "part"}:
+            raise ValueError("twin selector is not one object or part")
+        kinds.add(binding["kind"])
+        if not str(binding.get("distinction", "")).strip():
+            raise ValueError("missing full-scene distinction")
+        if binding.get("edit_feasible") is not True:
+            raise ValueError("shared edit infeasible for member")
+        if operation == "add" and binding.get("site_visible") is not True:
+            raise ValueError("shared add site is not visible on every member")
+        if operation == "attribute":
+            current = str(binding.get("current_value", "")).strip().casefold()
+            if not current:
+                raise ValueError("missing original attribute value")
+            for attr in plan.get("attributes", []):
+                target = str(attr.get("value", "")).strip().casefold()
+                if target and (target == current or re.search(r"(?<!\w)" + re.escape(target) + r"(?!\w)", current)):
+                    raise ValueError("attribute value already present in grounded source")
+    if len(kinds) != 1:
+        raise ValueError("twin instance granularity mismatch")
+    if operation == "replace" and not str(plan.get("replacement_form", "")).strip():
+        raise ValueError("missing replacement physical design difference")
+    if operation == "replace":
+        # Catch explicit material/color-only rewrites of the SAME noun. This
+        # cannot certify a design change; remaining cases still need vision.
+        property_words = set("a an the new different modern polished matte glossy shiny smooth rough "
+            "wood wooden metal metallic steel stainless plastic ceramic glass marble stone concrete "
+            "brass copper gold golden silver aluminum aluminium alloy leather fabric black white red "
+            "blue green yellow orange purple pink gray grey brown beige bright dark light solid".split())
+        payload_words = set(re.findall(r"[a-z]+", str(plan.get("payload", "")).casefold()))
+        scope_words = set(re.findall(r"[a-z]+", scope))
+        if payload_words and not (payload_words - scope_words - property_words):
+            raise ValueError("replacement changes only material/color/finish of the same noun")
+
+
 def _overlay(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.ndarray], *, labels: bool = True) -> Image.Image:
     canvas = source.convert("RGB").copy()
     arr = np.asarray(canvas).copy()
@@ -191,7 +264,7 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
 
 
 def twin_prompt(assigned_operation: str, objects: list[dict[str, Any]]) -> str:
-    return TWIN_PROMPT + "\nAssigned operation: " + assigned_operation + "\nCandidates:\n" + "\n".join(
+    return TWIN_PROMPT + TWIN_GROUNDING_CONTRACT + "\nAssigned operation: " + assigned_operation + "\nCandidates:\n" + "\n".join(
         f"- object_id={o['object_id']}, category={o.get('category','object')}" for o in objects)
 
 
@@ -239,7 +312,10 @@ def _validate_group_edit_fields(plan: dict[str, Any]) -> None:
 
 def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], plan: dict[str, Any],
                      mask_paths: list[str], *, split: str, scope_level: str, group_id: str,
-                     geometry: list[dict[str, Any]], assigned_operation: str | None = None) -> dict[str, Any]:
+                     geometry: list[dict[str, Any]], assigned_operation: str | None = None,
+                     require_grounding: bool = False) -> dict[str, Any]:
+    if plan.get("feasible") is False:
+        raise ValueError("infeasible twin plan: " + str(plan.get("reason") or plan.get("evidence") or "no shared natural edit"))
     if assigned_operation is not None and plan.get("operation") != assigned_operation:
         raise ValueError("twin assigned operation mismatch")
     if split == "eval" and len(objects) != 2:
@@ -248,6 +324,8 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         raise ValueError("twin add requires a direct support anchor")
     if plan.get("feasible") is not True or plan.get("operation") not in {"add", "replace", "remove", "attribute"}:
         raise ValueError("infeasible or invalid twin plan")
+    if require_grounding or plan.get("grounding_version") == 2:
+        validate_twin_grounding(plan)
     _validate_group_edit_fields(plan)
     members = plan.get("members")
     if not isinstance(members, list) or len(members) != len(objects):

@@ -238,12 +238,14 @@ def _dilate(mask, radius: int):
     import numpy as np
     if radius <= 0:
         return mask.astype(bool)
-    padded = np.pad(mask.astype(bool), radius, mode="constant")
-    result = np.zeros_like(mask, dtype=bool)
-    for dy in range(2 * radius + 1):
-        for dx in range(2 * radius + 1):
-            result |= padded[dy:dy + mask.shape[0], dx:dx + mask.shape[1]]
-    return result
+    # A square dilation is separable. The previous nested offsets scanned
+    # the full SA-1B canvas (2r+1)^2 times, although the output is identical
+    # to two linear-time maximum filters. Preserve the exact square kernel
+    # and zero boundary convention; this is not a mask approximation.
+    from scipy.ndimage import maximum_filter1d
+    result = maximum_filter1d(np.asarray(mask, dtype=bool), 2 * radius + 1,
+                              axis=0, mode="constant", cval=0)
+    return maximum_filter1d(result, 2 * radius + 1, axis=1, mode="constant", cval=0)
 
 
 def _feather(mask, radius: int):
