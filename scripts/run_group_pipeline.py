@@ -102,6 +102,32 @@ def _auditor(args):
                        max_tokens=512, check_operation=False)
 
 
+def _manual_review_pass(row: dict[str, Any]) -> bool:
+    """Return true only for an explicitly signed, all-fields-passing review."""
+    decision = str(row.get("decision", "")).strip().lower()
+    status = str(row.get("status", "")).strip().lower()
+    return bool(str(row.get("reviewer", "")).strip()) and decision in {"pass", "manual_pass", "approved"} \
+        and status in {"pass", "manual_pass", "approved", "reviewed"} \
+        and all(row.get(field) is True for field in
+                ("reference_correct", "target_done", "non_target_preserved", "natural"))
+
+
+def _require_manual_review(groups: list[dict[str, Any]], path: Path, *, kind: str, split: str) -> dict[str, Any]:
+    """Gate publication on the required human sample without trusting 27B as human."""
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    by_id = {str(row.get("group_id")): row for row in rows if row.get("group_id")}
+    expected = [str(group.get("twin_id") or group.get("multi_id")) for group in groups]
+    valid_ids = {gid for gid in expected if _manual_review_pass(by_id.get(gid, {}))}
+    required = len(expected) if split == "eval" else (200 if kind == "twins" else 100)
+    required = min(required, len(expected))
+    if len(valid_ids) < required:
+        raise RuntimeError(
+            f"human review gate failed: {len(valid_ids)} passing groups, "
+            f"need {required} for {split} {kind}")
+    return {"path": str(path), "passing_groups": len(valid_ids), "required_groups": required,
+            "all_eval_groups": split == "eval" and len(valid_ids) == len(expected)}
+
+
 def _geometry(mask_paths: list[str]) -> list[dict[str, Any]]:
     result = []
     from sa1b_pipeline.group_geometry import precise_point
@@ -312,6 +338,8 @@ def main(argv=None):
     p.add_argument("--editor-dtype", default="bf16")
     p.add_argument("--audit-model")
     p.add_argument("--audit-batch-size", type=int, default=4)
+    p.add_argument("--human-review", type=Path,
+                   help="JSONL ledger with explicit human decisions; required for --publish")
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--selection-only", action="store_true",
                    help="select and persist grouped inputs without loading a planner model")
@@ -503,8 +531,14 @@ def main(argv=None):
             if len(final) >= args.target:
                 continue
         final.append(group)
-    if args.publish and not args.audit_model:
-        raise RuntimeError("--publish requires --audit-model and completed 27B semantic audits")
+    human_review_summary = {"required": False}
+    if args.publish:
+        if not args.audit_model:
+            raise RuntimeError("--publish requires --audit-model and completed 27B semantic audits")
+        if not args.human_review or not args.human_review.is_file():
+            raise RuntimeError("--publish requires --human-review with explicit human decisions")
+        human_review_summary = {"required": True, **_require_manual_review(
+            final, args.human_review, kind=args.kind, split=args.split)}
     final_path = root / "final" / ("twins_train.jsonl" if args.kind == "twins" and args.split == "train" else
                                     "twins_eval.jsonl" if args.kind == "twins" else
                                     "multi_train.jsonl" if args.split == "train" else "multi_eval.jsonl")
@@ -514,7 +548,8 @@ def main(argv=None):
         assert_no_eval_leakage(exported, args.reservation)
     write_jsonl(final_path, exported)
     atomic_json(root / "release.json", {"groups": len(exported), "requested": args.target,
-                                        "human_review": False, "semantic_audit": bool(args.audit_model),
+                                        "human_review": human_review_summary,
+                                        "semantic_audit": bool(args.audit_model),
                                         "published": bool(args.publish), "final": str(final_path)})
     print(json.dumps({"status": "generated", "groups": len(exported), "final": str(final_path)}, ensure_ascii=False))
     return 0

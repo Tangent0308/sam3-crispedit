@@ -66,6 +66,8 @@ if [[ "${GROUP_PLAN_ONLY:-0}" == 1 ]]; then
   ARGS+=(--plan-only)
 fi
 if [[ "${GROUP_PUBLISH:-0}" == 1 ]]; then
+  : "${GROUP_HUMAN_REVIEW:?set GROUP_HUMAN_REVIEW to the completed human_review.jsonl ledger}"
+  ARGS+=(--human-review "$GROUP_HUMAN_REVIEW")
   ARGS+=(--publish)
 fi
 
