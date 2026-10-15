@@ -419,7 +419,8 @@ def test_binary_audit_panel_preserves_shape_and_separates_locator(tmp_path):
 def test_binary_audit_prompt_matches_locator_roles():
     from sa1b_pipeline.validate import AUDIT_PROMPT, audit_prompt
     instruction='Tint the window gray.'
-    assert audit_prompt(instruction)==AUDIT_PROMPT.replace('{instruction}',instruction)
+    from sa1b_pipeline.instruction_protocol import BLIND_RULE
+    assert audit_prompt(instruction)==AUDIT_PROMPT.replace('{instruction}',instruction)+'\n'+BLIND_RULE
     prompt=audit_prompt(instruction,binary_locator=True)
     assert 'MASK ONLY' in prompt and 'White in MASK ONLY identifies' in prompt
     assert 'cyan' not in prompt and instruction in prompt

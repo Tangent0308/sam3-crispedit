@@ -90,7 +90,7 @@ def test_add_instruction_requires_a_new_item_payload(tmp_path: Path):
                        "payload": "Add a small brass badge to the chair"}, obj,
                       str(tmp_path / "m.png"), geometry, [])
     assert unit.payload == "a small brass badge"
-    assert unit.instruction_noref == "Add a small brass badge to the selected chair."
+    assert unit.instruction_noref == "Add a small brass badge to the selected region."
 
 
 def test_remove_editor_prompt_requires_background_reconstruction():

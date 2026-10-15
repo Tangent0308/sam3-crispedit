@@ -5,6 +5,8 @@ the visual decisions auditable and all-or-nothing at group level.
 """
 from __future__ import annotations
 
+from .instruction_protocol import BLIND_RULE
+
 import json
 from pathlib import Path
 from typing import Any, Iterable
@@ -58,6 +60,8 @@ def _target_contract(group: dict[str, Any], *, kind: str) -> str:
         lines.append(
             f"{member.get('unit_id', f'U{index}')}: object_id={member.get('object_id')}; "
             f"ref={member.get('ref') or member.get('ref_phrase')}; "
+            f"noref={member.get('instruction_noref')}; "
+            f"site={(member.get('instruction_spec') or {}).get('placement', {}).get('site', '')}; "
             f"operation={member.get('operation')}; instruction={member.get('instruction') or member.get('instruction_ref')}"
         )
     return "\n".join(lines)
@@ -153,7 +157,7 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
         # Clean context plus labeled clean/binary crops localize without tint.
         images = [group["source_image"], comparison]
         jobs.append({"job_id": group["twin_id"], "images": images[:3],
-                     "prompt": TWIN_GROUP_PROMPT + "\nTarget contract:\n" +
+                     "prompt": TWIN_GROUP_PROMPT + "\n" + BLIND_RULE + "\nTarget contract:\n" +
                      _target_contract(group, kind="twins")})
     # The source plus one tiled comparison stays within the three-image limit
     # while showing every member, including optional three-member groups.
@@ -189,6 +193,12 @@ For each member first identify the actual white-mask entity and extent. A door l
 door; a rim excludes the tire; multiple leaves are not one leaf. Then test its reference against ALL
 similar instances in image 1. Left/right in a ref means the full original scene, not row order.
 Reject collections, unequal instance granularity, enlarged ref scopes, ambiguous refs, and wrong targets.
+The delivered mask is the actual edited source region. For add it is the attachment SITE,
+not necessarily the entire host named in Ref. Verify the site lies on that named host.
+No-ref deliberately supplies NO entity identity; do not infer the masked noun from it.
+For each member first describe white pixels independently of Ref, then compare to Ref.
+A door hinge is not a handle. A bag fragment is not a whole bag; check printed remnants.
+Never excuse a mismatch merely because the generated image looks natural.
 Check the actual requested operation: attribute changes only the requested property and retains
 unrequested lettering, logos, geometry and other surfaces. Replace requires a different physical
 form/design; merely changing material or color is attribute. Add requires visible contact at the
@@ -264,7 +274,7 @@ def audit_twin_groups_joint(groups: list[dict[str, Any]], model: VLLMAuditor,
         full = _member_comparison([m["edited_image"] for m in group["members"]],
                                  panel_dir / f"{group['twin_id']}_full.jpg")
         jobs.append({"job_id": group["twin_id"], "images": [group["source_image"], comparison, full],
-                     "prompt": JOINT_TWIN_PROMPT + "\nTarget contract:\n" + _target_contract(group, kind="twins")})
+                     "prompt": JOINT_TWIN_PROMPT + "\n" + BLIND_RULE + "\nTarget contract:\n" + _target_contract(group, kind="twins")})
     for group, result in zip(groups, _call_batched(model, jobs)):
         _apply_joint_twin_audit(group, result)
     return groups
@@ -288,7 +298,7 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
         if comparison_paths:
             images.append(_member_comparison(comparison_paths, panel_dir / f"{group['multi_id']}_comparison.jpg"))
         jobs.append({"job_id": group["multi_id"], "images": images[:3],
-                     "prompt": MULTI_GROUP_PROMPT + "\nTarget contract:\n" +
+                     "prompt": MULTI_GROUP_PROMPT + "\n" + BLIND_RULE + "\nTarget contract:\n" +
                      _target_contract(group, kind="multi")})
     results = []
     for group, audits, result in zip(groups, member_audits, _call_batched(model, jobs)):
@@ -304,7 +314,7 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
         semantic_pass = _semantic_group_pass(audit, MULTI_REQUIRED_AUDIT_FIELDS)
         joint["semantic_audit_pass"] = semantic_pass
         step_pass = all(x.get("decision") != "fail" for x in joint.get("steps", []))
-        joint["pass"] = bool(member_pass and step_pass and joint.get("outside_union_support_fraction", 1.0) <= 0.02
+        joint["pass"] = bool(joint.get("blind_protocol", {}).get("pass") is True and member_pass and step_pass and joint.get("outside_union_support_fraction", 1.0) <= 0.02
                               and semantic_pass)
         results.append(group)
     return results

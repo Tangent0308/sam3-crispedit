@@ -15,6 +15,7 @@ from .geometry import load_mask
 from .group_geometry import gap_pixels, precise_point
 from .production_state import atomic_json
 from .validate import deterministic_check
+from .source_regions import resolve_source_region, blind_group_check
 
 
 _WORKER_EDITOR = None
@@ -131,6 +132,9 @@ def _row(group: dict[str, Any], member: dict[str, Any], source: str, edited: str
     unit = _unit_dict(member)
     return {"group_id": group.get("twin_id") or group.get("multi_id"),
             "source_id": group["source_id"], "source_image": source,
+            **{k: member[k] for k in ("mask_v1", "bbox_v1", "point_v1", "blind_eligible",
+                "blind_ineligible_reason", "source_region_resolution", "mask_semantics",
+                "instruction_protocol_version", "instruction_style_version") if k in member},
             "edited_image": edited, "mask": member["mask"], "support_mask": support,
             "execution_mask_path": unit.get("execution_mask_path"),
             "protected_mask_path": unit.get("protected_mask_path"),
@@ -209,6 +213,7 @@ def generate_twin_group(group: dict[str, Any], output_dir: str | Path, editor: A
         started = time.perf_counter()
         context = _render_member(source, unit, output, editor, seed)
         support = member["support_mask"]
+        resolve_source_region(member, source, str(output), unit_dir)
         row = _row(group, member, source, str(output), support,
                    generation_context=context)
         row["seed"] = seed
@@ -227,14 +232,17 @@ def generate_twin_group(group: dict[str, Any], output_dir: str | Path, editor: A
                 continue
             cross.append({"member": left["unit_id"], "other": right["unit_id"],
                           "changed_fraction_in_other_source_mask": _check_cross_preservation(
-                              source, left["edited_image"], right["mask"])})
-    deterministic_pass = all(r["deterministic"].get("decision") != "fail" for r in outputs)
+                              source, left["edited_image"], right.get("mask_v1") or right["mask"]),
+                          "protection_mask": right.get("mask_v1") or right["mask"]})
+    blind = blind_group_check(group)
+    deterministic_pass = blind["pass"] and all(r["deterministic"].get("decision") != "fail" for r in outputs)
     cross_pass = all(x["changed_fraction_in_other_source_mask"] <= 0.02 for x in cross)
     gap_pass = all(x["pass"] for x in support_gaps)
     semantic_audits = semantic_audits or {}
     semantic_pass = bool(semantic_audits) and all(
         semantic_audits.get(m["unit_id"], {}).get("decision") == "pass" for m in group["members"])
     group["group_checks"] = {**group.get("group_checks", {}),
+                              "blind_protocol": blind,
                               "deterministic": {"pass": deterministic_pass, "members": [r["deterministic"] for r in outputs]},
                               "cross_target_preservation": {"pass": cross_pass, "pairs": cross},
                               "support_gap": {"pass": gap_pass, "pairs": support_gaps},
@@ -276,6 +284,7 @@ def generate_multi_group(group: dict[str, Any], output_dir: str | Path, editor: 
         output = unit_dir / "edited.png"
         context = _render_member(current, unit, output, editor, seed)
         support = _support_for(editor, current, unit, unit_dir / "support_mask.png")
+        resolve_source_region(member, current, str(output), unit_dir)
         row = _row(group, member, current, str(output), support, input_image=current,
                    output_image=str(output), step=step, generation_context=context)
         row["seed"] = seed
@@ -289,11 +298,12 @@ def generate_multi_group(group: dict[str, Any], output_dir: str | Path, editor: 
     allowed = _union_support(source, group["units"])
     final_outside = _outside_fraction(source, current, allowed)
     semantic_audits = semantic_audits or {}
-    step_pass = all(r["step_audit"].get("decision") != "fail" for r in rows)
+    blind = blind_group_check(group)
+    step_pass = blind["pass"] and all(r["step_audit"].get("decision") != "fail" for r in rows)
     semantic_pass = bool(semantic_audits) and all(
         semantic_audits.get(m["unit_id"], {}).get("decision") == "pass" for m in group["units"])
     group["joint_target"] = current
-    group["joint_audit"] = {"steps": [r["step_audit"] for r in rows],
+    group["joint_audit"] = {"blind_protocol": blind, "steps": [r["step_audit"] for r in rows],
                             "outside_union_support_fraction": final_outside,
                             "semantic_audit": semantic_audits,
                             "pass": bool(step_pass and final_outside <= 0.02 and semantic_pass)}

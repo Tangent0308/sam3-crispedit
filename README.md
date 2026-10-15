@@ -55,8 +55,8 @@ python -m scripts.run_production_4node --root /path/to/run status
 
 组级结果必须通过确定性检查、27B 审核和人工复核后才能发布；`--plan-only` 只产出
 规划检查点，不会伪造目标图或人工结论。完整协议、字段和交付批次见
-`docs/PIPELINE.md` 的“分组数据扩展”章节。最新小批量与失败回归见第 7.8 节：
-当前可产出人工确认合格组，但自动准入尚不足以支撑正式放量。
+`docs/PIPELINE.md` 的“分组数据扩展”章节。新运行采用 instruction/mask 2.0 盲指代，写作风格 `benchmark-concise-3-blind-1`；最新小批量见第 7.9 节，旧 grounding 对照见第 7.8 节：
+新源图 12 个候选实际生成 9 组，自动通过 7 组，逐图确认合格 4 组；三阶段约 10.36 分钟。当前可产出人工确认合格组，但自动准入尚不足以支撑正式放量。add/site 可用 SAM3 在原审核前修正源 mask，原图与目标图保持不变。
 生成阶段可用 `--generate-only --editor-devices 0,1` 启用常驻双卡编辑器；
 单次联合审核 `--twin-audit-mode joint` 尚未通过质量对照，保持实验选项。
 

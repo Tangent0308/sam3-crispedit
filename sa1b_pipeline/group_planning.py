@@ -12,7 +12,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from .geometry import load_mask
 from .group_geometry import adjacent_pairs, twin_pair_gate, object_features, precise_point
-from .instruction_protocol import make_spec, render
+from .instruction_protocol import make_spec, render, BLIND_RULE
+from .instruction_style import INSTRUCTION_STYLE
 from .instructions import build_unit, validate_instruction
 from .mllm import parse_json
 
@@ -20,21 +21,24 @@ from .mllm import parse_json
 COLORS = [(255, 66, 66), (54, 180, 255), (255, 190, 40), (144, 88, 255), (35, 205, 120)]
 
 
-TWIN_PROMPT = r'''Plan one counterfactual twin edit group. Image 1 is the clean original scene. Image 2 has one row per candidate: a clean source crop on the LEFT and its aligned black-and-white mask on the RIGHT. White identifies the target; black is excluded. Unit and object IDs are printed above each row. Judge appearance only from clean photographs; the mask and headers are localization aids.
+TWIN_PROMPT = r'''Plan ONE counterfactual twin group in ONE response. Image 1 is the clean original scene. Image 2 has aligned source crops and binary masks, one row per candidate. White selects the source region, black excludes it. IDs only connect rows to records; never put IDs or annotation colors in instructions.
 
-The candidates are provisional geometric/category matches, not verified semantic instances. Dense labels may be wrong; verify that all white masks actually cover distinct instances of the same noun. Use the original pixels and the masks to verify the noun and write a short, unique natural reference for each candidate. One shared edit must be natural for every member. The operation is assigned and cannot be changed or silently rejected as another operation. If the assigned operation is not natural for all members, return feasible=false.
+First identify EACH mask independently from pixels. Candidate labels are deliberately withheld: the geometric preselection does not prove semantic sameness. Describe the selected physical entity, its visible extent and one excluded neighboring part in at most 16 words. Infer a mechanical part from its attachment/function, not just its color or rectangular outline. Do not call every member the same noun merely to create a group. A strap alone, a bag plus strap and a pouch are not interchangeable extents. A partial colored patch cannot authorize deleting the whole object. Occlusion, image clipping and small size alone are NOT rejection reasons when the visible target and request are clear.
 
-The no-ref instruction must be identical for all members and be rendered from one shared structured specification. References are concise noun phrases that distinguish members in the unmarked original image. Do not mention annotation colors, IDs, masks or crops. Genuine source colors and concise image-left/image-right references are allowed when needed for unique identification. For twin add, use only a directly supporting host/attachment site shared by every member; reference anchors are not allowed. Reject the group if no natural directly attached addition works for all members. For remove, never remove human anatomy or an essential support. For replace, change visible form/design, not only color. For attribute, change one plausible requested property that is visibly different on every member.
+Then decide whether ALL masks represent distinct instances of the SAME singular entity at the SAME granularity, and whether the assigned operation is natural for ALL. Reject a mismatched group with feasible=false and one concrete reason. Never change the assigned operation or omit a member. Do not select new targets.
 
-Return JSON only:
-{"feasible":true,"operation":"...","scope":"short shared noun","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","members":[{"object_id":"...","ref_phrase":"the ...","source_color":"","evidence":"brief"},...],"evidence":"brief"}
-The operation must be the assigned operation. attributes is [{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}] only for attribute. placement for add is {"relation":"on|in|around|to|...","site":"optional noun","anchor_mode":"support"}; direct support is required for twins. remove_mode is whole, part, contents, contents_only, lowerlegs or hem. Keep the edit one concise sentence after rendering.
-FIELD CONTRACT: scope is ONE shared singular object/part noun, e.g. wheel rim, never a full sentence or metadata alias list. It must describe the visible white mask itself, not an imagined subpart or the whole host of a part mask. target_part MUST be "": these candidates have no additional resolved execution sub-mask. If the mask is already a rim, use scope="wheel rim" and target_part="". Do not reinterpret a building mask as only its facade or a person mask as only their clothes.
-For remove: payload="", target_part="", attributes=[], placement=null, qualifier="". Example shared fields: scope="street lamp", operation="remove". Never put the instruction sentence in payload.
-For attribute: payload="", attributes=[{"property":"color","value":"blue"}], target_part="", placement=null, qualifier="". The property must naturally apply to the selected mask, preserve other surfaces, and differ from EVERY member's original appearance.
-For replace: payload names a different physical object/design (e.g. "a five-spoke alloy wheel rim"), never just "magenta" or a different paint color. Replacing a green stripe with a black stripe is still attribute, NOT replace. If the selected entity is only printed paint/texture and no physical replacement is natural, return feasible=false. Match replacement extent: a rim mask receives a new rim, not a whole wheel and tire. target_part="", attributes=[], placement=null, qualifier="".
-For add: payload names a conventional new physical item, placement describes its direct support/attachment to each selected host; attributes=[], target_part="", qualifier="". site is a real location noun such as "top edge" or "center", or the empty string "" when unnecessary; never write "empty", "optional", "none", or the host noun again. Rendering is: Add PAYLOAD RELATION the SITE of REF, or Add PAYLOAD RELATION REF when site="". scope/ref name the whole white selector: for a full food-cart mask, use food cart as the anchor and canopy as placement.site, never rename the entire mask canopy. Do not plant a shrub directly in solid rock or attach items to a painted line. No vague "small"/"identical" qualifiers: encode necessary size/design in payload.
-Use natural edit content. A plausible refusal is better than inventing a source object, narrowing the mask, or requesting an operation that does not fit. Return feasible=false with a concrete reason if any member cannot satisfy the assigned operation.
+For feasible groups choose ONE shared edit:
+- add: a conventional object directly supported by every host, at an actually visible shared attachment site. scope/ref name the INITIAL mask entity; placement.site names its necessary subpart (e.g. seat). The pipeline later derives the source site mask from target difference intersected with host. Do not call the whole host its subpart. No distant/adjacent reference anchors. Keep site empty only when the selected entity itself is the direct site.
+- replace: a compatible new physical form/design at the same extent, not merely another color/material. Include the new design in payload; replacement_form is a short internal explanation.
+- remove: erase the selected independent object/part naturally. Do not remove human anatomy, essential supports or only a carrying strap while leaving its bag unsupported. Do not broaden a fragment mask into the whole object.
+- attribute: one plausible property with a new value different from EVERY member's current value. Preserve unrequested shape, markings and other components. Do not reinterpret a person as clothes or an entire mixed object as one surface.
+
+Each ref is the shortest noun phrase that uniquely identifies its mask in the ORIGINAL scene. Prefer one verified distinguishing modifier; use an ordinal only with a clear counting set. For several similar objects on the same side, left/right alone is insufficient. No relative clauses, explanatory afterthoughts or invented landmarks. All members share the exact same no-ref sentence; scope must also match. Payload names new content explicitly, without 'a matching one' or 'like it'.
+
+Return valid JSON. Put members FIRST so each visual identification precedes the common edit. For every supplied ID include exactly one entry:
+{"members":[{"object_id":"ID","ref_phrase":"the ...","grounding":{"entity":"independently identified noun","kind":"object|part","host":"host noun or empty","current_value":"source property or empty","distinction":"brief visible unique fact","mask_description":"white includes ...; excludes ...","site_visible":true,"edit_feasible":true}}],"feasible":true,"grounding_version":2,"scope":"shared singular noun","operation":"ASSIGNED","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","replacement_form":"","evidence":"brief"}
+
+Fields: target_part and qualifier are empty because these source candidates have no resolved additional part mask. remove_mode=whole. For add/replace payload is the concrete new object; for remove/attribute payload is empty. For attribute attributes=[{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}], otherwise attributes=[]. Only add has placement={"relation":"on|in|attached to|...","site":"part or empty","anchor_mode":"support"}; otherwise null. For non-add site_visible=true. All grounding entities must agree with scope only AFTER independent identification; if they do not, reject. Keep all internal evidence brief. A rejected response needs only {"feasible":false,"reason":"specific visible incompatibility"}.
 '''
 
 
@@ -57,32 +61,6 @@ empty list, or null value for a field required by its operation.
 '''
 
 
-TWIN_GROUNDING_CONTRACT = r'''
-GROUNDING v2: in this SAME response, identify each white selector BEFORE choosing the shared edit.
-Add grounding_version=2 to the JSON. Each members entry must also contain:
-"grounding":{"entity":"exact singular noun matching scope", "kind":"object|part|collection",
-"host":"host noun or empty string", "current_value":"current requested property, or empty string",
-"distinction":"short visible fact uniquely distinguishing this instance in the FULL scene",
-"site_visible":true, "edit_feasible":true}.
-entity names the mask itself: one door leaf is not a double door; a rim excludes the tire;
-a strip of a box is not the whole box. A collection or fragments of one shared object cannot
-form independent twin instances. All entities must match the shared scope and have the same kind.
-Do not invent a host to make a ref unique. Use the shortest unambiguous noun phrase; prefer a
-verified host relation over vague left/right when several similar objects share one side.
-An ordinal must enumerate an unambiguous set visible in the original image.
-For attribute, current_value describes the selected property for EACH member. Choose a value
-different from every member. Prefer an editable surface without complicated lettering when there
-are several natural property choices. Preserve existing markings unless explicitly editing them.
-For add, site_visible is true only if the SAME requested attachment/support site is visibly
-available on EACH host. A top edge outside the image is unavailable. First find a shared usable
-site, then choose a conventional accessory. Never expand a partial host mask into a whole host.
-For replace, add top-level replacement_form="brief concrete shape/design difference". A material
-or color difference alone is insufficient. For remove, both objects must be independently removable
-without disabling an essential structure or leaving unsupported fragments.
-For non-add operations set site_visible=true. Set edit_feasible=false if the assigned operation
-cannot be natural for that member; then return feasible=false for the group. Do not change type.
-Keep evidence and grounding concise. These fields are internal and must not lengthen instructions.
-'''
 
 
 def validate_twin_grounding(plan: dict[str, Any]) -> None:
@@ -153,7 +131,7 @@ def _overlay(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.
 
 def _crop_sheet(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.ndarray], *, locator_outline: bool = False) -> Image.Image:
     """Aligned clean crop and binary locator; never tint source appearance."""
-    width, height, header = 512, 320, 32
+    width, height, header = 640, 400, 32
     sheet = Image.new("RGB", (width * (3 if locator_outline else 2), (height + header) * len(objects)), (35, 35, 35))
     draw = ImageDraw.Draw(sheet)
     for index, (obj, mask) in enumerate(zip(objects, masks)):
@@ -230,7 +208,7 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
     directory.mkdir(parents=True, exist_ok=True)
     source = Image.open(candidate["image_path"]).convert("RGB")
     masks = [load_mask(obj, source.size) for obj in objects]
-    key = json.dumps({"version": "clean-binary-outline-v3" if locator_outline else "clean-binary-v2",
+    key = json.dumps({"version": "clean-binary-outline-v4" if locator_outline else "clean-binary-v3",
                       **({"scene_locator_version": 1} if locate_in_scene else {}),
                       "source": hashlib.sha256(source.tobytes()).hexdigest(),
                       "ids": [o.get("object_id") for o in objects],
@@ -264,12 +242,12 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
 
 
 def twin_prompt(assigned_operation: str, objects: list[dict[str, Any]]) -> str:
-    return TWIN_PROMPT + TWIN_GROUNDING_CONTRACT + "\nAssigned operation: " + assigned_operation + "\nCandidates:\n" + "\n".join(
-        f"- object_id={o['object_id']}, category={o.get('category','object')}" for o in objects)
+    return TWIN_PROMPT + "\n" + BLIND_RULE + "\nAssigned operation: " + assigned_operation + "\nCandidates:\n" + "\n".join(
+        f"- object_id={o['object_id']} (must appear exactly once)" for o in objects)
 
 
 def multi_prompt(assignments: dict[str, str], objects: list[dict[str, Any]], order: list[str]) -> str:
-    return MULTI_PROMPT + "\nAssigned operations:\n" + "\n".join(
+    return MULTI_PROMPT + "\n" + BLIND_RULE + "\n" + INSTRUCTION_STYLE + "\nAssigned operations:\n" + "\n".join(
         f"- object_id={o['object_id']}, unit_id=U{i+1}, operation={assignments[o['object_id']]}" for i, o in enumerate(objects)
     ) + "\nDefault generation order: " + ", ".join(order)
 
@@ -314,6 +292,8 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
                      mask_paths: list[str], *, split: str, scope_level: str, group_id: str,
                      geometry: list[dict[str, Any]], assigned_operation: str | None = None,
                      require_grounding: bool = False) -> dict[str, Any]:
+    if "malformed_mllm_json" in plan.get("failure_reasons", []):
+        raise ValueError("malformed planner JSON: " + str(plan.get("evidence", "")))
     if plan.get("feasible") is False:
         raise ValueError("infeasible twin plan: " + str(plan.get("reason") or plan.get("evidence") or "no shared natural edit"))
     if assigned_operation is not None and plan.get("operation") != assigned_operation:
@@ -382,7 +362,9 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
                             "operation": u.operation, "scope": u.scope, "payload": u.payload,
                             "mask_role": u.mask_role, "mask_semantics": u.mask_semantics,
                             "unit": u.to_dict()})
-    return {"schema_version": "sa1b.samtok.group.v1", "twin_id": group_id,
+    return {"schema_version": "sa1b.samtok.group.v1",
+            "instruction_protocol_version": "2.0", "mask_semantics_version": "2.0",
+            "instruction_style_version": "benchmark-concise-3-blind-1", "twin_id": group_id,
             "source_id": candidate["source_id"], "source_image": candidate["image_path"],
             "source_provenance": candidate.get("provenance", {}), "operation": units[0].operation,
             "instruction_spec": {**spec, "ref": ""}, "instruction_noref": no_ref,
@@ -440,7 +422,9 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
                             "operation": u.operation, "scope": u.scope, "payload": u.payload,
                             "mask_role": u.mask_role, "mask_semantics": u.mask_semantics,
                             "unit": u.to_dict()})
-    return {"schema_version": "sa1b.samtok.group.v1", "multi_id": group_id,
+    return {"schema_version": "sa1b.samtok.group.v1",
+            "instruction_protocol_version": "2.0", "mask_semantics_version": "2.0",
+            "instruction_style_version": "benchmark-concise-3-blind-1", "multi_id": group_id,
             "source_id": candidate["source_id"], "source_image": candidate["image_path"],
             "source_provenance": candidate.get("provenance", {}), "n_targets": len(units),
             "operations": [u.operation for u in units], "generation_order": order_ids,

@@ -215,4 +215,25 @@ COMMON=(--kind twins --manifest "$MANIFEST" --output-root "$RUN_ROOT"   --target
 
 GPU 列表使用本机物理可见设备标识，每个 worker 独占列表中的一个编辑器实例；不要填写重复设备。每组只调度一次，恢复使用逐成员输入哈希与输出校验和。日志包含已生成/确定性通过/总组数，`release.json` 记录各类自动接受数量与缺口；缺口不会自动变成足额数据。新 prompt 实验必须用新根目录，恢复不会重复规划已拒绝组。
 
-`--twin-audit-mode joint` 仅用于对照实验：现有回归表明它严重漏检，不能因为调用数少而直接替代默认审核。当前小批量结论与 PDF 在 PIPELINE.md 第 7.8 节；正式分组生产尚不建议启动。当前 50k 生产快照不受这些实验入口影响。
+`--twin-audit-mode joint` 仅用于对照实验：现有回归表明它严重漏检，不能因为调用数少而直接替代默认审核。当前小批量结论与 PDF 在 PIPELINE.md 第 7.9 节；正式分组生产尚不建议启动。当前 50k 生产快照不受这些实验入口影响。
+
+新分组运行已切换到 instruction/mask 2.0。必须新建运行根目录，不能用 2.0 代码直接续跑 1.0 规划检查点；`config.json` 会校验协议版本。源候选选择和 reservation 可以复用。生成仍使用 Ref、40 步及原执行区域；新 add site mask 在生成后解析。最终准入额外要求 `blind_protocol.pass=true`，定位失败不会退回宿主 mask 静默发布。
+
+
+### 2.0 的 JSON 约束与 site 修正
+
+在新的小批量运行中，可给上述 COMMON 同时追加 `--structured-planning-json` 和 `--site-model /mnt/bn/strategy-mllm-train/common/models/sam3`。规划运行时设置 `SA1B_FORCE_DIRECT_VLLM=1`，使用已验证支持 StructuredOutputsParams 的直接 vLLM 后端。三个阶段必须使用相同的配置参数，否则不可变 config 校验会拒绝继续。
+
+`--site-model` 在每个编辑 worker 首次遇到 add/site 后懒加载 SAM3，在生成后、审核前修正源 mask。SAM3 与编辑器同卡常驻的峰值显存和四机性能尚未测试；当前已实测的是独立运行时对既有目标图的修正。无需再次调用编辑器或 MLLM：
+
+```bash
+# 在仓库根目录执行；OUT 必须是尚不存在的新目录。
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+CUDA_VISIBLE_DEVICES=4 /tmp/sa1b-next-runtime/bin/python \
+  scripts/refine_group_source_regions.py \
+  --manifest /path/to/run/audited.jsonl \
+  --output-root /path/to/run/site_refined \
+  --site-model /mnt/bn/strategy-mllm-train/common/models/sam3
+```
+
+GPU 4 仅为例子，需选择本任务可用卡。该本机运行时为 Transformers 5.17；复制到新节点时应先验证 SAM3Model/SAM3VideoModel/SAM3Processor 可导入。新 `groups.jsonl` 只复用原目标图，变更源 mask 的组会撤销旧语义通过状态并标 pending，不会发布。它是诊断修正入口，不能把旧审核的通过率当成新 mask 的通过率；新版本须完成定位/轮廓复核再进入发布流程。

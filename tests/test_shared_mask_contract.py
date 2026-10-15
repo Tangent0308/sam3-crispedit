@@ -19,7 +19,9 @@ def test_direct_site_and_mask_role_survive_training_serialization():
     assert restored.mask_role == 'anchor'
     assert restored.mask_semantics['anchor_mode'] == 'support'
     assert not restored.mask_semantics['output_difference_ground_truth']
-    assert 'below the cuff of the selected sleeve' in restored.instruction_noref
+    assert restored.instruction_noref == 'Add a red patch sewn onto the selected region.'
+    assert 'below the cuff' in restored.instruction_ref
+    assert restored.mask_semantics['source_region_resolution_required']
     broken = copy.deepcopy(restored)
     broken.mask_semantics['source_role'] = 'target'
     with pytest.raises(ValueError, match='mask semantics'):
