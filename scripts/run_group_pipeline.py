@@ -114,6 +114,8 @@ def _manual_review_pass(row: dict[str, Any]) -> bool:
 
 def _require_manual_review(groups: list[dict[str, Any]], path: Path, *, kind: str, split: str) -> dict[str, Any]:
     """Gate publication on the required human sample without trusting 27B as human."""
+    if not groups:
+        raise RuntimeError("human review gate cannot publish an empty group shard")
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     by_id = {str(row.get("group_id")): row for row in rows if row.get("group_id")}
     expected = [str(group.get("twin_id") or group.get("multi_id")) for group in groups]
@@ -535,6 +537,8 @@ def main(argv=None):
     if args.publish:
         if not args.audit_model:
             raise RuntimeError("--publish requires --audit-model and completed 27B semantic audits")
+        if len(final) != args.target:
+            raise RuntimeError(f"--publish requires the complete shard: {len(final)}/{args.target} groups")
         if not args.human_review or not args.human_review.is_file():
             raise RuntimeError("--publish requires --human-review with explicit human decisions")
         human_review_summary = {"required": True, **_require_manual_review(
