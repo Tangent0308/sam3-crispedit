@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+from .fonts import load_font
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from .geometry import load_mask
@@ -258,10 +259,7 @@ def _located_scene(source: Image.Image, masks: list[np.ndarray]) -> Image.Image:
         array[expanded & ~union] = (255, 220, 30)
     canvas = Image.fromarray(array)
     draw = ImageDraw.Draw(canvas)
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 22)
-    except OSError:
-        font = ImageFont.load_default()
+    font = load_font(22)
     for index, mask in enumerate(scaled, 1):
         ys, xs = np.where(mask)
         if not len(xs):

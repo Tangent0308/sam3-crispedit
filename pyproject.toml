@@ -19,3 +19,6 @@ sa1b-edit = "sa1b_pipeline.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["sa1b_pipeline*", "utils*"]
+
+[tool.setuptools.package-data]
+sa1b_pipeline = ["assets/fonts/*.ttf", "assets/fonts/*.json", "assets/fonts/*.txt"]
