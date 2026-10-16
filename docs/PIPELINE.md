@@ -729,3 +729,36 @@ SAM3 独立修正 4 个成员总计 16.25 s（含加载、读写和重新确定�
 主目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_grounding_20261016/`，包含 `质量分析.md`、`experiment_summary.json`、`baseline_replay.json`、全部计划／拒绝记录、`visual_review.json` 与 `inspection/multi_grounding_comparison.pdf`（10 页）。同级 `sa1b_samtok_multi_grounding_located_20261016`、`sa1b_samtok_multi_grounding_context_20261016`、`sa1b_samtok_multi_grounding_per_mask_20261016` 保存其他变体；逐 mask 目录有每个原始调用和 5 页 PDF。
 
 可用 `PYTHONPATH=. python -m scripts.review_multi_planning --root RUN_ROOT --baseline OLD_ROOT --font /path/to/NotoSansCJKsc-Regular.otf` 复现对照 PDF。346 项测试通过，协议模块与 benchmark 逐字节相同；生产默认和冻结四机包未升级到实验方案。
+
+### 7.16 多目标低通过率修复与复测（2026-10-16）
+
+当前默认保留操作适配、源类别交叉提示、结构化规划和结构化宿主完整性审核；**多目标全量生产仍未达到建议启动的状态**。两轮完整验证中，后一次实际可用图增加，但自动审核仍有视觉误判。
+
+`multi_semantics.py` 在配额分配前排除明确不合理的操作/对象组合，包含人体、核心穿着衣物及直接附着部位的范围检查；`group_selection.py` 与 `group_production.py` 共用它，不把 mask 本身判为无效。源类别提示可能错误，不能当视觉真值；保守规则仍可能排除未穿着衣物的合理 remove。`group_planning.py` 加入逐目标类别提示、精确范围和 replace 结构区别要求；`multi_plan_schema.py` 约束输出数组、字段和枚举；`run_group_pipeline.py` 对 multi/legacy 的结构化规划使用该 schema，仍每组一次调用、无补问。规划版本为 `multi-affordance-hints-3`。
+
+`group_audit.py` 要求逐步/联合审核说明实际变化、宿主完整性，并检查“文字承认严重缺陷但 decision=pass”的矛盾；局部小图允许放大，避免缩成图标。`audit_backend.py` 支持每个请求的输出 schema，避免漏 `host_integrity` 字段造成正常编辑被拒绝。当前默认审核 contract 为 **`multi-host-integrity-schema-v5`**，保持每目标一次逐步审核＋每组一次联合审核；孪生审核路径不变。另试的聚焦裁剪 v6 有召回改善但也引入误拒绝和左右位置漏检，已从默认代码撤回。
+
+| 指标 | 旧完整验证 | 第一轮适配/提示 | 第二轮结构化规划＋v5 审核 |
+|---|---:|---:|---:|
+| 固定候选组 | 10 | 10 | 10 |
+| 实际生图组 / 编辑目标 | 8 / 27 | 6 / 18 | 8 / 26 |
+| assistant 逐图认为整组合格 | 1 | 1 | **3** |
+| assistant 认为单项合格 | 10/27 | 12/18 | **19/26** |
+| 自动保留组 | 2 | 2 | **2** |
+| 自动与视觉双通过 | 1 | 1 | **2** |
+
+第一、二轮完全固定相同的 10 张源图、mask、操作和配额，采用生产 `propose + choose` 从固定 80 图源池选择，无视觉挑选；旧完整验证使用相同池，但部分源图/目标/操作不同。第二轮视觉整组率为 3/8=37.5%（候选口径 3/10=30%）；默认自动率为 2/8=25%（候选口径 2/10=20%）。不能混用“审核入口”与“候选/已生图”分母，也不能把这个小样本外推总体收益。
+
+第二轮单项 add/remove/replace/attribute 为 **5/9、4/6、5/5、5/6**。真正合格的五目标黑白街景含车贴、围栏标牌、门改红、细柱换圆短桩、通风口移除；浮雕双目标的胸针新增和装饰底座移除也基本合格。四目标商场图实际基本合格，但 v5 仍把栏杆移除看错，对天花结构替换也有类型分歧。其余问题主要是裤子“胸袋”、肩包左右位置、帽子下巴带、删花瓶生成孤立人手，以及细杆/opaque 操作无变化。视觉检查曾因缩略图混淆相邻柱子、上下层栏杆，放大实际 mask 后已更正，证据保留在实验目录。
+
+第二轮原始完整运行 **801.89 秒（13 分 22 秒）**，其中规划 483.06 秒、并行生图 139.49 秒、原始 v4 审核最长 178.31 秒；26 次编辑平均 **19.85 秒/步**，与旧版 19.76 秒接近。原始流程 10 次规划、26 次编辑、21 次逐步审核、6 次联合审核。最终 v5 用固定图片另行回放：6 个当前候选＋2 个旧回归组，25 次逐步/8 次联合请求，187.27 秒含冷启动；不是给生产增加一轮审核，也不包含在上述完整运行时间内。v6 同组回放 191.14 秒后回退。规划 v3 相对生图时 v2 的“下装胸袋矛盾/机械 arm 误拒绝”修复仅做 CPU 回放，未把新放行计划计为已生成或合格数据，最终全部补丁尚未重新测一次全流程墙钟。
+
+主目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_structured_validation_20261016/`。
+
+- `质量分析.md`：原因、实际修复、逐例结论、分母/速度/剩余问题。
+- `inspection/multi_improvement_review.pdf`：封面＋10 个当前候选＋2 个旧回归例，SRC/MASK/TAR 和中文说明。
+- `visual_review.json`、`experiment_summary.json`：逐目标判定和全部版本指标；`audited.jsonl`、`audited_v5.jsonl`、`audited_v6.jsonl` 互不覆盖。
+- `verified/multi_preview.jsonl`：v5 与视觉双通过的 2 组 / 7 目标；相对路径从实验根目录解析，77 个图片引用 / 44 个唯一图像可读。只作为检查样本。
+- `implementation/`、`implementation_final/`、`guard_v3_replay.json`：完整运行快照、最终默认快照与后续 CPU 回放。
+
+第一轮和审核对照分别在同级 `sa1b_samtok_multi_affordance_validation_20261016`、`sa1b_samtok_multi_schema_audit_validation_20261016`、`sa1b_samtok_multi_focused_audit_validation_20261016`。生成 PDF 可用 `scripts/review_multi_batch.py --root RUN_ROOT --audit-manifest RUN_ROOT/audited_v5.jsonl`，保留原始审核文件。356 项测试通过，instruction_protocol.py 与 benchmark 逐字节一致；旧 50k 数据和冻结四机包均未改动。下一步优先验证带源类别交叉提示的每 mask 单次批量规划，并用固定正反例校准审核，不继续堆叠长 prompt 或以更低质量阈值换取通过率。

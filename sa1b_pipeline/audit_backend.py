@@ -1,6 +1,7 @@
 """Batched audit adapter retaining the Transformers audit's visual inputs."""
 from __future__ import annotations
 
+from copy import deepcopy
 from PIL import Image
 
 from .mllm import parse_json
@@ -67,7 +68,16 @@ class VLLMAuditor:
                 [{'role': 'user', 'content': content}], tokenize=False,
                 add_generation_prompt=True, enable_thinking=False)
             requests.append({'prompt': prompt, 'multi_modal_data': {'image': images}})
-        outputs = self.llm.generate(requests, self.params, use_tqdm=False)
+        params = self.params
+        if any(job.get('output_schema') for job in jobs):
+            from vllm.sampling_params import StructuredOutputsParams
+            params = []
+            for job in jobs:
+                item = deepcopy(self.params)
+                if job.get('output_schema'):
+                    item.structured_outputs = StructuredOutputsParams(json=job['output_schema'])
+                params.append(item)
+        outputs = self.llm.generate(requests, params, use_tqdm=False)
         if len(outputs) != len(jobs):
             raise RuntimeError('audit backend returned an incomplete batch')
         # Offline LLM.generate returns outputs in input order.

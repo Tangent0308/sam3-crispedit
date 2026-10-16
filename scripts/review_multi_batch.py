@@ -15,7 +15,7 @@ from scripts.run_group_pipeline import _group_id
 from scripts.preview_group_cases import page
 
 
-def build(root: Path, font_path: str):
+def build(root: Path, font_path: str, audit_manifest: Path | None = None):
     chosen = [
         json.loads(l)
         for l in (root / "inputs/selected.jsonl").read_text().splitlines()
@@ -27,8 +27,9 @@ def build(root: Path, font_path: str):
     for path in sorted((root / "generated").glob("*/group.json")):
         group = json.loads(path.read_text())
         results[group["multi_id"]] = group
-    if (root / "audited.jsonl").exists():
-        for line in (root / "audited.jsonl").read_text().splitlines():
+    audit_manifest = audit_manifest or root / "audited.jsonl"
+    if audit_manifest.exists():
+        for line in audit_manifest.read_text().splitlines():
             if line.strip():
                 group = json.loads(line)
                 results[group["multi_id"]] = group
@@ -119,6 +120,7 @@ def build(root: Path, font_path: str):
                 "case": i,
                 "group_id": gid,
                 "generated": gid in results,
+                "audit_manifest": str(audit_manifest),
                 "automatic_pass": results.get(gid, {})
                 .get("joint_audit", {})
                 .get("pass", False),
@@ -148,5 +150,6 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--font", default="/tmp/NotoSansCJKsc-Regular.otf")
+    p.add_argument("--audit-manifest", type=Path, help="Optional frozen-image audit rerun; keep original results intact")
     args = p.parse_args()
-    build(args.root, args.font)
+    build(args.root, args.font, args.audit_manifest)
