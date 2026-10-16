@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import hashlib
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -53,13 +54,23 @@ def edit_prompt(unit: dict[str, Any], *, target_hint: str | None = None,
             + locator + guide
         )
     if operation == "remove":
+        # Keep the verified glove restoration guidance only for glove targets.
+        # Avoid priming unrelated hand content for independent objects.
+        scope = str(unit.get("scope") or spec.get("scope") or unit.get("category", ""))
+        host_rule = (
+            "If the item is worn on or covers a body or supporting object, reveal that underlying body or host, "
+            "rather than cutting a hole through it: removing a glove must reveal a natural bare hand that still grips any held object. "
+            "Never erase the underlying limb, leave a floating held object, or substitute background through a solid body. "
+            if re.search(r"\bgloves?\b", scope, re.IGNORECASE) else
+            "Preserve the remaining host and its structural continuity. Reveal the underlying host where the source shows one; "
+            "do not substitute background through it. Keep existing contact and support relationships plausible "
+            "without inventing a new supporting object. "
+        )
         return (
             f"{instruction} Completely erase only the explicitly named object, part or section. "
             "For subpart removal or trimming, retain the remaining host; the source mask selects the removed region. "
             "Reconstruct what was physically behind the removed item, using the surrounding texture, perspective, lighting and occlusion. "
-            "If the item is worn on or covers a body or supporting object, reveal that underlying body or host, "
-            "rather than cutting a hole through it: removing a glove must reveal a natural bare hand that still grips any held object. "
-            "Never erase the underlying limb, leave a floating held object, or substitute background through a solid body. "
+            + host_rule +
             "For independent objects, reconstruct the exposed background; "
             "leave no recolored silhouette, outline, placeholder, cyan/gray patch or duplicate. "
             "Keep every unrequested object, instance, part, boundary, occluder and background unchanged."
@@ -109,7 +120,7 @@ class DiffusersQwenImageEditor:
                        "fp32": torch.float32, "float32": torch.float32}[dtype]
         self.pipe = load_qwen21_omni_pipeline(model_id, tensor_parallel_size=tensor_parallel_size)
         self.steps = steps
-        self.config = dict(backend="qwen-omni", model_id=model_id, steps=steps, dtype=dtype, tensor_parallel_size=tensor_parallel_size, compositor_version=3, prompt_version="region-edit-4-reveal-host")
+        self.config = dict(backend="qwen-omni", model_id=model_id, steps=steps, dtype=dtype, tensor_parallel_size=tensor_parallel_size, compositor_version=3, prompt_version="region-edit-5-contextual-removal")
         self.crop_instruction = crop_instruction
         if crop_instruction:
             self.config['instruction_frame'] = 'experimental-crop-noref-v1'

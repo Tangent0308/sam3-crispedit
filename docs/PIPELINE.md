@@ -762,3 +762,39 @@ SAM3 独立修正 4 个成员总计 16.25 s（含加载、读写和重新确定�
 - `implementation/`、`implementation_final/`、`guard_v3_replay.json`：完整运行快照、最终默认快照与后续 CPU 回放。
 
 第一轮和审核对照分别在同级 `sa1b_samtok_multi_affordance_validation_20261016`、`sa1b_samtok_multi_schema_audit_validation_20261016`、`sa1b_samtok_multi_focused_audit_validation_20261016`。生成 PDF 可用 `scripts/review_multi_batch.py --root RUN_ROOT --audit-manifest RUN_ROOT/audited_v5.jsonl`，保留原始审核文件。356 项测试通过，instruction_protocol.py 与 benchmark 逐字节一致；旧 50k 数据和冻结四机包均未改动。下一步优先验证带源类别交叉提示的每 mask 单次批量规划，并用固定正反例校准审核，不继续堆叠长 prompt 或以更低质量阈值换取通过率。
+
+### 7.17 多目标失败归因、旧管线复用与审核反例回归（2026-10-16）
+
+本轮完成 3 组实验、50 次目标编辑；**整条多目标管线仍不建议进入全量生产**。实际原因分三层：规划尚不能稳定识别真实覆盖范围、附着部位、当前属性和删除后的支撑关系；编辑偶有细杆不变及新增物体被邻居保护区截断；审核既误拒也漏放，不能仅降低阈值。
+
+已保留的代码修复：`multi_semantics.py::same_scope_identity` 与 `group_planning.py::build_multi_group` 允许 white t-shirt / t-shirt 等保留名词的修饰词差异，仍拒绝宿主/部件、显式范围或位置冲突；它只检查重复字段一致性，不替代视觉定位。规划版本更新为 `multi-affordance-hints-4-binding`。`multi_plan_schema.py` 将 opacity 值收敛到 transparent/translucent/opaque；通过 schema 和 xgrammar 解析验证，当前实验已启动的模型请求使用旧 schema，因此此修复没有计入生图收益。`editor.py::edit_prompt` 仅对手套保留已验证的裸手恢复例子，其他 remove 使用通用宿主连续性提示，版本为 `region-edit-5-contextual-removal`；没有改步数或增加调用。
+
+| 对照 | 固定候选组 | 成图组/目标 | assistant 整组明确合格 | 自动通过 | 单项明确合格 |
+|---|---:|---:|---:|---:|---:|
+| 上轮结构化基线 | 10 | 8/26 | 3 | 2（v5） | 19/26 |
+| 新组级可见性提示 | 10 | 8/26 | 2，另 1 不确定 | 2（v8） | 16/26 |
+| 每 mask 一次批量规划 | 10 | 4/12 | 3 | 1（v5） | 10/12 |
+| 每 mask＋旧 50k 大 crop | 6 | 4/12 | 2 | 2（v5） | 9/12 |
+
+前两种新方案固定与基线同样的图、mask、类型；最后一种为预先指定的 6 图子集。逐 mask 的成图质量更集中，但候选口径仍是 3/10；50k crop 与同子集基线同为 2 个整组好例，尚无整体增益证据。两种逐 mask 试验重放原始响应、从请求元数据绑定目标 ID，未调用模型重试；保留为原型，没有替换生产默认。失败的新组级提示已恢复。
+
+旧 50k 自动率 50,000/79,821=62.64%（add 77.58%、replace 71.20%、remove 42.12%、attribute 75.87%），不是人工准确率，且与多目标整组率不可直接比较。旧 12 个展示抽样 9 好/2 待确认/1 失败；孪生均衡试验 12 个成图组自动过 7，视觉明确过 6、边界 1，add 专项仍有指代/site 不稳。可借鉴其清晰单 mask crop、直接附着、完整 Ref、差异交集求 site 和按最终通过补额，不能恢复旧协议 1.0 的粗宿主 mask。当前共享协议 2.0 与 benchmark 字节一致。
+
+本轮好例：逐 mask 商场图的穹顶替换、上层栏杆删除、远处栏杆改黑、广告面板二维码，以及阳台灯串/窗户改深蓝均基本合格。坏例：帽子下巴带画在帽冠、细杆未删、花瓶删除后花束悬空、旧标牌覆盖被称为 add。黑包右侧缺口与受保护的蓝椅子边界吻合；`group_generation.py` 扣除其他目标的可写区域可能截断新增物体，但缺少合成前原图，尚不能隔离扩散限制和羽化合成的贡献。
+
+![逐 mask 商场四目标基本合格](assets/multi_followup/market_good.jpg)
+
+![黑包缺口与相邻蓝椅保护边界](assets/multi_followup/bag_failure.jpg)
+
+审核实验均用固定图片：8 个正反例中，v5 为 TP/TN/FP/FN=2/4/0/2；更宽松 v7 为 4/1/3/0，v8 为 2/4/0/2；追加选中像素放大和逐步观察的 v9 为 3/4/0/1。继续在本轮 7 个审核候选上测 v9，却新增放过黑包缺口，且两组误拒未改善。因此 **v7/v8/v9 全部撤回，默认仍为 v5**。严重错目标、悬空、人体破坏、缺失编辑和串改继续拒绝；小纹理变化、源模糊和合理风格不单独拒绝。误拒未解决，不能宣称审核已可靠。
+
+组级实验完整墙钟 807.36 秒，单步均值 19.96 秒。逐 mask 10 图的规划 460.36 秒（模型加载 187.68，35 请求的批次推理 269.48），生图＋审核 276.33 秒；6 图大 crop 规划 319.75 秒（加载 179.59，19 请求的批次推理 137.53），生图＋审核 301.03 秒。后两轮分阶段运行，时间相加分别为 736.70/620.78 秒，排除了 CPU 回放、等待及规划最终退出，不是连续全流程墙钟。单步约 20 秒，尚无稳态加速证据；审核回放仅为实验，不加入生产调用链。
+
+实验根目录为 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/`：
+
+- `sa1b_samtok_multi_visible_validation_20261016/质量分析.md`：完整中文归因、历史对照、采用/回退依据；`followup_comparison.json` 保存分母与速度。
+- `sa1b_samtok_multi_targetwise_validation_20261016_binding/inspection/multi_batch_src_mask_tar.pdf`：10 个候选、4 个成图组，含 SRC/MASK/TAR 与逐例结论。
+- `sa1b_samtok_multi_50kviews_validation_20261016_binding/inspection/multi_batch_src_mask_tar.pdf`：6 个候选、4 个成图组，含成功和失败。
+- 原型脚本、原始响应、拒绝原因、`visual_review.json`、`experiment_metrics.json`、审核版本与最终代码快照均保留。`generated/*/group.json` 统计所有成图，`generated.jsonl` 只是前置检查通过后的审核入口，不能用后者统计总生成量。
+
+359 项测试通过；静态未定义变量检查通过。旧 50k 与冻结四机部署未修改。下一步优先在同次规划中统一实体/范围，加入 add 可用空间和邻居保护区约束，保存合成前后证据，再验证尚未见过的样本；不依赖常规多轮修复或放松严重缺陷来提高通过率。

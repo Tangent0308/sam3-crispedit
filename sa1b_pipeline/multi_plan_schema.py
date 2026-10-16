@@ -15,8 +15,13 @@ def multi_plan_schema():
         "attached to", "clipped to", "hanging from", "resting on", "mounted on",
         "sewn onto", "tied around", "pinned to", "hooked over", "strapped over"]},
         site=text, anchor_mode={"const": "support"}))
-    attribute = obj(dict(property={"type": "string", "enum": [
-        "color", "material", "finish", "pattern", "texture", "text", "tint", "opacity"]}, value=text))
+    attribute = {"anyOf": [
+        obj(dict(property={"const": "opacity"},
+                 value={"enum": ["transparent", "translucent", "opaque"]})),
+        obj(dict(property={"type": "string", "enum": [
+            "color", "material", "finish", "pattern", "texture", "text", "tint"]}, value=text)),
+    ]}
+
     target = obj(dict(unit_id=text, object_id=text, grounding=grounding, scope=text,
                      ref_phrase=text, operation={"type": "string", "enum": ["add", "remove", "replace", "attribute"]},
                      payload=text, target_part={"const": ""}, remove_mode={"const": "whole"},

@@ -97,5 +97,14 @@ def test_remove_editor_prompt_requires_background_reconstruction():
     prompt = edit_prompt({"operation": "remove", "instruction_ref": "Remove the selected chair."})
     assert "Completely erase" in prompt
     assert "For independent objects, reconstruct the exposed background" in prompt
-    assert "reveal that underlying body or host" in prompt
+    assert "Reveal the underlying host" in prompt
+    assert "glove" not in prompt and "bare hand" not in prompt
     assert "cyan/gray patch" in prompt
+
+
+def test_remove_glove_retains_host_guidance_without_priming_unrelated_objects():
+    glove = edit_prompt({"operation": "remove", "scope": "gloves", "instruction_ref": "Remove the gloves."})
+    vase = edit_prompt({"operation": "remove", "scope": "vase", "instruction_ref": "Remove the vase."})
+    assert "bare hand" in glove and "Never erase the underlying limb" in glove
+    assert "bare hand" not in vase and "glove" not in vase
+    assert "underlying host" in vase
