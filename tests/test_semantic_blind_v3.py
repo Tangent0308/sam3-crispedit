@@ -70,3 +70,26 @@ def test_object_adjectives_do_not_create_false_category_mismatch():
     assert _category_covered("blue storage box", ["wooden box"])
     assert not _category_covered("door handle", ["window handle"])
     assert not _category_covered("window", ["road marking"])
+
+
+def test_v4_example_omission_is_diagnostic_not_incompatibility():
+    r=raw(blind_schema=4, semantic_scope='restricted', eligible_categories=['turnstile','sign'], excluded_categories=[])
+    g=group('add',('indicator','sign'))
+    result=evaluate_probe(g,r)
+    assert result['pass'] and result['coverage']==[False,True]
+    assert result['requires_localized_shared_edit_audit']
+
+
+def test_v4_explicit_incompatible_member_is_rejected():
+    r=raw(blind_schema=4, semantic_scope='restricted', eligible_categories=['table'], excluded_categories=['chair'])
+    result=evaluate_probe(group('add',('table','chair')),r)
+    assert not result['pass']
+    assert result['reason']=='member_explicitly_incompatible_with_payload'
+
+
+def test_v4_requires_valid_exclusion_response_and_blind_ambiguity():
+    r=raw(blind_schema=4, eligible_categories=[])
+    assert not evaluate_probe(group(),r)['pass']
+    for decision in ['uncertain','specific']:
+        assert not evaluate_probe(group(),dict(r,excluded_categories=[],decision=decision))['pass']
+    assert not evaluate_probe(group(),dict(r,excluded_categories=[],examples=[]))['pass']

@@ -205,6 +205,10 @@ contact footprint on the selected source site, size and support, not just proxim
 Check refs against ALL similar objects in the full source, not just these members. Small/clipped/occluded
 objects are valid if identity, scope and the edit are clear. Different categories are valid when the SAME
 request is natural for both. Do not demand identical object names or identical attachment-site names.
+shared_edit_valid requires comparable practical suitability of the EXACT payload at every intended site;
+mere physical possibility is insufficient if ordinary use clearly favors one member (e.g. a water pitcher
+on a dining table versus a chair seat). The independent blind probe's example categories are incomplete;
+verify these actual members yourself, rather than treating blind ambiguity as proof of shared suitability.
 
 Do NOT fail for mild texture/edge variation, minor local lighting changes, subjective style preferences,
 or a slightly longer but clear instruction. Put those in warnings. Floating/unsupported objects, missing edits and wrong targets are ALWAYS failures, never minor warnings. Do not require physical perfection.

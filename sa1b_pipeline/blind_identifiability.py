@@ -1,9 +1,9 @@
 """Independent image + no-ref probe, without masks, refs or generated targets.
 
-The current probe checks semantic eligibility and visible alternatives without
-exhaustive box enumeration. Intended member scopes are checked only afterwards,
-outside the model context; localized final auditing remains mandatory. Legacy
-box-based records are still readable. Insufficient evidence never means pass.
+The current probe checks visible alternatives and explicit semantic exclusions
+without exhaustive box enumeration. Member scopes are compared afterwards,
+outside the model context; omitted example categories are diagnostic only.
+Localized shared-fit auditing remains mandatory. Legacy records stay readable.
 """
 from __future__ import annotations
 
@@ -15,12 +15,12 @@ from pathlib import Path
 
 from PIL import Image
 
-PROBE_VERSION = 'image-only-semantic-3.1'
+PROBE_VERSION = 'image-only-semantic-4'
 PROMPT = '''This is a BLIND INTENT test, not an instruction to execute an edit. You see only the original image and an editing sentence, with no locator. "the selected region" intentionally hides the target. Do NOT ask for a mask. Do NOT rank by centrality, size or visual salience.
 Does the wording/payload naturally allow multiple visible targets, or strongly imply one specific target? Consider normal photo editing, physical function and support. Multiple instances of the same class count as alternatives. Give two short visibly plausible examples if ambiguous; no bounding boxes or exhaustive instance list.
-Report semantic_scope="broad" ONLY for category-neutral removal or ordinary color changes that could naturally apply across multiple visible classes. Otherwise use "restricted" and list the singular physical category nouns that the FULL payload can naturally apply to in this scene (including parts, e.g. lamp head). A dashed road marking is not a replacement for a window. Do not include an incompatible category to increase diversity. Report "specific" if wording clearly favors one visible instance; "uncertain" if core evidence is insufficient.
+Report semantic_scope="broad" for edits naturally applicable across many visible classes; otherwise use "restricted". eligible_categories contains EXAMPLES, not an exhaustive list. Include parts when relevant; omission does not imply incompatibility. Also list excluded_categories only for VISIBLE categories explicitly incompatible with the FULL request. Do not infer exclusions from omission or visual salience. Think about normal use: a drink container naturally belongs on a table, not an occupied seat; a ribbon can attach to a sign as well as a tree. A dashed road marking is not a replacement for a window. Report "specific" if wording clearly favors one visible instance; "uncertain" if core evidence is insufficient.
 Return compact JSON only:
-{"blind_schema":3,"decision":"ambiguous|specific|uncertain","semantic_scope":"broad|restricted","eligible_categories":[],"examples":["visible alternative 1","visible alternative 2"],"evidence":"one short reason based on semantic fit, not salience"}.
+{"blind_schema":4,"decision":"ambiguous|specific|uncertain","semantic_scope":"broad|restricted","eligible_categories":[],"excluded_categories":[],"examples":["visible alternative 1","visible alternative 2"],"evidence":"one short reason based on semantic fit, not salience"}.
 This check tests blind ambiguity; separate localized checks must still verify EACH intended member's naturalness. Do not claim all hidden members are valid.
 Editing request: '''
 
@@ -65,6 +65,23 @@ def evaluate_semantic_probe(group, raw):
             or len({x.strip().casefold() for x in examples if isinstance(x,str) and x.strip()}) < 2
             or not str(raw.get('evidence','')).strip()):
         return {**result,'reason':'insufficient_blind_ambiguity_evidence'}
+    if raw.get('blind_schema') == 4:
+        categories, excluded = raw.get('eligible_categories'), raw.get('excluded_categories')
+        if (raw.get('semantic_scope') not in {'broad', 'restricted'}
+                or not isinstance(categories, list) or not isinstance(excluded, list)
+                or not all(isinstance(c, str) and c.strip() for c in categories + excluded)):
+            return {**result, 'reason':'missing_blind_semantic_scope'}
+        covered = [_category_covered(m.get('scope',''), categories) for m in group['members']]
+        incompatible = [_category_covered(m.get('scope',''), excluded) for m in group['members']]
+        if any(incompatible):
+            return {**result, 'decision':'fail', 'reason':'member_explicitly_incompatible_with_payload',
+                    'coverage':covered, 'excluded_members':incompatible}
+        # A short unlocalized example list cannot establish exhaustive scope.
+        # This is only the blind-stage gate; final localized shared_edit_valid
+        # and member naturalness must also pass before group acceptance.
+        return {**result, 'pass':True, 'decision':'pass',
+                'reason':'blind_ambiguous_pending_localized_shared_fit', 'coverage':covered,
+                'category_omission_is_not_exclusion':True}
     broad_allowed = group.get('operation') == 'remove' or (
         group.get('operation') == 'attribute' and
         [a.get('property') for a in group.get('instruction_spec',{}).get('attributes',[])] == ['color'])
@@ -92,7 +109,7 @@ def _iou(a, b):
 
 
 def evaluate_probe(group, raw):
-    if raw.get('blind_schema') == 3:
+    if raw.get('blind_schema') in {3, 4}:
         return evaluate_semantic_probe(group, raw)
     targets = raw.get('targets')
     result = {'version': PROBE_VERSION, 'pass': False, 'decision': 'uncertain',

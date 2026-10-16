@@ -151,7 +151,8 @@ def _cheap_operation_allowed(obj: dict[str, Any], operation: str, size: tuple[in
 def twin_operation_priority(objects: list[dict[str, Any]], operation: str) -> int:
     """Rank plausible edits within quota cells, without treating dense labels as ground truth."""
     preferred = {
-        "add": {"table", "chair", "backpack", "bag", "hat", "pot", "planter", "cart", "shelf", "door", "screen"},
+        "add": {"table", "chair", "backpack", "bag", "hat", "pot", "planter", "cart", "shelf", "door", "screen",
+                "board", "sign", "panel", "wall", "box", "shirt", "jacket"},
         "remove": {"bottle", "cup", "bag", "backpack", "bicycle", "chair", "umbrella", "vase", "sign", "lamp", "flowerpot"},
         "replace": {"chair", "stool", "bottle", "cup", "vase", "rim", "handle", "knob", "lamp", "pot", "hat", "shoe"},
         "attribute": {"shirt", "sleeve", "backpack", "bag", "chair", "door", "frame", "cap", "hat", "rim", "handle", "shutter"},
@@ -180,7 +181,10 @@ def twin_operation_priority(objects: list[dict[str, Any]], operation: str) -> in
             {'sign','poster','banner','placard'},
         ]
         if operation == 'add':
-            families += [{'table','desk','shelf','cart','chair','armchair','bench'},
+            # Seating and work/storage surfaces are not interchangeable
+            # supports for a shared payload (e.g. a drinking glass). Both
+            # remain eligible; only genuinely shared affordances get a bonus.
+            families += [{'table','desk','shelf','cart'},
                          {'shirt','jacket','coat','backpack','bag','hat'}]
         words = [set(re.findall(r'[a-z]+', normalized_category(o.get('category','')))) for o in objects]
         if operation in {'add','replace'} and any(all(w & f for w in words) for f in families):

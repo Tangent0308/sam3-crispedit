@@ -25,7 +25,7 @@ def _mask(path, size):
         return np.asarray(image.convert('L')) > 0
 
 
-def localize_add_site(source, target, host):
+def localize_add_site(source, target, host, *, require_raw_contact=True):
     """§6.2: significant difference dilated by 30% short side, intersect host.
 
     The difference is evidence of the contact site, NOT the exported selector.
@@ -64,9 +64,9 @@ def localize_add_site(source, target, host):
                 site_pixels=int(site.sum()), host_fraction=float(site.sum()/max(1,host.sum())))
     # With virtually no direct contact evidence, a nearest patch would be an
     # invented anchor. The caller can supply a separately verified site mask.
-    if overlap < max(8, math.ceil(.001 * int(delta.sum()))):
+    if require_raw_contact and overlap < max(8, math.ceil(.001 * int(delta.sum()))):
         return None, {**info, 'reason': 'difference_host_overlap_too_small'}
-    if not site.any() or np.array_equal(site, host):
+    if not site.any():
         return None, {**info, 'reason': 'site_not_resolved_from_host'}
     return site, info
 
@@ -90,25 +90,37 @@ def resolve_source_region(member, source_path, target_path, directory, *, site_r
     host = _mask(host_path, source.size)
     operation = spec['operation']
     mode = spec.get('remove_mode', 'whole')
-    needs_site = operation == 'add' and bool(spec['placement'].get('site'))
+    needs_site = operation == 'add'
     needs_part = bool(spec.get('target_part')) or (operation == 'remove' and mode != 'whole')
     selector, info = host, {'method': 'existing_actual_region'}
     if needs_site:
         target = Image.open(target_path).convert('RGB')
         selector, info = localize_add_site(source, target, host)
-        if site_resolver is None and os.environ.get('SA1B_SITE_MODEL'):
+        named_site = bool(spec['placement'].get('site'))
+        # Protocol 2.0 §6.2 prefers observed contact. A text segmenter often
+        # cannot segment an abstract "top edge"; that is not contrary evidence
+        # when the difference already identifies the host patch reliably.
+        fallback = (selector is None and named_site and
+                    info.get('reason') == 'difference_host_overlap_too_small' and
+                    info.get('site_pixels', 0) > 0)
+        if fallback and site_resolver is None and os.environ.get('SA1B_SITE_MODEL'):
             global _SITE_RESOLVER
             if _SITE_RESOLVER is None:
                 from .site_segmentation import Sam3SiteResolver
                 _SITE_RESOLVER = Sam3SiteResolver(os.environ['SA1B_SITE_MODEL'])
             site_resolver = _SITE_RESOLVER
-        if site_resolver is not None:
-            selector, segmentation = site_resolver(source, host, spec, selector)
+        if fallback and site_resolver is not None:
+            nearby_site, _ = localize_add_site(source, target, host, require_raw_contact=False)
+            selector, segmentation = site_resolver(source, host, spec, nearby_site)
+            # Even the fallback must be adjacent to actual changed pixels.
+            if selector is not None:
+                selector = selector & host & nearby_site
             info = {**info, 'segmentation': segmentation,
                     'sam_fallback': 'configured',
                     'method': 'sam3_site_constrained_difference',
                     'site_pixels': int(selector.sum()) if selector is not None else 0,
                     'host_fraction': float(selector.sum()/max(1,host.sum())) if selector is not None else 0}
+        info['resolution_version'] = 'difference-first-3'
         if selector is None and unit.get('verified_site_mask_path'):
             selector = _mask(unit['verified_site_mask_path'], source.size) & host
             if not selector.any():

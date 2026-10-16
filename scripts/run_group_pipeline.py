@@ -663,7 +663,7 @@ def main(argv=None):
             raise RuntimeError("--audit-only requires generated.jsonl from the completed generation stage")
         generated = [json.loads(line) for line in generated_path.read_text().splitlines() if line.strip()]
     else:
-        editor = None if args.editor_devices else _editor(args)
+        editor = None if args.editor_devices or not planned else _editor(args)
         if not args.editor_model:
             raise RuntimeError("--editor-model is required unless --plan-only is set")
         generated = []
@@ -703,7 +703,7 @@ def main(argv=None):
         print(json.dumps({"status": "generated_pending_audit", "groups": len(generated),
                           "manifest": str(generated_path)}, ensure_ascii=False))
         return 0
-    auditor = _auditor(args)
+    auditor = _auditor(args) if generated else None
     try:
         if auditor is not None and generated:
             if args.kind == "twins":

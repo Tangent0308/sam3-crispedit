@@ -135,15 +135,43 @@ def test_site_noise_filter_does_not_expand_to_entire_host(tmp_path):
     assert info['dilation_radius']==16
 
 
-def test_semantic_site_constraint_clips_occluded_host_and_fails_closed(tmp_path):
-    a,b,host,paths,member=_case(tmp_path)
-    seat=np.zeros_like(host);seat[48:70,60:110]=True
+def test_difference_contact_has_priority_over_optional_segmenter(tmp_path):
+    _,_,host,paths,member=_case(tmp_path)
+    def forbidden(*args):
+        raise AssertionError('Reliable observed contact must not depend on text segmentation')
+    assert resolve_source_region(member,paths['source'],paths['target'],tmp_path/'resolved',site_resolver=forbidden)
+    assert member['source_region_resolution']['method']=='difference_dilation_intersect_host'
+    assert member['source_region_resolution']['resolution_version']=='difference-first-3'
+
+
+def test_nearby_hanging_add_uses_segmentation_fallback_and_intersects_contact(tmp_path):
+    a,_,host,paths,member=_case(tmp_path)
+    b=a.copy();b[4:14,70:100]=220
+    Image.fromarray(b).save(paths['target'])
     def resolver(source,host,spec,difference):
-        return seat & difference, {'method':'test_verified_site'}
+        assert difference is not None and difference.any()
+        return host.copy(), {'method':'test_site'}
     assert resolve_source_region(member,paths['source'],paths['target'],tmp_path/'resolved',site_resolver=resolver)
-    assert np.array_equal(np.asarray(Image.open(member['mask']))>0,seat)
-    assert member['source_region_resolution']['method']=='sam3_site_constrained_difference'
+    actual=np.asarray(Image.open(member['mask']))>0
+    assert actual.sum()<host.sum()*.2
     other=copy.deepcopy(member)
     def unresolved(*args):return None, {'reason':'no_site_found'}
     assert not resolve_source_region(other,paths['source'],paths['target'],tmp_path/'failed',site_resolver=unresolved)
     assert other['blind_ineligible_reason']=='part_mask_missing'
+
+
+def test_add_without_named_subpart_still_resolves_contact_region(tmp_path):
+    _, _, host, paths, member = _case(tmp_path)
+    member['instruction_spec']['placement']['site'] = ''
+    member['instruction_noref'] = render(member['instruction_spec'], False)
+    assert resolve_source_region(member, paths['source'], paths['target'], tmp_path/'resolved')
+    assert member['mask'] != paths['host']
+    assert np.asarray(Image.open(member['mask'])).astype(bool).sum() < host.sum()
+
+
+def test_segmenter_cannot_invent_contact_when_no_added_object(tmp_path):
+    source, _, _, paths, member = _case(tmp_path)
+    Image.fromarray(source).save(paths['target'])
+    def forbidden(*args):
+        raise AssertionError('Do not segment a contact with no difference evidence')
+    assert not resolve_source_region(member, paths['source'], paths['target'], tmp_path/'resolved', site_resolver=forbidden)
