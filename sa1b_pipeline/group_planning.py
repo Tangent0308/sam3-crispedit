@@ -67,6 +67,53 @@ For add, relation must be EXACTLY one of: on, in, inside, to, around, across, al
 
 
 
+MULTI_GROUNDING_FIRST_PROMPT = r'''Plan ONE multi-target edit group in ONE response. Image 1 is the clean ORIGINAL scene. Image 2 is a numbered grid of SELECTED PIXELS ONLY crops. Every tile retains only its own mask's original pixels; uniform gray is excluded padding, including holes. Tile order is NOT scene order. Use the supplied full-scene boxes to locate each tile in Image 1. The boxes are locators, NOT editable regions. Never infer that an object inside a box or surrounded by selected pixels is selected.
+
+Write the complete regions array FIRST, identifying ALL masks before choosing any edits. For each tile identify the selected material/entity itself, its extent, and the most easily confused EXCLUDED neighboring entity or part. Use the scene to understand context, but the cutout to decide ownership. A visible surface or clothing item is not its whole host. Background visible between foreground parts is background, not those foreground parts. Name a precise part when only that part is selected; do not rename it to satisfy its assigned operation. Clipping/occlusion alone does not invalidate an otherwise identifiable entity. If ownership is genuinely unclear, mark extent=uncertain and reject instead of guessing. Ref must name exactly this extent, using the shortest distinguishing phrase in the ORIGINAL scene. No extra explanatory clause. Do not write crop coordinates, IDs or annotation terms in refs.
+
+After ALL regions, design the assigned edits. Never change the identified scope to accommodate a payload. Keep every target, including when infeasible; set its edit_feasible=false with a short reason. A group is feasible only if every assigned edit is natural at its exact selected extent. Rejecting an incompatible operation does not mean the source mask is defective.
+''' + MULTI_PROMPT[MULTI_PROMPT.index('Operations and target IDs'):MULTI_PROMPT.index('Return JSON only.')] + r'''
+Return JSON only, in this key order:
+{"grounding_version":2,"regions":[{"unit_id":"U1","object_id":"ID","entity":"precise singular noun","ref_phrase":"the ...","extent":"object|part|surface|background|uncertain","mask_description":"selected visible material and extent, at most 12 words","excluded":"nearest excluded entity or part, or none"}],"targets":[{"unit_id":"U1","object_id":"ID","operation":"ASSIGNED","current_value":"original attribute value or empty","edit_feasible":true,"reason":"specific physical fit or incompatibility, at most 12 words","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":""}],"generation_order":["U1"],"feasible":true}
+Include EVERY supplied ID exactly once in regions and targets. Region entity/ref are authoritative: do not duplicate or override scope/ref in targets. Do not omit targets just because one is incompatible. For add/replace payload is one concise explicit new-object noun phrase with an article; otherwise empty. Only attribute has attributes=[{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}]. Only add has placement={"relation":"on","site":"","anchor_mode":"support"}; otherwise null. target_part and qualifier are empty, remove_mode=whole.
+Add relation must be exactly one of: on, in, inside, to, around, across, along, over, at, attached to, clipped to, hanging from, resting on, mounted on, sewn onto, tied around, pinned to, hooked over, strapped over. Necessary attachment subparts go in site, never in relation. Leave site empty if the selected entity itself is the attachment site. Do not repeat the host noun as site. Existing items and excluded neighbors cannot become the selected entity. An already present accessory cannot be an addition; changing only material/color cannot be replacement. Keep evidence concise.
+'''
+
+
+def normalize_multi_grounding(plan: dict[str, Any], objects: list[dict[str, Any]]) -> dict[str, Any]:
+    """Bind grounding-first regions to edits; reject explicit contradictions.
+
+    These are schema/consistency checks, not independent visual verification.
+    Legacy cached plans remain readable without being silently upgraded.
+    """
+    if plan.get("grounding_version") != 2:
+        return plan
+    expected = {str(o["object_id"]): f"U{i+1}" for i, o in enumerate(objects)}
+    regions, targets = plan.get("regions"), plan.get("targets")
+    for name, rows in (("regions", regions), ("targets", targets)):
+        if (not isinstance(rows, list) or len(rows) != len(expected)
+                or any(not isinstance(row, dict) for row in rows)
+                or {str(row.get("object_id")) for row in rows} != set(expected)):
+            raise ValueError(f"multi grounding {name} must cover every target exactly once")
+        if any(row.get("unit_id") != expected[str(row["object_id"])] for row in rows):
+            raise ValueError("multi grounding unit/object binding mismatch")
+    by_id = {str(r["object_id"]): r for r in regions}
+    bound = []
+    for item in targets:
+        region = by_id[str(item["object_id"])]
+        if (region.get("extent") not in {"object", "part", "surface", "background"}
+                or any(not isinstance(region.get(k), str) or not region[k].strip()
+                       for k in ("entity", "ref_phrase", "mask_description", "excluded"))):
+            raise ValueError("multi mask ownership unresolved")
+        if (("scope" in item and item["scope"] != region["entity"])
+                or ("ref_phrase" in item and item["ref_phrase"] != region["ref_phrase"])):
+            raise ValueError("multi edit overrides independently grounded extent")
+        bound.append({**item, "scope": region["entity"], "ref_phrase": region["ref_phrase"],
+                      "grounding": {**region, "current_value": item.get("current_value", ""),
+                                    "edit_feasible": item.get("edit_feasible"), "reason": item.get("reason", "")}})
+    return {**plan, "targets": bound}
+
+
 def validate_twin_grounding(plan: dict[str, Any]) -> None:
     """Validate explicit contradictions, never treat self-reported fields as visual proof."""
     if plan.get("grounding_version") not in (2, 3, 4):
@@ -228,15 +275,52 @@ def _located_scene(source: Image.Image, masks: list[np.ndarray]) -> Image.Image:
     return canvas
 
 
+def _selected_grid(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.ndarray]) -> Image.Image:
+    """One tile per mask, with no excluded scene pixels competing for attention."""
+    width, height, header = 640, 400, 32
+    columns = min(2, len(objects))
+    sheet = Image.new("RGB", (columns * width, ((len(objects)+columns-1)//columns)*(height+header)), (35, 35, 35))
+    draw = ImageDraw.Draw(sheet)
+    for i, (obj, mask) in enumerate(zip(objects, masks)):
+        ys, xs = np.where(mask)
+        if not len(xs):
+            raise ValueError("empty group target mask")
+        margin = max(8, round(max(xs.max()-xs.min()+1, ys.max()-ys.min()+1)*.12))
+        box = (max(0, int(xs.min())-margin), max(0, int(ys.min())-margin),
+               min(source.width, int(xs.max())+margin+1), min(source.height, int(ys.max())+margin+1))
+        crop = source.crop(box).convert("RGB")
+        binary = Image.fromarray(mask[box[1]:box[3], box[0]:box[2]].astype(np.uint8)*255)
+        scale = min(width/crop.width, height/crop.height)
+        size = (max(1, round(crop.width*scale)), max(1, round(crop.height*scale)))
+        # Composite AFTER resizing: interpolation cannot expose excluded pixels.
+        cutout = Image.composite(crop, Image.new("RGB", crop.size, (100, 100, 100)), binary)
+        selected = Image.composite(cutout.resize(size, Image.Resampling.LANCZOS),
+                                   Image.new("RGB", size, (100, 100, 100)),
+                                   binary.resize(size, Image.Resampling.NEAREST))
+        x, y = (i % columns)*width, (i // columns)*(height+header)
+        draw.text((x+8, y+8), f"U{i+1} / object {obj['object_id']} - SELECTED PIXELS ONLY", fill="white")
+        sheet.paste(selected, (x+(width-size[0])//2, y+header+(height-size[1])//2))
+    return sheet
+
+
 def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], directory: str | Path,
                 *, image_size: tuple[int, int] | None = None, locator_outline: bool = False,
-                locate_in_scene: bool = False, locator_cutout: bool = False) -> tuple[list[str], list[str], str]:
+                locate_in_scene: bool = False, locator_cutout: bool = False,
+                selected_only: bool = False, context_cutout: bool = False) -> tuple[list[str], list[str], str]:
     """Build two stable images plus binary mask files for a single group call."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     source = Image.open(candidate["image_path"]).convert("RGB")
     masks = [load_mask(obj, source.size) for obj in objects]
-    key = json.dumps({"version": "clean-binary-cutout-v5" if locator_cutout else ("clean-binary-outline-v4" if locator_outline else "clean-binary-v3"),
+    if context_cutout:
+        view_version = "context-selected-v1"
+    elif selected_only:
+        view_version = "selected-only-grid-v1"
+    elif locator_cutout:
+        view_version = "clean-binary-cutout-v5"
+    else:
+        view_version = "clean-binary-outline-v4" if locator_outline else "clean-binary-v3"
+    key = json.dumps({"version": view_version,
                       **({"scene_locator_version": 1} if locate_in_scene else {}),
                       "source": hashlib.sha256(source.tobytes()).hexdigest(),
                       "ids": [o.get("object_id") for o in objects],
@@ -255,7 +339,15 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
     if not marked.exists():
         _overlay(source, objects, masks).save(marked, compress_level=1)
     if not sheet.exists():
-        _crop_sheet(source, objects, masks, locator_outline=locator_outline, locator_cutout=locator_cutout).save(sheet, compress_level=1)
+        if context_cutout:
+            three = _crop_sheet(source, objects, masks, locator_cutout=True)
+            paired = Image.new("RGB", (1024, three.height))
+            paired.paste(three.crop((0, 0, 512, three.height)), (0, 0))
+            paired.paste(three.crop((1024, 0, 1536, three.height)), (512, 0))
+            paired.save(sheet, compress_level=1)
+        else:
+            (_selected_grid(source, objects, masks) if selected_only else
+             _crop_sheet(source, objects, masks, locator_outline=locator_outline, locator_cutout=locator_cutout)).save(sheet, compress_level=1)
     for obj, mask in zip(objects, masks):
         path = root / f"mask_{obj['object_id']}.png"
         if not path.exists():
@@ -274,8 +366,14 @@ def twin_prompt(assigned_operation: str, objects: list[dict[str, Any]]) -> str:
         f"- object_id={o['object_id']} (must appear exactly once)" for o in objects)
 
 
-def multi_prompt(assignments: dict[str, str], objects: list[dict[str, Any]], order: list[str]) -> str:
-    return MULTI_PROMPT + "\n" + BLIND_RULE + "\n" + INSTRUCTION_STYLE + "\nAssigned operations:\n" + "\n".join(
+def multi_prompt(assignments: dict[str, str], objects: list[dict[str, Any]], order: list[str], *, grounding_first: bool = False, context_cutout: bool = False) -> str:
+    prompt = MULTI_GROUNDING_FIRST_PROMPT if grounding_first else MULTI_PROMPT
+    if context_cutout:
+        prompt = prompt.replace("Image 2 is a numbered grid of SELECTED PIXELS ONLY crops. Every tile retains only its own mask's original pixels; uniform gray is excluded padding, including holes. Tile order is NOT scene order.",
+            "Image 2 has one row per target with TWO aligned columns: LEFT is clean local CONTEXT, RIGHT contains SELECTED PIXELS ONLY. "
+            "Use the left crop to understand attachment and anatomy; ONLY the right crop defines the editable entity. "
+            "Uniform gray in the right crop is excluded padding, including holes. Row order is NOT scene order.")
+    return prompt + "\n" + BLIND_RULE + "\n" + INSTRUCTION_STYLE + "\nAssigned operations:\n" + "\n".join(
         f"- object_id={o['object_id']}, unit_id=U{i+1}, operation={assignments[o['object_id']]}" for i, o in enumerate(objects)
     ) + "\nDefault generation order: " + ", ".join(order)
 
@@ -413,8 +511,12 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
                       mask_paths: list[str], *, split: str, group_id: str,
                       geometry: list[dict[str, Any]], assignments: dict[str, str],
                       require_grounding: bool = False) -> dict[str, Any]:
+    plan = normalize_multi_grounding(plan, objects)
     if plan.get("feasible") is not True:
-        raise ValueError("infeasible multi plan")
+        targets = plan.get("targets")
+        reasons = [str(t.get("reason", "")) for t in (targets if isinstance(targets, list) else [])
+                   if isinstance(t, dict) and t.get("edit_feasible") is False]
+        raise ValueError("infeasible multi plan: " + "; ".join(reasons or [str(plan.get("reason", ""))]))
     targets = plan.get("targets")
     if not isinstance(targets, list) or len(targets) != len(objects):
         raise ValueError("multi plan target count mismatch")
@@ -472,6 +574,7 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
                             "area_fraction": geom["area_fraction"], "step_input_image": None,
                             "step_output_image": None, "generation_context": {}, "step_audit": {},
                             "operation": u.operation, "scope": u.scope, "payload": u.payload,
+                            "grounding": by_id[str(u.object_id)].get("grounding", {}),
                             "mask_role": u.mask_role, "mask_semantics": u.mask_semantics,
                             "unit": u.to_dict()})
     return {"schema_version": "sa1b.samtok.group.v1",

@@ -423,6 +423,8 @@ def main(argv=None):
                    help="append an outside-contour locator column beside clean crop and binary mask")
     p.add_argument("--locate-planning-scene", action="store_true",
                    help="experimental full-scene outside contours and unit tags for crop-to-scene grounding")
+    p.add_argument("--multi-grounding-mode", choices=["legacy", "selected-only", "context-cutout"], default="legacy",
+                   help="ground all regions before edits; selected-only omits local context, context-cutout retains paired crops")
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--defer-blind", action="store_true",
                    help="plan-only: persist raw twin plans for a separate frozen blind-model stage")
@@ -527,6 +529,13 @@ def main(argv=None):
                           "summary": str(root / "selection.json")}, ensure_ascii=False))
         return 0
     plans_dir = root / "planned"; plans_dir.mkdir(exist_ok=True)
+    if args.kind == "multi" and args.planner_model:
+        contract = root / "planning_contract.json"
+        if (args.multi_grounding_mode != "legacy" and not contract.exists()
+                and (any(plans_dir.glob("*.json")) or any((root / "rejected").glob("*.json")))):
+            raise ValueError("new grounding mode requires a fresh experiment root; existing plans are not upgraded")
+        immutable_json(contract, {"multi_grounding_mode": args.multi_grounding_mode,
+                                  "locate_planning_scene": args.locate_planning_scene})
     needs_planning = any(not (plans_dir / f"{_group_id(args.kind, row)}.json").exists()
                          and not (root / "rejected" / f"{_group_id(args.kind, row)}.json").exists()
                          for row in selected)
@@ -545,10 +554,13 @@ def main(argv=None):
                 # rejection. A new prompt experiment needs a separate root.
                 continue
             objects = selection["objects"]
+            grounding_first = args.kind == "multi" and args.multi_grounding_mode != "legacy"
             views, mask_paths, view_digest = group_views(selection["candidate"], objects, root / "planning_views",
                                                           locator_outline=args.outline_planning_crops,
                                                           locate_in_scene=args.locate_planning_scene,
-                                                          locator_cutout=args.kind == "multi")
+                                                          locator_cutout=args.kind == "multi",
+                                                          selected_only=grounding_first,
+                                                          context_cutout=args.kind == "multi" and args.multi_grounding_mode == "context-cutout")
             geometries = _geometry(mask_paths)
             if planner is None:
                 # Generation-only resume is allowed: selections rejected by a
@@ -589,19 +601,26 @@ def main(argv=None):
             else:
                 assignments = {str(obj["object_id"]): op for obj, op in zip(objects, selection["operations"])}
                 order = [f"U{i+1}" for i in sorted(range(len(objects)), key=lambda i: ("remove", "replace", "attribute", "add").index(selection["operations"][i]))]
-                prompt = multi_prompt(assignments, objects, order)
-            if args.locate_planning_scene:
-                prompt = prompt.replace("Image 1 is the clean original scene.",
-                    "Image 1 is the original scene with yellow outside contours and U1/U2/U3 tags for localization only. "
-                    "Read appearance from the clean crops in image 2; never name the yellow contour or tags in a ref.")
+                prompt = multi_prompt(assignments, objects, order, grounding_first=grounding_first,
+                                      context_cutout=args.multi_grounding_mode == "context-cutout")
+            if args.locate_planning_scene or grounding_first:
+                if args.locate_planning_scene:
+                    appearance_rule = (
+                        "Contours do not change selected pixels. Match the tags to their crops; never name the yellow contour or tags in a ref."
+                        if grounding_first else
+                        "Read appearance from the clean crops in image 2; never name the yellow contour or tags in a ref.")
+                    prompt = prompt.replace("Image 1 is the clean ORIGINAL scene." if grounding_first else "Image 1 is the clean original scene.",
+                        "Image 1 is the original scene with yellow outside contours and U1/U2/U3 tags for localization only. "
+                        + appearance_rule)
                 with Image.open(selection['candidate']['image_path']) as source:
                     width, height = source.size
                 locations = [{"unit_id": f"U{i+1}", "object_id": str(obj['object_id']),
                               "bbox_xyxy_percent": [round(100 * v / (width if j % 2 == 0 else height), 1)
                                                     for j, v in enumerate(geom['bbox'])]}
                              for i, (obj, geom) in enumerate(zip(objects, geometries))]
+                location_kind = "full-image" if grounding_first else "tagged"
                 prompt += ("\nFull-image locations (0=left/top, 100=right/bottom): " + json.dumps(locations)
-                           + "\nMatch each crop to its tagged location before writing refs. Left/right refer to the ORIGINAL image, "
+                           + f"\nMatch each crop to its {location_kind} location before writing refs. Left/right refer to the ORIGINAL image, "
                            "never to the crop or row order. Distinguish the target from ALL similar instances in the full scene, "
                            "not just the selected members. If multiple similar objects share one side, use a verified ordinal "
                            "or a short unique host relation. Do not output coordinates, unit IDs or annotation terms.")
@@ -635,6 +654,8 @@ def main(argv=None):
                                 raise ValueError("pre-generation writable support gap failed")
                             group["group_checks"]["support_preflight"] = preflight
                         else:
+                            if args.multi_grounding_mode != "legacy" and raw.get("grounding_version") != 2:
+                                raise ValueError("multi grounding-first response missing version 2")
                             group = build_multi_group(selection["candidate"], objects, raw, item["mask_paths"],
                                                       split=args.split, group_id=item["gid"], geometry=item["geometries"],
                                                       assignments=item["assignments"], require_grounding=True)

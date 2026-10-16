@@ -685,7 +685,7 @@ SAM3 独立修正 4 个成员总计 16.25 s（含加载、读写和重新确定�
 
 对照轮在模型调用前排除 3 组源 mask 交叠；7 次规划中 1 组遗漏目标，6 组进入生成。2 组被确定性检查拦截，其余 4 组未过语义审核。`generated.jsonl` 只有 4 条待审核记录，全部 6 组实际输出在 `generated/*/group.json`。已生成类型为 add 4、attribute 6、replace 6、remove 5；没有最终合格池，不能据此宣称类别均衡。
 
-**局部成功与主要问题。** 棚顶蝴蝶结、佛像供钵、盾牌羽毛、标牌换形、皮带换绳环和旗帜改色有可用局部效果。但云层 mask 仍被规划为摩天轮，服装 mask 被写成整个人，滤嘴被写成整根烟；木纹桌面被误标 replace，耳朵变耳环也混淆了 replace/add。抠图输入没有彻底解决 grounding，主要瓶颈仍在规划范围与操作适配，不是把生图步数调低就能解决。
+**局部成功与主要问题。** 棚顶蝴蝶结、佛像供钵、盾牌羽毛、标牌换形、皮带换绳环和旗帜改色有可用局部效果。但云层 mask 仍被规划为摩天轮，服装 mask 被写成整个人，滤嘴被写成整根烟；木纹桌面被误标 replace；捂耳朵的手部被误认作耳朵，进而设计成替换为耳环，兼有范围和 replace/add 类型错误（该部位经 2026-10-16 放大上下文复核更正）。抠图输入没有彻底解决 grounding，主要瓶颈仍在规划范围与操作适配，不是把生图步数调低就能解决。
 
 **已验证的针对性修复。** `sa_2416017` 的旧 remove 把手套连同手一起删掉；修改 `editor.edit_prompt`，要求穿戴/覆盖物去除后恢复下方身体/宿主，复用原计划、seed 和 40 步重测，得到自然握住火把的裸手，羽毛和绳环也保留。三目标整组自动审核和 assistant 逐图检查均通过。只有 1 组，不能外推总体成功率。
 
@@ -705,3 +705,27 @@ SAM3 独立修正 4 个成员总计 16.25 s（含加载、读写和重新确定�
 - `experiment_summary.json`、`visual_review.json`、`regression_audit/`、`material_guard_replay.json`、`stage_attempts.jsonl` 保留不同口径与恢复证据。
 
 新增 `scripts/review_multi_batch.py --root RUN_ROOT --font /path/to/NotoSansCJKsc-Regular.otf` 可生成全批诊断 PDF，包含确定性失败的真实图片和未生图提案。四机冻结包仍为上一提交快照，本轮未更新部署包或启动全量。下一步先以固定反例提升 mask 识别和类型适配，再测新样本与稳态速度。
+
+### 7.15 规划范围修复对照（2026-10-16）
+
+本轮优先修复 mask 实体／范围与 instruction 的错配。`group_planning.py` 新增先输出所有 `regions`、再输出 `targets` 的一次调用协议；`normalize_multi_grounding` 检查完整 ID、范围字段和 Ref/scope 绑定，阻止后面的编辑字段覆盖前面的识别结果。它只能检查显式矛盾，不能独立证明模型看对了像素。`run_group_pipeline.py` 的 `--multi-grounding-mode` 提供 `selected-only`（纯抠图）和 `context-cutout`（局部上下文＋抠图），默认仍为 `legacy`；全图外轮廓由原有 `--locate-planning-scene` 控制。不同规划模式写入不可变 contract，禁止用新模式静默复用旧计划。
+
+沿用 7.14 的固定 10 张图、原 mask 和指定类型；3 组几何冲突前置拒绝，剩余 7 组共 26 目标。三种组级变体各调用 7 次，另取其中 5 组 / 19 目标验证每 mask 独立调用一次。均未新增目标图。
+
+| 方案 | 自动规划通过 / 实际规划组 | assistant 认为整组可继续生图 | 自动放行中的错误组 | 时间 |
+|---|---:|---:|---:|---:|
+| 旧缓存按当前规则回放 | 5/7 | 1 | 4 | 原运行 396.4 秒 |
+| 原图＋纯抠图＋先识别后编辑 | 3/7 | 1 | 2 | 391.9 秒，含加载 |
+| 再加全图定位 | 4/7 | 1 | 3 | 387.2 秒，含加载 |
+| 全图定位＋局部上下文／抠图 | 5/7 | 1 | 4 | 372.0 秒，含加载 |
+| 每 mask 独立一次，批量 8 | 1/5 | 0 | 1 | 推理 85.2 秒；见下文 |
+
+旧实验原始自动通过 6/7，现行材质式 replace 检查在 CPU 回放中再过滤桌面，因此公平对照为 5/7；原始数据没有改写。纯抠图修正了天空被当作摩天轮、部分滤嘴被当作整支烟的问题，但整组可用数没有提高。其他布局引入气球误认皮草、局部手部误认头／耳／头发等问题。衣物被称整个人在单 mask 模式下仍存在；单 mask 还把已证明可恢复裸手的手套 remove 错误拒绝。因此当前不将任一实验模式设为生产默认，不把拒绝率变高当成质量达标。
+
+更正旧视觉分析：火炮图 `sa_3268777` U3 经扩大上下文查看，是人物捂耳的手部；旧 source 的 category=hand、description=ear 相互矛盾，旧报告称耳朵不准确。后续不能把 source 类别／描述当独立真值。模型目前仍未稳定区分「被 mask 排除」和「物理遮挡」，接下来应在同次输出中先记录实际覆盖／被排除的同一实体部件，再命名对象，并把恢复宿主的 remove 语义同步到规划。该后续方案尚未验证。
+
+逐 mask 原型初始化 178.0 秒，8/8/3 请求批次耗时 31.9/31.3/22.0 秒，共 85.2 秒；包含准备、加载和保存的处理阶段 301.2 秒。它在结果写完后退出时残留 vLLM 子进程，已定向清理，301 秒不包含完整退出；样本量也不同，不能与 7 组方案直接比快慢。三种组级时间的十几秒差异还受到冷启动和并行阶段影响，不能宣称稳态加速。此轮 40 次请求仅用于对照，不是生产上的重试／多轮复核策略。
+
+主目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_grounding_20261016/`，包含 `质量分析.md`、`experiment_summary.json`、`baseline_replay.json`、全部计划／拒绝记录、`visual_review.json` 与 `inspection/multi_grounding_comparison.pdf`（10 页）。同级 `sa1b_samtok_multi_grounding_located_20261016`、`sa1b_samtok_multi_grounding_context_20261016`、`sa1b_samtok_multi_grounding_per_mask_20261016` 保存其他变体；逐 mask 目录有每个原始调用和 5 页 PDF。
+
+可用 `PYTHONPATH=. python -m scripts.review_multi_planning --root RUN_ROOT --baseline OLD_ROOT --font /path/to/NotoSansCJKsc-Regular.otf` 复现对照 PDF。346 项测试通过，协议模块与 benchmark 逐字节相同；生产默认和冻结四机包未升级到实验方案。
