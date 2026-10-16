@@ -12,7 +12,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+from .multi_semantics import MULTI_PHYSICAL_RULES
 
 from .audit_backend import VLLMAuditor
 from .validate import _target_panel, audit_prompt, deterministic_check
@@ -24,12 +25,33 @@ MULTI_GROUP_PROMPT = '''Audit one joint multi-target edit. Image 1 is the clean 
 Check each ref against the ORIGINAL full scene, each operation and payload against its row, and final consistency across adjacent targets. Fail concrete wrong targets, ambiguous refs, missing/incorrect edits, operation misclassification, visible crosstalk, floating additions, malformed geometry or destroyed prior edits. Add must create genuinely new visible content in direct contact with its source site, not merely recolor an existing accessory. Replace needs a new physical form/design. Minor texture differences or plausible taste alone are not failures. For removal, a dark flat patch covering clothing is not evidence of successful removal: inspect the revealed structure and distinguish erasure from recoloring. For attributes, compare the specified property across the intended surface; do not claim a brown surface is black merely because an adjacent component turned black. Report the unit and visible discrepancy for each failure. Inspect every row before deciding; do not infer unchanged colors from the small full-scene thumbnail. Return JSON only: {"units":[{"unit_id":"U1","source_entity":"visible selected entity","ref_matches_mask":true,"step_done":true,"survives":true,"natural":true,"issue":"brief visible evidence"}],"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}. Include exactly one units entry for EVERY supplied target; inspect each independently before the overall decision.'''
 
 TWIN_REQUIRED_AUDIT_FIELDS = ("unique_refs", "operations_correct", "all_targets_done", "members_preserved", "comparable", "natural")
+MULTI_GROUP_PROMPT += "\n" + MULTI_PHYSICAL_RULES + "\nFor EVERY units entry also return host_integrity: bool and observed_change: a short description of the actual change. host_integrity is false when a remaining person, host or supported item is structurally broken; otherwise true. Describe the actual revealed structure, not just whether the old pixels disappeared."
+
 MULTI_REQUIRED_AUDIT_FIELDS = ("unique_refs", "operations_correct", "all_targets_done", "no_crosstalk", "outside_preserved", "natural")
 
 
 def group_audit_contract(kind: str, model: str) -> dict[str, str]:
     return {"model": model, "kind": kind, "mode": "joint-core-defects-v4" if kind == "twins"
-            else "multi-steps-and-aligned-evidence-v3"}
+            else "multi-host-integrity-schema-v5"}
+
+
+def multi_audit_schema(*, joint: bool = False) -> dict[str, Any]:
+    """Require safety evidence in the first response, without repair calls."""
+    def obj(fields):
+        return {"type": "object", "properties": fields, "required": list(fields),
+                "additionalProperties": False}
+    text = {"type": "string"}
+    bools = lambda names: {name: {"type": "boolean"} for name in names}
+    common = {"decision": {"enum": ["pass", "fail"]},
+              "failure_reasons": {"type": "array", "items": text}, "evidence": text}
+    if not joint:
+        return obj({**common, **bools(("operation_correct", "target_done", "non_target_preserved",
+                                      "natural", "host_integrity")), "observed_change": text})
+    unit = obj({"unit_id": text, "source_entity": text,
+                **bools(("ref_matches_mask", "step_done", "survives", "natural", "host_integrity")),
+                "observed_change": text, "issue": text})
+    return obj({**common, **bools(MULTI_REQUIRED_AUDIT_FIELDS),
+                "units": {"type": "array", "items": unit, "minItems": 2, "maxItems": 5}})
 
 
 def _semantic_group_pass(audit: dict[str, Any], fields: tuple[str, ...]) -> bool:
@@ -128,14 +150,22 @@ def _single_member_audits(groups: list[dict[str, Any]], model: VLLMAuditor,
         for member in members:
             row = _member_audit_row(group, member, kind=kind)
             panel = _target_panel(row, panel_dir, binary_locator=True)
+            prompt = audit_prompt(row["instruction"], operation=row["operation"], binary_locator=True)
+            if kind == "multi":
+                prompt = prompt.replace('"natural":bool',
+                    '"natural":bool,"host_integrity":bool,"observed_change":"brief actual visible change"', 1)
+                prompt += "\n" + MULTI_PHYSICAL_RULES + "\nAlso return host_integrity: bool and observed_change: brief actual visible change. The remaining body/host/support must be intact; background replacing a covered body is a failure. If no host is affected, host_integrity=true."
             jobs.append({"job_id": f"{group.get('twin_id') or group.get('multi_id')}::{member['unit_id']}",
                          "images": [row["source_image"], row["edited_image"], panel],
-                         "prompt": audit_prompt(row["instruction"], operation=row["operation"], binary_locator=True)})
+                         "prompt": prompt,
+                         **({"output_schema": multi_audit_schema()} if kind == "multi" else {})})
             locations.append((group, member))
     results = _call_batched(model, jobs) if jobs else []
     by_group: dict[str, list[dict[str, Any]]] = {}
     for (group, member), result in zip(locations, results):
         audit = result.get("semantic_audit", {})
+        if kind == "multi":
+            audit = _enforce_multi_integrity(audit)
         member["semantic_audit"] = audit
         gid = str(group.get("twin_id") or group.get("multi_id"))
         by_group.setdefault(gid, []).append(audit)
@@ -359,11 +389,47 @@ def multi_audit_comparison(group: dict[str, Any], out: Path) -> str:
         after = Image.open(unit["step_output_image"]).convert("RGB")
         for j, image in enumerate((source, after, final, mask.convert("RGB"))):
             crop = image.crop(box)
-            crop.thumbnail((376, row_h-38), Image.Resampling.LANCZOS)
+            crop = ImageOps.contain(crop, (376, row_h-38), Image.Resampling.LANCZOS)
             panel.paste(crop, (j*384+(384-crop.width)//2, y+34+(row_h-38-crop.height)//2))
     out.parent.mkdir(parents=True, exist_ok=True)
     panel.save(out)
     return str(out)
+
+
+def _multi_hard_defects(evidence):
+    defects = _acknowledged_hard_defects(evidence)
+    for item in evidence:
+        # Check each clause independently: a negated unrelated warning must
+        # not hide a positively reported structural defect in the next clause.
+        for clause in re.split(r"[.;]|\bbut\b", str(item).lower()):
+            if re.search(r"\b(?:no|not|without)\b.{0,25}(?:cut off|missing|erased|amputated|floating)", clause):
+                continue
+            if re.search(r"\b(?:lower body|upper body|torso|legs?|arms?|hands?|feet)\b.{0,45}\b(?:cut off|missing|erased|amputated|floating)\b", clause):
+                defects.append(str(item))
+    return defects
+
+
+def _enforce_multi_integrity(audit: dict[str, Any], *, joint: bool = False) -> dict[str, Any]:
+    audit = dict(audit)
+    rows = audit.get("units", []) if joint else [audit]
+    if not isinstance(rows, list):
+        rows = []
+    failures = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("host_integrity") is not True:
+            failures.append("host_integrity_not_verified")
+            continue
+        evidence = [str(row.get(k, "")) for k in ("evidence", "issue", "observed_change")]
+        if _multi_hard_defects(evidence):
+            failures.append("acknowledged_serious_defect")
+    if _multi_hard_defects([str(audit.get("evidence", ""))]):
+        failures.append("acknowledged_serious_defect")
+    if not rows:
+        failures.append("missing_integrity_evidence")
+    if failures:
+        audit.update(decision="fail", natural=False,
+                     failure_reasons=list(dict.fromkeys(list(audit.get("failure_reasons") or []) + failures)))
+    return audit
 
 
 def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_dir: str | Path) -> list[dict[str, Any]]:
@@ -374,11 +440,12 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
         comparison = multi_audit_comparison(group, panel_dir / f"{group['multi_id']}_aligned.png")
         images = [group["source_image"], group["joint_target"], comparison]
         jobs.append({"job_id": group["multi_id"], "images": images[:3],
+                     "output_schema": multi_audit_schema(joint=True),
                      "prompt": MULTI_GROUP_PROMPT + "\n" + BLIND_RULE + "\nTarget contract:\n" +
                      _target_contract(group, kind="multi")})
     results = []
     for group, audits, result in zip(groups, member_audits, _call_batched(model, jobs)):
-        audit = result["semantic_audit"]
+        audit = _enforce_multi_integrity(result["semantic_audit"], joint=True)
         joint = group["joint_audit"]
         member_pass = bool(audits) and all(
             item.get("decision") == "pass"
@@ -393,7 +460,7 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
                        and all(isinstance(x, dict) for x in details)
                        and {x.get("unit_id") for x in details} == expected
                        and all(x.get("source_entity") and all(x.get(k) is True for k in
-                           ("ref_matches_mask", "step_done", "survives", "natural")) for x in details))
+                           ("ref_matches_mask", "step_done", "survives", "natural", "host_integrity")) for x in details))
         joint["per_target_evidence_pass"] = bool(detail_pass)
         semantic_pass = _semantic_group_pass(audit, MULTI_REQUIRED_AUDIT_FIELDS) and detail_pass
         joint["semantic_audit_pass"] = bool(semantic_pass)

@@ -148,6 +148,12 @@ def _cheap_operation_allowed(obj: dict[str, Any], operation: str, size: tuple[in
     return width * height >= image_area * (0.00015 if operation == "add" else 0.00005)
 
 
+def multi_operation_allowed(obj: dict[str, Any], operation: str, size: tuple[int, int]) -> bool:
+    from .multi_semantics import operation_exclusion
+    return (not operation_exclusion(str(obj.get("category", "")), operation)
+            and _cheap_operation_allowed(obj, operation, size))
+
+
 def twin_operation_priority(objects: list[dict[str, Any]], operation: str) -> int:
     """Rank plausible edits within quota cells, without treating dense labels as ground truth."""
     preferred = {
@@ -581,7 +587,7 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
             return support
 
         def cached_operation_allowed(obj: dict[str, Any], operation: str) -> bool:
-            if not _cheap_operation_allowed(obj, operation, size):
+            if not multi_operation_allowed(obj, operation, size):
                 return False
             if not strict_geometry:
                 # Fast capacity mode only estimates whether an operation is
@@ -659,7 +665,7 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
             # remaining target slots. This avoids decoding hundreds of dense
             # scene masks merely to prove they conflict with the pair.
             plausible = [o for o in objects if o not in (a, b)
-                         and any(_cheap_operation_allowed(o, op, size) for op in OPERATIONS)]
+                         and any(multi_operation_allowed(o, op, size) for op in OPERATIONS)]
             plausible.sort(key=lambda o: (min(bbox_gap(o, a), bbox_gap(o, b)),
                                           str(o.get("object_id", ""))))
             others = plausible[:32]
@@ -730,7 +736,7 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
     balance_multi_operations(
         selected,
         image_size_for=lambda row: tuple(row.get("image_size") or _image_size(row["candidate"])),
-        allowed=lambda obj, op, size: _cheap_operation_allowed(obj, op, size),
+        allowed=lambda obj, op, size: multi_operation_allowed(obj, op, size),
         seed=seed,
     )
     return selected[:target]

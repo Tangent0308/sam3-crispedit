@@ -276,7 +276,7 @@ def propose(job):
     """CPU-only proposals for one source; exact geometry still checked pre-plan."""
     candidate, kind, wanted, seed = job
     from .group_selection import (
-        _cheap_operation_allowed,
+        multi_operation_allowed,
         _image_size,
         select_multi_candidates,
         select_twin_candidates,
@@ -310,7 +310,7 @@ def propose(job):
         )
         for row in initial:
             for schedule in operation_schedules(
-                row["objects"], _image_size(candidate), _cheap_operation_allowed
+                row["objects"], _image_size(candidate), multi_operation_allowed
             ):
                 if multi_cell(schedule) in wanted:
                     rows.append({**row, "operations": list(schedule)})

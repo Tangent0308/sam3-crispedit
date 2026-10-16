@@ -30,7 +30,7 @@ from sa1b_pipeline.group_generation import (multi_support_preflight, generate_mu
 from sa1b_pipeline.group_geometry import normalized_category
 from sa1b_pipeline.group_audit import audit_multi_groups, audit_twin_groups, audit_twin_groups_joint
 from sa1b_pipeline.group_planning import (build_multi_group, build_twin_group, group_views,
-                                           multi_prompt, twin_prompt)
+                                           multi_prompt, twin_prompt, MULTI_PLAN_VERSION)
 from sa1b_pipeline.group_schema import validate_multi_record, validate_twin_record
 from sa1b_pipeline.group_selection import select_multi_candidates, select_twin_candidates, twin_operation_priority
 from sa1b_pipeline.io import load_candidates, write_jsonl
@@ -102,7 +102,11 @@ def _planner(args):
             model.close()
             raise ValueError('structured planning requires SA1B_FORCE_DIRECT_VLLM=1')
         from vllm.sampling_params import StructuredOutputsParams
-        model.params.structured_outputs = StructuredOutputsParams(json_object=True)
+        if getattr(args, "kind", None) == "multi" and getattr(args, "multi_grounding_mode", "legacy") == "legacy":
+            from sa1b_pipeline.multi_plan_schema import multi_plan_schema
+            model.params.structured_outputs = StructuredOutputsParams(json=multi_plan_schema())
+        else:
+            model.params.structured_outputs = StructuredOutputsParams(json_object=True)
     return model
 
 
@@ -534,7 +538,8 @@ def main(argv=None):
         if (args.multi_grounding_mode != "legacy" and not contract.exists()
                 and (any(plans_dir.glob("*.json")) or any((root / "rejected").glob("*.json")))):
             raise ValueError("new grounding mode requires a fresh experiment root; existing plans are not upgraded")
-        immutable_json(contract, {"multi_grounding_mode": args.multi_grounding_mode,
+        immutable_json(contract, {"multi_plan_version": MULTI_PLAN_VERSION,
+                                  "multi_grounding_mode": args.multi_grounding_mode,
                                   "locate_planning_scene": args.locate_planning_scene})
     needs_planning = any(not (plans_dir / f"{_group_id(args.kind, row)}.json").exists()
                          and not (root / "rejected" / f"{_group_id(args.kind, row)}.json").exists()

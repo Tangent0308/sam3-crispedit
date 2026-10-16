@@ -325,12 +325,12 @@ def test_multi_step_audit_compares_each_actual_input_and_output(tmp_path):
                     i = int(job["job_id"][-1])-1
                     assert job["images"][:2] == [units[i]["step_input_image"], units[i]["step_output_image"]]
                     audit = dict(decision="pass", target_done=True, non_target_preserved=True,
-                                 natural=True, operation_correct=True)
+                                 natural=True, operation_correct=True, host_integrity=True)
                 else:
                     audit = {"decision": "pass", **dict.fromkeys(MULTI_REQUIRED_AUDIT_FIELDS, True),
                              "units": [{"unit_id": u["unit_id"], "source_entity": "bag",
                                         "ref_matches_mask": True, "step_done": True,
-                                        "survives": True, "natural": True} for u in units]}
+                                        "survives": True, "natural": True, "host_integrity": True} for u in units]}
                 results.append({"job_id": job["job_id"], "semantic_audit": audit})
             return results
     assert audit_multi_groups([group], Model(), tmp_path / "audit")[0]["joint_audit"]["pass"]
