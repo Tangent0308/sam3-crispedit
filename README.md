@@ -2,7 +2,20 @@
 
 本仓库实现基于 SA-1B 图像与 dense mask 的多类型局部编辑数据构造。当前生产版本逐个处理源图中的有效 mask，为每个 mask 规划一种固定编辑类型（`add`、`replace`、`remove`、`attribute`），用 Qwen3.8-Flash-Next 生成精简且无歧义的指令，用 Qwen-Image-2.1 生成目标图，再用 Qwen3.8-27B 做类型感知的自动审核。
 
-当前正式入口是 `scripts/run_production_4node.py`，四机启动包装在 `scripts/production/bootstrap_arnold_4node.sh`。运行指南和冻结配置见 [docs/FOURNODE_RUN_GUIDE.md](docs/FOURNODE_RUN_GUIDE.md)。详细设计、代码路径、质量和实时进度见 [docs/PIPELINE.md](docs/PIPELINE.md)。历史方案已经压缩到 [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md)。
+单目标 50k 的正式入口是 `scripts/run_production_4node.py`，四机启动包装在 `scripts/production/bootstrap_arnold_4node.sh`。运行指南和冻结配置见 [docs/FOURNODE_RUN_GUIDE.md](docs/FOURNODE_RUN_GUIDE.md)。详细设计、代码路径、质量和实时进度见 [docs/PIPELINE.md](docs/PIPELINE.md)。历史方案已经压缩到 [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md)。
+
+## 当前分组训练的四机入口
+
+15,000 组反事实孪生＋5,000 组链式多目标，使用 instruction/mask 2.0。已准备独立目录
+`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016`，
+15,994 张源图及标注已复制、按图像哈希分成四份，并排除评测源图。尚未提交四机任务。
+
+```bash
+# Arnold：4 workers × 8 H100，四台填写同一入口。
+exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016/deployment/arnold_entry_full.sh
+```
+
+新入口 `scripts/run_group_production_4node.py` 按最终通过配额补样，支持模型本地缓存、分阶段 GPU 并行、逐组恢复、全部媒体归档以及每 5 分钟的 tqdm 风格日志。完整命令、资源、恢复及初步 3–7 天预算见 [四机指南首节](docs/FOURNODE_RUN_GUIDE.md#当前分组训练任务15k-孪生5k-多目标2026-10-16)。自动通过清单与人工验收分开，缺额保留为 partial，不降低质量门槛凑数。
 
 ## 已完成的 50k 数据
 
