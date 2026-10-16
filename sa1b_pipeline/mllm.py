@@ -51,8 +51,10 @@ class VLLMSelector:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         from .mllm_runtime import architecture_options
-        architecture_kwargs = architecture_options(model_id, tensor_parallel_size)
+        from .model_cache import resolve_model
         self.model_id = model_id
+        model_id = resolve_model(model_id)
+        architecture_kwargs = architecture_options(model_id, tensor_parallel_size)
         self.batch_size = batch_size
         # Reuse the parent repository's production Qwen3.8 backend. It pins
         # the multimodal processor settings and the non-thinking chat template

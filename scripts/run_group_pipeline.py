@@ -179,7 +179,7 @@ def _group_id(kind: str, row: dict[str, Any]) -> str:
     return f"{kind}-{row['candidate']['source_id']}-{digest}"
 
 
-def _validate_multi_selection_operations(rows: list[dict[str, Any]]) -> None:
+def _validate_multi_selection_operations(rows: list[dict[str, Any]], *, aggregate_balance: bool = True) -> None:
     """Fail before planning if a shard violates the multi-target contract.
 
     Selection is the only stage allowed to assign operation types.  A stale
@@ -206,7 +206,7 @@ def _validate_multi_selection_operations(rows: list[dict[str, Any]]) -> None:
     # release preflight tight enough to reject the old fixed-order skew while
     # allowing a small, recorded residual imbalance.
     limit = max(8, int(math.ceil(max(targets.values(), default=0) * 0.10)))
-    if max((abs(value) for value in deviations.values()), default=0) > limit:
+    if aggregate_balance and max((abs(value) for value in deviations.values()), default=0) > limit:
         raise RuntimeError(f"multi operation quota skew exceeds {limit}: {deviations}")
 
 
@@ -424,6 +424,8 @@ def main(argv=None):
     p.add_argument("--locate-planning-scene", action="store_true",
                    help="experimental full-scene outside contours and unit tags for crop-to-scene grounding")
     p.add_argument("--plan-only", action="store_true")
+    p.add_argument("--defer-blind", action="store_true",
+                   help="plan-only: persist raw twin plans for a separate frozen blind-model stage")
     p.add_argument("--generate-only", action="store_true",
                    help="persist generated groups without loading the audit model")
     p.add_argument("--audit-only", action="store_true",
@@ -434,6 +436,8 @@ def main(argv=None):
     p.add_argument("--max-groups", type=int)
     p.add_argument("--candidate-pool-factor", type=float, default=3.0,
                    help="oversample planning candidates so rejected plans can be refilled")
+    p.add_argument("--dynamic-operation-quotas", action="store_true",
+                   help="external coordinator enforces final multi operation quotas; retain per-group rules")
     p.add_argument("--quota-from-selection", action="store_true",
                    help="use frozen shard operation/relation counts to avoid per-rank rounding drift")
     p.add_argument("--twin-same-category-fraction", type=float, default=.30,
@@ -445,6 +449,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     if sum((args.plan_only, args.selection_only, args.generate_only, args.audit_only)) > 1:
         p.error("selection/plan/generate/audit-only modes are mutually exclusive")
+    if args.defer_blind and not args.plan_only:
+        p.error("--defer-blind requires --plan-only")
     if args.audit_only and (not args.audit_model or args.planner_model or args.editor_model):
         p.error("--audit-only requires --audit-model and no planner/editor model")
     if args.publish and (args.plan_only or args.selection_only or args.generate_only):
@@ -469,6 +475,7 @@ def main(argv=None):
                                            **({"twin_contract": "blind-cross-category-1",
                                                "twin_same_category_fraction": args.twin_same_category_fraction,
                                                **({"quota_from_selection": True} if args.quota_from_selection else {})} if args.kind == "twins" else {}),
+                                           **({"dynamic_operation_quotas": True} if args.dynamic_operation_quotas else {}),
                                            **({"structured_planning_json": True} if args.structured_planning_json else {}),
                                            **({"site_model": str(Path(args.site_model).resolve())} if args.site_model else {})})
     candidates = _candidate_rows(args, reservation_ids)
@@ -484,7 +491,7 @@ def main(argv=None):
     if not selected:
         raise RuntimeError("candidate selection produced no groups")
     if args.kind == "multi":
-        _validate_multi_selection_operations(selected)
+        _validate_multi_selection_operations(selected, aggregate_balance=not args.dynamic_operation_quotas)
     if args.split == "train" and args.reservation:
         assert_no_eval_leakage((r["candidate"] for r in selected), args.reservation)
     selection_operations = Counter()
@@ -638,7 +645,7 @@ def main(argv=None):
                 print(json.dumps({"planning_batch_completed": min(batch_start + len(batch), len(pending)),
                                   "planning_batch_total": len(pending), "checkpointed": len(planned)},
                                  ensure_ascii=False), flush=True)
-        if args.kind == 'twins' and planner is not None:
+        if args.kind == 'twins' and planner is not None and not args.defer_blind:
             from sa1b_pipeline.blind_identifiability import run_blind_probes
             run_blind_probes(planned, planner, root / 'blind_probes')
             for group in planned:
@@ -646,7 +653,7 @@ def main(argv=None):
     finally:
         if planner is not None and hasattr(planner, "close"):
             planner.close()
-    if args.kind == 'twins':
+    if args.kind == 'twins' and not args.defer_blind:
         for group in planned:
             check = group.get('group_checks', {}).get('blind_disambiguation', {})
             if check.get('pass') is not True:

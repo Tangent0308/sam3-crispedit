@@ -13,12 +13,15 @@ class Sam3SiteResolver:
         import torch
         from transformers import Sam3Model, Sam3VideoModel, Sam3Processor
         started = time.perf_counter()
+        from .model_cache import resolve_model
+        canonical_model_path = str(model_path)
+        model_path = resolve_model(model_path)
         config = json.loads((Path(model_path)/'config.json').read_text())
         cls = Sam3VideoModel if 'Sam3VideoModel' in config.get('architectures', []) else Sam3Model
         loaded = cls.from_pretrained(model_path, local_files_only=True, dtype=torch.bfloat16)
         self.model = getattr(loaded, 'detector_model', loaded).to(device).eval()
         self.processor = Sam3Processor.from_pretrained(model_path, local_files_only=True)
-        self.device, self.model_path = device, str(model_path)
+        self.device, self.model_path = device, canonical_model_path
         self.load_seconds = time.perf_counter()-started
 
     def __call__(self, source, host, spec, difference_site):

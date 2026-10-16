@@ -1,5 +1,94 @@
 # 四机运行指南
 
+## 当前分组训练任务：15k 孪生＋5k 多目标（2026-10-16）
+
+此节是本次新任务入口。后文的 50k 命令是已完成任务的历史说明，不能用来启动本次生成。当前已准备好独立目录和冻结部署包，尚未提交四机任务。
+
+- 资源：**4 台 × 8 张 H100 80GB**，CUDA 12.9；每台建议至少 64 CPU 核、512 GiB 主存和 500 GiB 本地可用磁盘（Flash-Next 使用 CPU offload）。
+- 共享挂载：`/mnt/bn/strategy-mllm-train`。训练源图及 RLE 标注已复制到新目录，运行不依赖原始 HDFS 挂载。
+- 新目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016`。
+- 自动通过目标：孪生 **15,000 组**，四种编辑各 3,750；同类 4,500／跨类 10,500；双成员 12,750／三成员 2,250，成功组对应 32,250 张目标图。多目标 **5,000 组**，2／3／4／5 个目标分别 1,000／1,500／1,250／1,250，共 17,750 个成功编辑步骤。
+- 最终孪生还限制每个 scope 至多 5%，实际源 selector 为部件的组不少于 40%；add 按解析后的附着部位统计。面积桶与同宿主部件比例会记录和监控，未作为额外硬配额，不能宣称它们自动精确达到 30/40/30 和 10%。
+- 每个 rank 负责 3,750 个孪生、1,250 个多目标的最终名额。多目标按操作多重集分配名额，2–4 个目标不重复类型，5 个目标四类俱全且仅一类重复；最终各类编辑步骤约 4,438，整数差不超过 3。
+- 每个 rank 先完成孪生再运行多目标；失败组不会减少成员数，低通过类别动态补样。达到尝试预算或候选耗尽后保留缺额，不将不足数发布为足额。孪生总尝试上限 150,000，多目标 100,000。
+- 评测候选继续隔离，本入口不生成 200／100 组评测数据。自动通过不是人工验收，最终记录仍标记未发布。
+
+### 提交到 Arnold 的完整入口
+
+选择 4 workers、每 worker 8 H100，挂载上述共享卷。**四台使用完全相同的脚本**，平台注入 rank，不使用 torchrun，不手填 `ARNOLD_ID`：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016/deployment/arnold_entry_full.sh
+```
+
+该文件完整设置 `GROUP_RUN_ROOT`、`GROUP_RUNTIME_ROOT=/opt/tiger/sa1b-group-production-runtime`、`GROUP_SKIP_SETUP=0`，最后执行 launcher。Launcher 检查真实 4×8 拓扑、代码包与配置校验和、冻结模型文件清单，然后解包到节点本地、安装两套锁定环境、检查 CUDA 算子、缓存模型并启动本 rank。W&B 关闭。不要把入口最后的 `exec bash ...` 删掉。
+
+冻结包来自本分支已提交代码。MLLM 环境固定已验证的 vLLM `0.31.1rc1.dev296+gfe4df3df0.cu129`；编辑器固定 vLLM `0.29.0+cu129` 和 vLLM-Omni commit `44ea27c8094095bbffd88fa3befdfaa55ba4bc50`。两者都使用 `torch 2.13.0+cu129`，不从默认索引重新选择 vLLM。依赖位于 `requirements/group_production/`。这次的新环境不覆盖旧 50k 的 runtime。
+
+### 每台机器的运行方式
+
+采用每波最多 128 组的分阶段调度，阶段之间释放模型，不让两个大模型争同一张卡：
+
+1. CPU 从本 rank 冻结源图中按缺额提出新组合，精确面积检查；多目标的相邻关系用 RLE 检查。每张源图在每种数据集最多保留 2 组，同一个源图＋对象组合不重复规划。
+2. GPU 0–3：Flash-Next FP8 TP4，一组一次规划。孪生随后单独用 GPU 0 上的 27B 做一次原图＋no-ref 盲测，保持本轮验证的模型组合。
+3. GPU 0–7：每张卡一个编辑器，不同组并行，组内各成员／链步骤按现有方法生成；40 步、完整 Ref、区域贴回与 difference-first-3 不变。SAM3 只在需要时加载。
+4. GPU 0–3：最多四个 27B 审核副本，每个副本按批次保存逐组审核检查点。孪生每组一次联合审核；多目标沿用每步审核＋最终联合审核。
+5. 仅按完整自动通过组计数，下一波补缺额。整波结束后更新 `accepted.jsonl`，逐阶段日志与逐组检查点在波内实时落盘。
+
+### 进度与数据位置
+
+每 300 秒追加一行类似 tqdm 的进度到：
+
+```bash
+tail -F /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016/logs/progress_tqdm.log
+```
+
+它显示两种数据的最终通过数／目标、尝试数、各 rank 阶段和 ETA；至少通过 32 组后才基于当前实测吞吐给出 ETA。冷启动、补低通过类别、停机时间会影响该估计。rank 0 提前完成时仍保留监控，等其余 rank 结束后退出。聊天窗口不会自动推送日志。
+
+```bash
+ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016
+# 在本仓库根目录可查询；只需 CPU 依赖。
+python scripts/run_group_production_4node.py --root "$ROOT" status
+# 每台的完整 stdout/stderr
+ tail -F "$ROOT/logs/node0.log"
+# 本 rank 的分阶段日志示例
+ tail -F "$ROOT/nodes/node0/twins/waves/00001/planning.log"
+```
+
+每个 rank 的 `nodes/nodeN/{twins,multi}/progress.json` 包含分类缺额，`accepted.jsonl` 包含自动通过记录；`waves/NNNNN` 保存固定选择、规划、盲测、原始成图、审核、错误及每次启动成本。`pool/` 保存 CPU 候选池检查点。
+
+四个 rank 结束后自动合并，数据入口为 `$ROOT/final/twins_train.jsonl` 和 `$ROOT/final/multi_train.jsonl`。所有图片路径相对于 **`$ROOT`**，不是 `final/`；源图、源 mask、执行区域、目标图和多目标中间图均在根目录内，不依赖外部图片链接。缺额时只写 `*.partial.jsonl`，`final/summary.json` 明确给出缺额。也可在运行中主动导出当前快照：
+
+```bash
+python scripts/run_group_production_4node.py --root "$ROOT" export
+```
+
+导出只读已落盘检查点，不重复规划、生图或审核。当前尚无生产通过记录；`verification/smoke/` 是入口连通性测试，永不混入生产配额。
+
+### 中断恢复
+
+正常失败会保存错误并释放 rank 锁；重新提交完全相同的入口和目录即可。已完成的阶段跳过，已有计划和目标图按原检查点恢复，审核也按组复用。若正好在模型返回但结果落盘前中断，仅未落盘的请求可能重新执行；不承诺跨进程崩溃的严格 exactly-once。
+
+共享锁使用原子创建目录，兼容不支持 flock 的共享文件系统。若 worker 被 SIGKILL／机器直接回收，跨主机残留锁不会被擅自抢占。**确认上一次四机任务全部停止后**，只对遗留 rank 执行下面的恢复命令，然后仍使用原入口重启：
+
+```bash
+python scripts/run_group_production_4node.py --root "$ROOT" recover-lock \
+  --rank 0 --previous-workers-stopped
+```
+
+锁会重命名留档，不删除数据。不要同时提交两个写入同一根目录的四机任务；不要修改冻结配置、代码包、模型权重或输入清单来绕过检查。候选库耗尽属于明确的产量缺口，需要另做可审计的候选扩充，单纯重启不会凭空补足。
+
+### 初步时间预算
+
+当前没有四机稳态实测。按已有小批的每张编辑约 19–20 秒、每组单次规划＋独立盲测、分阶段冷启动、审核并行及失败补样估算：孪生 15k 约 **2–4 天**，多目标 5k 约 **1–3 天**，全部自动生成暂按 **3–7 天** 排期，首次环境安装与模型复制另预留 **0.5–2 小时**。这是假设通过规划／前置检查后的完整组自动通过率，孪生约 45–60%、多目标约 20–35%；多目标在新版本下尚无足够样本证明这一范围。
+
+本次入口验证的多目标 2 个候选没有自动通过组（1 个规划拒绝，1 个完成两步生成后审核拒绝），所以 20–35% 只是排期假设。
+
+这不是保证完成时间。add／三成员／五目标组可能更慢；若实际通过率低于上述范围，时间可能超过一周，或先耗尽候选。原需求文档的 1–1.5 天估算采用旧版单条高通过率，不能直接沿用。四机启动后先用前两轮的分阶段计时、分类通过率和候选消耗更新预算；人工图像验收不计入上述自动流水线时间。
+
+
 ## 运行参数
 
 - Arnold worker：4
