@@ -354,7 +354,11 @@ def test_twin_noop_uses_source_fields_and_word_boundaries(tmp_path):
                          group_id="tw", geometry=geometry)
 
 
-def test_audit_only_preserves_generated_checkpoint_without_loading_editor(tmp_path, monkeypatch):
+import pytest
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_audit_only_preserves_generated_checkpoint_without_loading_editor(tmp_path, monkeypatch, empty):
     import json
     import scripts.run_group_pipeline as runner
     image, objects = _source(tmp_path)
@@ -366,7 +370,7 @@ def test_audit_only_preserves_generated_checkpoint_without_loading_editor(tmp_pa
     (root / "inputs/selected.jsonl").write_text(json.dumps(selection) + "\n")
     # Audit rejection remains available for diagnosis; it never enters final.
     group = {"twin_id": "tw", "group_checks": {"group_pass": False}}
-    (root / "generated.jsonl").write_text(json.dumps(group) + "\n")
+    (root / "generated.jsonl").write_text("" if empty else json.dumps(group) + "\n")
     before = (root / "generated.jsonl").read_bytes()
     monkeypatch.setattr(runner, "_candidate_rows", lambda *a: [candidate])
     def forbidden(*a):
@@ -375,12 +379,15 @@ def test_audit_only_preserves_generated_checkpoint_without_loading_editor(tmp_pa
     class Auditor:
         def close(self):
             pass
-    monkeypatch.setattr(runner, "_auditor", lambda *a: Auditor())
+    monkeypatch.setattr(runner, "_auditor", forbidden if empty else lambda *a: Auditor())
     monkeypatch.setattr(runner, "audit_twin_groups", lambda groups, *a: groups)
     runner.main(["--kind", "twins", "--manifest", str(tmp_path / "manifest.jsonl"),
                  "--output-root", str(root), "--target", "1", "--audit-only", "--audit-model", "fake"])
     assert (root / "generated.jsonl").read_bytes() == before
-    assert json.loads((root / "audited.jsonl").read_text())["twin_id"] == "tw"
+    if empty:
+        assert (root / "audited.jsonl").read_text() == ""
+    else:
+        assert json.loads((root / "audited.jsonl").read_text())["twin_id"] == "tw"
     assert (root / "final/twins_train.jsonl").read_text() == ""
     assert not json.loads((root / "release.json").read_text())["published"]
 
@@ -655,3 +662,10 @@ def test_fast_dilation_matches_original_square_kernel_at_edges_and_holes():
                 for dx in range(2 * radius + 1):
                     reference |= padded[dy:dy + mask.shape[0], dx:dx + mask.shape[1]]
             assert np.array_equal(_dilate(mask, radius), reference)
+
+
+def test_add_support_ranking_does_not_equate_seating_and_work_surfaces():
+    from sa1b_pipeline.group_selection import twin_operation_priority
+    objects = lambda *names: [{'category':name} for name in names]
+    assert twin_operation_priority(objects('table','desk'),'add') > twin_operation_priority(objects('table','chair'),'add')
+    assert twin_operation_priority(objects('chair','stool'),'add') > twin_operation_priority(objects('table','chair'),'add')
