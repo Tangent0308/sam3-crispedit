@@ -15,6 +15,42 @@ from scripts.run_group_pipeline import _group_id
 from scripts.preview_group_cases import page
 
 
+
+def append_retention_evidence(canvas, group, font_path):
+    """Show failed attempts separately; the main TAR is the committed image."""
+    retention = group.get("retention")
+    if not retention:
+        return canvas
+    decisions = retention["decisions"]
+    dropped = [x for x in decisions if not x["accepted"]]
+    width = canvas.width
+    out = Image.new("RGB", (width, canvas.height + 170 + 650 * len(dropped)), "#f2f5fa")
+    out.paste(canvas, (0, 0)); draw = ImageDraw.Draw(out)
+    font = lambda size: ImageFont.truetype(font_path, size)
+    y = canvas.height + 20
+    draw.text((52,y), f"逐步保留：原计划 {retention['planned_n_targets']} 项 → 实际保留 {group['n_targets']} 项", font=font(32),fill="#182b43")
+    draw.text((52,y+48), "保留：" + ", ".join(retention['kept_unit_ids']) + "；丢弃：" + ", ".join(retention['dropped_unit_ids']),font=font(28),fill="#33445b")
+    draw.text((52,y+90), "下列失败尝试没有进入上面的最终 TAR；后续编辑从最近的合格图继续。",font=font(26),fill="#a73836")
+    col=(width-140)//3
+    for index, decision in enumerate(dropped):
+        member=json.loads(Path(decision['checkpoint']).read_text())['member']
+        y=canvas.height+170+index*650
+        draw.text((52,y), f"丢弃 {member['unit_id']} / {member['operation']}",font=font(30),fill="#a73836")
+        instruction=member['instruction']
+        draw.multiline_text((52,y+42), "\n".join(textwrap.wrap(instruction,145)),font=font(24),fill="#33445b")
+        with Image.open(member['mask']) as im:mask=im.convert('L')
+        box=mask.getbbox();pad=max(32,round(max(box[2]-box[0],box[3]-box[1])*.35))
+        box=(max(0,box[0]-pad),max(0,box[1]-pad),min(mask.width,box[2]+pad),min(mask.height,box[3]+pad))
+        for j,(label,path) in enumerate([('SRC / LAST COMMITTED INPUT',member['step_input_image']),('MASK',member['mask']),('REJECTED ATTEMPT / NOT FINAL',member['step_output_image'])]):
+            x=52+j*(col+15)
+            draw.text((x,y+115),label,font=font(22),fill="#33445b")
+            with Image.open(path) as raw:tile=ImageOps.contain(raw.convert('RGB').crop(box),(col,440))
+            out.paste(tile,(x+(col-tile.width)//2,y+155+(440-tile.height)//2))
+        reason='; '.join(decision['reasons'])
+        draw.text((52,y+604),reason[:160],font=font(22),fill="#a73836")
+    return out
+
+
 def build(root: Path, font_path: str, audit_manifest: Path | None = None):
     chosen = [
         json.loads(l)
@@ -50,6 +86,7 @@ def build(root: Path, font_path: str, audit_manifest: Path | None = None):
                 "note_en": review.get("note_en", "Pending visual review"),
             }
             canvas = page(group, "multi", i, len(chosen), root)
+            canvas = append_retention_evidence(canvas, group, font_path)
         else:
             rejection = root / "rejected" / f"{gid}.json"
             reason = (

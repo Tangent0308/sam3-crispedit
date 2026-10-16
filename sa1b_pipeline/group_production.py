@@ -66,9 +66,10 @@ def cell(row, kind):
     if kind == "twins":
         units = row.get("objects", row.get("members", []))
         return f"{row['operation']}:{row.get('category_relation', 'same')}:{len(units)}"
-    ops = row.get("operations") or [
-        u["instruction_spec"]["operation"] for u in row["units"]
-    ]
+    # Final groups may retain fewer targets than their original plan.
+    # Count actual instructions, never the stale planned operation list.
+    ops = ([u["instruction_spec"]["operation"] for u in row["units"]]
+           if row.get("units") else row.get("operations", []))
     return multi_cell(ops)
 
 
