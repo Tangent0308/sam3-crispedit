@@ -2,7 +2,7 @@
 
 ## 多目标逐步保留版本：keep-passed-v1
 
-当前源码新建的四机配置新增 `multi_commit_policy=keep-passed-v1`。多目标在规划结束后进入 `scripts/run_multi_transactional.py`：GPU 0–5 常驻编辑器、6–7 常驻审核器，每组仍串行，不同组交错运行；审核服务按批次处理不同组的请求。孪生流程不变。下面列出的 `sa1b_samtok_group_train_20k_20261016` 是此前已冻结的旧包，没有原地升级；缺少该配置键时按原流程续跑。
+当前源码新建的四机配置新增 `multi_commit_policy=keep-passed-v1`。多目标在规划结束后进入 `scripts/run_multi_transactional.py`：GPU 0–5 常驻编辑器、6–7 常驻审核器，每组仍串行，不同组交错运行；审核服务按批次处理不同组的请求。孪生流程不变。下面列出的 `sa1b_samtok_group_train_20k_20261016` 是此前已冻结的旧流程，仅补入部署字体修复，没有升级生成流程；缺少该配置键时按原流程续跑。
 
 单机小批可复用已有、尚未生成的 `planned.jsonl`，使用新的输出目录。以下命令在仓库根目录运行，环境与模型路径按当前机器设置：
 
@@ -36,7 +36,7 @@ python scripts/run_multi_transactional.py \
 
 ## 当前分组训练任务：15k 孪生＋5k 多目标（2026-10-16）
 
-此节描述此前冻结的分组任务入口（仍采用整组保留策略）。后文的 50k 命令是已完成任务的历史说明，不能用来启动本次生成。当前已准备好独立目录和冻结部署包，尚未提交四机任务。
+此节描述此前冻结的分组任务入口（仍采用整组保留策略）。后文的 50k 命令是已完成任务的历史说明，不能用来启动本次生成。四机曾于 2026-10-16 07:27 UTC 启动，但全部在模型加载前因 `missing audit font` 退出，尚无生成记录。已针对该启动故障准备字体补丁；重启后的实际进度以共享目录日志和 `progress.json` 为准。
 
 - 资源：**4 台 × 8 张 H100 80GB**，CUDA 12.9；每台建议至少 64 CPU 核、512 GiB 主存和 500 GiB 本地可用磁盘（Flash-Next 使用 CPU offload）。
 - 共享挂载：`/mnt/bn/strategy-mllm-train`。训练源图及 RLE 标注已复制到新目录，运行不依赖原始 HDFS 挂载。
@@ -60,6 +60,14 @@ exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_tra
 该文件完整设置 `GROUP_RUN_ROOT`、`GROUP_RUNTIME_ROOT=/opt/tiger/sa1b-group-production-runtime`、`GROUP_SKIP_SETUP=0`，最后执行 launcher。Launcher 检查真实 4×8 拓扑、代码包与配置校验和、冻结模型文件清单，然后解包到节点本地、安装两套锁定环境、检查 CUDA 算子、缓存模型并启动本 rank。W&B 关闭。不要把入口最后的 `exec bash ...` 删掉。
 
 冻结包来自本分支已提交代码。MLLM 环境固定已验证的 vLLM `0.31.1rc1.dev296+gfe4df3df0.cu129`；编辑器固定 vLLM `0.29.0+cu129` 和 vLLM-Omni commit `44ea27c8094095bbffd88fa3befdfaa55ba4bc50`。两者都使用 `torch 2.13.0+cu129`，不从默认索引重新选择 vLLM。依赖位于 `requirements/group_production/`。这次的新环境不覆盖旧 50k 的 runtime。
+
+### 字体启动故障与恢复
+
+`AssertionError: missing audit font` 表示旧入口要求节点安装 `/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`。这是代码漏打包运行依赖；其后的 SIGTERM 是平台清理失败任务，并非 CUDA 或显存报错。不能只删除断言：规划标注和审核拼图也曾使用该绝对路径。
+
+当前 `sa1b_pipeline/assets/fonts/` 随代码包含 DejaVu 普通／粗体字体、许可和 SHA-256 清单；`sa1b_pipeline/fonts.py` 统一提供字体。入口先用标准库核验字体，再在两套运行环境中实际绘制标签，无需 root、系统字体或额外下载。安装 Python 包时也会包含字体资源。
+
+本次共享部署仅对原冻结包进行字体热修复，没有替换为最新生成管线。旧部署备份、逐文件变更清单及新旧包哈希保存在 `deployment/font_hotfix_20261016.json` 和其中记录的备份目录。配置、源输入、模型清单与数据目录不变；继续使用上面的同一入口重启四机。已有波次检查点的任务不可直接套用本次补丁：本任务修复时四个 rank 均未进入模型阶段，没有波次或已完成样本。
 
 ### 每台机器的运行方式
 

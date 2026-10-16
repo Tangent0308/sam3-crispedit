@@ -1,5 +1,6 @@
 """Experimental visual callouts; no target selection, mask edits, or model calls."""
 import numpy as np
+from .fonts import load_font
 from PIL import Image, ImageDraw, ImageFont
 
 from .geometry import load_mask
@@ -90,7 +91,7 @@ def annotate_crop(path, source_mask_path, source_size, crop_box, target, objects
     overlay = Image.new('RGB', size)
     coverage = Image.new('L', size)
     draw, alpha = ImageDraw.Draw(overlay), ImageDraw.Draw(coverage)
-    font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 24)
+    font = load_font(24, bold=True)
 
     def callout(mask, label, color):
         yy, xx = np.nonzero(mask)

@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from .fonts import load_font
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from .multi_semantics import MULTI_PHYSICAL_RULES
 
@@ -110,7 +111,7 @@ def _member_comparison(paths: list[str], out: Path, *, crop_panels: bool = False
         panel.thumbnail((tile_w, tile_h - 64), Image.Resampling.LANCZOS)
         tile = Image.new("RGB", (tile_w, tile_h), "white")
         ImageDraw.Draw(tile).text((12, 6), f"U{index} | MEMBER {index}", fill="black",
-                                  font=ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36))
+                                  font=load_font(36, bold=True))
         tile.paste(panel, ((tile_w - panel.width) // 2, 64 + (tile_h - 64 - panel.height) // 2))
         tiles.append(tile)
     columns = 1 if crop_panels else min(2, max(1, len(tiles)))
@@ -370,7 +371,7 @@ def multi_audit_comparison(group: dict[str, Any], out: Path) -> str:
     width, row_h, header = 1536, 288, 52
     panel = Image.new("RGB", (width, header + row_h * len(units)), "white")
     draw = ImageDraw.Draw(panel)
-    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+    font = load_font(22, bold=True)
     for i, label in enumerate(("ORIGINAL", "AFTER THIS STEP", "FINAL", "SOURCE MASK")):
         draw.text((384*i+12, 10), label, fill="black", font=font)
     order = group.get("generation_order") or [u["unit_id"] for u in units]
