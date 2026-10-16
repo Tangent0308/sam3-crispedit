@@ -20,10 +20,16 @@ from .validate import _target_panel, audit_prompt, deterministic_check
 
 TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. Image 1 is the clean original full scene. Image 2 contains one row per member: SOURCE original crop (left), RESULT edited crop (middle), and MASK ONLY black-and-white selector (right). Judge generated appearance ONLY from the middle RESULT column. The right column is never a result. White selects the source object and black excludes it. The source scene and the member result images are provided. Different categories are allowed; comparable means all whole objects or all parts, with the shared edit natural for every member. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Before deciding, match each white selector to the actual source part and exclude black holes and neighboring objects. Check every ref against all similar instances in the full scene; image-left/image-right refer to the original scene, never crop row order. For add, verify direct physical contact with the selected host/site, not a nearby surface. For remove, check for target remnants and unsupported remnants; deleting a wheel, door, support or other functional part is not natural unless the image clearly supports it. For replace, require a visibly different physical form/design, not only a color or material change. For attribute, verify the requested surface changed while geometry, markings and unrelated materials remain. Judge only visible evidence and fail a member with a concrete mismatch. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
-MULTI_GROUP_PROMPT = '''You are auditing a joint multi-target edit group. The original scene, each chain step, and the final result are provided. Check that each original ref identifies one target, every assigned operation is correct and completed in its step and remains correct later, adjacent targets do not bleed into each other, and the final image is natural. The group fails if any operation type is wrong. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
+MULTI_GROUP_PROMPT = '''Audit one joint multi-target edit. Image 1 is the clean ORIGINAL full scene; image 2 is the clean FINAL full scene. Image 3 has one row per unit, explicitly labeled with its unit ID and generation step. Its FOUR aligned columns are ORIGINAL crop, AFTER THIS STEP crop, FINAL crop, BINARY SOURCE MASK. White selects the source region; the mask column is NEVER a generated result. Use clean crop columns to judge appearance. Original-to-after-step shows the requested edit, after-step-to-final shows whether it survived later edits. Other targets may legitimately change in later steps; do not call their requested changes damage. The per-step input/output audits separately check local preservation.
+Check each ref against the ORIGINAL full scene, each operation and payload against its row, and final consistency across adjacent targets. Fail concrete wrong targets, ambiguous refs, missing/incorrect edits, operation misclassification, visible crosstalk, floating additions, malformed geometry or destroyed prior edits. Add must create genuinely new visible content in direct contact with its source site, not merely recolor an existing accessory. Replace needs a new physical form/design. Minor texture differences or plausible taste alone are not failures. For removal, a dark flat patch covering clothing is not evidence of successful removal: inspect the revealed structure and distinguish erasure from recoloring. For attributes, compare the specified property across the intended surface; do not claim a brown surface is black merely because an adjacent component turned black. Report the unit and visible discrepancy for each failure. Inspect every row before deciding; do not infer unchanged colors from the small full-scene thumbnail. Return JSON only: {"units":[{"unit_id":"U1","source_entity":"visible selected entity","ref_matches_mask":true,"step_done":true,"survives":true,"natural":true,"issue":"brief visible evidence"}],"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}. Include exactly one units entry for EVERY supplied target; inspect each independently before the overall decision.'''
 
 TWIN_REQUIRED_AUDIT_FIELDS = ("unique_refs", "operations_correct", "all_targets_done", "members_preserved", "comparable", "natural")
 MULTI_REQUIRED_AUDIT_FIELDS = ("unique_refs", "operations_correct", "all_targets_done", "no_crosstalk", "outside_preserved", "natural")
+
+
+def group_audit_contract(kind: str, model: str) -> dict[str, str]:
+    return {"model": model, "kind": kind, "mode": "joint-core-defects-v4" if kind == "twins"
+            else "multi-steps-and-aligned-evidence-v3"}
 
 
 def _semantic_group_pass(audit: dict[str, Any], fields: tuple[str, ...]) -> bool:
@@ -325,23 +331,48 @@ def audit_twin_groups_joint(groups: list[dict[str, Any]], model: VLLMAuditor,
     return groups
 
 
+def multi_audit_comparison(group: dict[str, Any], out: Path) -> str:
+    """Aligned local evidence, at most 1536px high so five units stay legible."""
+    import numpy as np
+    source = Image.open(group["source_image"]).convert("RGB")
+    final = Image.open(group["joint_target"]).convert("RGB")
+    units = group["units"]
+    width, row_h, header = 1536, 288, 52
+    panel = Image.new("RGB", (width, header + row_h * len(units)), "white")
+    draw = ImageDraw.Draw(panel)
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+    for i, label in enumerate(("ORIGINAL", "AFTER THIS STEP", "FINAL", "SOURCE MASK")):
+        draw.text((384*i+12, 10), label, fill="black", font=font)
+    order = group.get("generation_order") or [u["unit_id"] for u in units]
+    for i, unit in enumerate(units):
+        mask = Image.open(unit["mask"]).convert("L")
+        support = Image.open(unit.get("support_mask") or unit["mask"]).convert("L")
+        active = np.asarray(support) > 127
+        ys, xs = np.nonzero(active)
+        if not len(xs):
+            raise ValueError("empty multi audit support")
+        margin = max(20, round(max(xs.max()-xs.min(), ys.max()-ys.min()) * .18))
+        box = (max(0, int(xs.min())-margin), max(0, int(ys.min())-margin),
+               min(source.width, int(xs.max())+margin+1), min(source.height, int(ys.max())+margin+1))
+        y = header + i*row_h
+        draw.text((12, y), f"{unit['unit_id']} | STEP {order.index(unit['unit_id'])+1} | {unit['operation']}", fill="black", font=font)
+        after = Image.open(unit["step_output_image"]).convert("RGB")
+        for j, image in enumerate((source, after, final, mask.convert("RGB"))):
+            crop = image.crop(box)
+            crop.thumbnail((376, row_h-38), Image.Resampling.LANCZOS)
+            panel.paste(crop, (j*384+(384-crop.width)//2, y+34+(row_h-38-crop.height)//2))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    panel.save(out)
+    return str(out)
+
+
 def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_dir: str | Path) -> list[dict[str, Any]]:
     panel_dir = Path(panel_dir)
     member_audits = _single_member_audits(groups, model, panel_dir / "steps", kind="multi")
     jobs = []
     for group in groups:
-        images = [group["source_image"]]
-        marked = _marked_scene(group)
-        if marked:
-            images.append(marked)
-        comparison_paths = []
-        for member in group["units"]:
-            if member.get("step_output_image"):
-                comparison_paths.append(member["step_output_image"])
-        if group.get("joint_target") and group["joint_target"] not in images:
-            comparison_paths.append(group["joint_target"])
-        if comparison_paths:
-            images.append(_member_comparison(comparison_paths, panel_dir / f"{group['multi_id']}_comparison.jpg"))
+        comparison = multi_audit_comparison(group, panel_dir / f"{group['multi_id']}_aligned.png")
+        images = [group["source_image"], group["joint_target"], comparison]
         jobs.append({"job_id": group["multi_id"], "images": images[:3],
                      "prompt": MULTI_GROUP_PROMPT + "\n" + BLIND_RULE + "\nTarget contract:\n" +
                      _target_contract(group, kind="multi")})
@@ -356,8 +387,16 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
             for item in audits)
         joint["member_semantic_audit_pass"] = member_pass
         joint["semantic_audit"] = audit
-        semantic_pass = _semantic_group_pass(audit, MULTI_REQUIRED_AUDIT_FIELDS)
-        joint["semantic_audit_pass"] = semantic_pass
+        details = audit.get("units", [])
+        expected = {u["unit_id"] for u in group["units"]}
+        detail_pass = (isinstance(details, list) and len(details) == len(expected)
+                       and all(isinstance(x, dict) for x in details)
+                       and {x.get("unit_id") for x in details} == expected
+                       and all(x.get("source_entity") and all(x.get(k) is True for k in
+                           ("ref_matches_mask", "step_done", "survives", "natural")) for x in details))
+        joint["per_target_evidence_pass"] = bool(detail_pass)
+        semantic_pass = _semantic_group_pass(audit, MULTI_REQUIRED_AUDIT_FIELDS) and detail_pass
+        joint["semantic_audit_pass"] = bool(semantic_pass)
         step_pass = all(x.get("decision") != "fail" for x in joint.get("steps", []))
         joint["pass"] = bool(joint.get("blind_protocol", {}).get("pass") is True and member_pass and step_pass and joint.get("outside_union_support_fraction", 1.0) <= 0.02
                               and semantic_pass)

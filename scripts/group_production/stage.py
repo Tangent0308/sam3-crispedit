@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -65,16 +66,17 @@ def main():
     groups = read_rows(root / "generated.jsonl")[args.worker :: args.workers]
     cache = root / "audit_checkpoints"
     cache.mkdir(exist_ok=True)
-    immutable_json(
-        cache / "contract.json",
-        {
-            "model": args.model,
-            "kind": args.kind,
-            "mode": "joint-core-defects-v4"
-            if args.kind == "twins"
-            else "multi-steps-and-joint",
-        },
-    )
+    from sa1b_pipeline.group_audit import group_audit_contract
+    # Shared FUSE metadata can report exists() just before open() becomes
+    # visible. Retry only that transient ENOENT, never a changed contract.
+    for attempt in range(6):
+        try:
+            immutable_json(cache / "contract.json", group_audit_contract(args.kind, args.model))
+            break
+        except FileNotFoundError:
+            if attempt == 5:
+                raise
+            time.sleep(.1 * (attempt + 1))
     pending = []
     for g in groups:
         gid = g.get("twin_id") or g["multi_id"]

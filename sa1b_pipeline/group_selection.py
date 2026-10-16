@@ -623,7 +623,7 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
                     gap = gap_pixels(sa, sb)
                     overlap = float((sa & sb).sum()) / max(1, int(sb.sum()))
                     evidence = {
-                        "eligible": gap <= 0.1 * max(1, short) and overlap <= 0.10,
+                        "eligible": gap <= 0.1 * max(1, short) and not (ma & mb).any(),
                         "gap_pixels": gap,
                         "threshold_pixels": 0.1 * max(1, short),
                         "support_a_over_source_b": overlap,

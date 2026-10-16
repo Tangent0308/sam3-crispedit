@@ -268,6 +268,36 @@ def _outside_fraction(source: str, edited: str, allowed: np.ndarray) -> float:
     return float(delta[~allowed].mean()) if (~allowed).any() else 0.0
 
 
+def multi_support_preflight(group: dict[str, Any], output_dir: str | Path) -> dict[str, Any]:
+    """Clip writable collars around other targets; source extents cannot overlap."""
+    size = Image.open(group["source_image"]).size
+    members = group["units"]
+    masks = [load_mask({"mask_path": m.get("mask_v1") or m["mask"]}, size) for m in members]
+    supports = [region_support_mask(mask, m["operation"], _unit_dict(m).get("support_policy"))
+                for mask, m in zip(masks, members)]
+    pairs = []
+    for i, support in enumerate(supports):
+        for j, other in enumerate(masks):
+            if i == j:
+                continue
+            fraction = float((support & other).sum() / max(1, other.sum()))
+            pairs.append({"unit_id": members[i]["unit_id"], "other": members[j]["unit_id"],
+                          "support_coverage_of_other": fraction,
+                          "source_overlap_pixels": int((masks[i] & other).sum()),
+                          "effective_support_coverage_of_other": None if (masks[i] & other).any() else 0.0,
+                          "pass": not (masks[i] & other).any()})
+    passed = all(p["pass"] for p in pairs)
+    if passed:
+        for i, member in enumerate(members):
+            protected = np.logical_or.reduce([m for j, m in enumerate(masks) if i != j])
+            directory = Path(output_dir) / "protection" / member["unit_id"]
+            execution = _write_mask(directory / "execution.png", supports[i] & ~protected)
+            protection = _write_mask(directory / "other_sources.png", protected)
+            member["unit"]["execution_mask_path"] = execution
+            member["unit"]["protected_mask_path"] = protection
+    return {"pass": passed, "pairs": pairs, "version": "multi-protection-2"}
+
+
 def generate_multi_group(group: dict[str, Any], output_dir: str | Path, editor: Any, *, seed: int = 0,
                          semantic_audits: dict[str, Any] | None = None) -> dict[str, Any]:
     """Generate a group as a source -> step chain; any failure drops all steps."""
@@ -282,8 +312,24 @@ def generate_multi_group(group: dict[str, Any], output_dir: str | Path, editor: 
         unit_dir = output_dir / f"step_{step:02d}_{unit_id}"
         unit_dir.mkdir(parents=True, exist_ok=True)
         output = unit_dir / "edited.png"
+        started = time.perf_counter()
+        if group.get("support_preflight", {}).get("version") in {"multi-protection-1", "multi-protection-2"}:
+            from .specialist_editors import writable_mask
+            original = np.asarray(Image.open(source).convert("RGB"), dtype=np.int16)
+            before = np.asarray(Image.open(current).convert("RGB"), dtype=np.int16)
+            # Protect visible results of earlier edits, including new content
+            # outside their original source masks. No extra model invocation.
+            prior = np.max(np.abs(original-before), axis=2) > 12
+            own = load_mask({"mask_path": member["mask"]}, (original.shape[1], original.shape[0]))
+            protected = load_mask({"mask_path": unit["protected_mask_path"]}, (original.shape[1], original.shape[0])) | (prior & ~own)
+            support_mask = writable_mask(unit, (original.shape[1], original.shape[0]), require_add_placement=False)
+            unit["execution_mask_path"] = _write_mask(unit_dir / "chain_execution.png", support_mask & ~protected)
+            unit["protected_mask_path"] = _write_mask(unit_dir / "chain_protected.png", protected)
         context = _render_member(current, unit, output, editor, seed)
         support = _support_for(editor, current, unit, unit_dir / "support_mask.png")
+        for key in ("execution_mask_path", "protected_mask_path"):
+            if unit.get(key):
+                member.setdefault("unit", {})[key] = unit[key]
         resolve_source_region(member, current, str(output), unit_dir)
         row = _row(group, member, current, str(output), support, input_image=current,
                    output_image=str(output), step=step, generation_context=context)
@@ -292,7 +338,9 @@ def generate_multi_group(group: dict[str, Any], output_dir: str | Path, editor: 
         row["step_audit"] = check
         member.update({"step_input_image": current, "step_output_image": str(output),
                        "support_mask": support, "generation_context": context, "step_audit": check,
-                       "seed": seed})
+                       "seed": seed, "generation_seconds": time.perf_counter() - started,
+                       "chain_execution_mask": unit.get("execution_mask_path"),
+                       "chain_protected_mask": unit.get("protected_mask_path")})
         rows.append(row)
         current = str(output)
     allowed = _union_support(source, group["units"])
