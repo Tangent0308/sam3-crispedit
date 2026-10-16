@@ -39,10 +39,12 @@ def operation_schedules(
     if n <= 4:
         candidates: Iterable[tuple[str, ...]] = itertools.permutations(OPERATIONS, n)
     else:
+        # The repeated operation may occur at ANY two target positions.
+        # Appending a repeat to four distinct operations missed 144 of the
+        # 240 valid schedules (e.g. add, add, remove, replace, attribute).
         candidates = (
-            tuple(permutation) + (repeat,)
-            for permutation in itertools.permutations(OPERATIONS)
-            for repeat in OPERATIONS
+            schedule for schedule in itertools.product(OPERATIONS, repeat=5)
+            if len(set(schedule)) == 4
         )
     result = []
     for schedule in candidates:

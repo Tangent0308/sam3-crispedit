@@ -145,6 +145,15 @@ def accept(groups, targets, kind):
     return out
 
 
+def multi_priority(row):
+    """Soft operation fit within a quota cell; visual planning remains decisive."""
+    from .group_selection import twin_operation_priority
+    scores = [twin_operation_priority([obj], op)
+              for obj, op in zip(row["objects"], row["operations"])]
+    # Prefer improving the weakest target before polishing easy targets.
+    return min(scores, default=0), sum(scores)
+
+
 def choose(pool, attempted, accepted, targets, kind, limit):
     """Replenish missing final cells; cap source reuse, never mutate instructions."""
     used = {proposal_key(r) for r in attempted}
@@ -189,6 +198,9 @@ def choose(pool, attempted, accepted, targets, kind, limit):
             bucket.sort(
                 key=lambda r: twin_operation_priority(r["objects"], r["operation"])
             )
+    else:
+        for bucket in available.values():
+            bucket.sort(key=multi_priority)
     chosen, allocated, wave_sources = [], Counter(), Counter()
     while len(chosen) < limit:
         options = []
@@ -303,6 +315,9 @@ def propose(job):
                 if multi_cell(schedule) in wanted:
                     rows.append({**row, "operations": list(schedule)})
                     # One representative assignment per operation multiset.
+        # Do not retain the first lexicographic operation assignment when a
+        # better fit exists for the SAME group and SAME operation multiset.
+        rows.sort(key=multi_priority, reverse=True)
         seen = set()
         unique = []
         for row in rows:

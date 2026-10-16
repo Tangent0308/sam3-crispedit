@@ -39,6 +39,9 @@ def status(group, kind):
     checks = group.get("group_checks", {}) if kind == "twins" else group.get("joint_audit", {})
     if checks.get("group_pass") is True or checks.get("pass") is True:
         return "AUTOMATIC GROUP AUDIT: PASS | EXPERIMENTAL, UNPUBLISHED", "#16754a"
+    if kind == "multi" and (checks.get("blind_protocol", {}).get("pass") is False
+                            or any(x.get("decision") == "fail" for x in checks.get("steps", []))):
+        return "DETERMINISTIC GROUP CHECK: FAIL | DIAGNOSTIC, UNPUBLISHED", "#a63838"
     if any(checks.get(k, {}).get("pass") is False for k in
            ("deterministic", "support_gap", "cross_target_preservation")):
         return "DETERMINISTIC GROUP CHECK: FAIL | DIAGNOSTIC, UNPUBLISHED", "#a63838"
@@ -136,6 +139,10 @@ def page(group, kind, number, total, base):
                   font=font(27, True), fill=color)
         draw.multiline_text((margin + 365, y + 17), "\n".join(textwrap.wrap(instruction, 155)),
                             font=font(24), fill="#26394e", spacing=5)
+        if kind == "multi" and m.get("instruction_noref"):
+            ref_lines = len(textwrap.wrap(instruction, 155))
+            draw.text((margin + 365, y + 17 + 29 * ref_lines + 8),
+                      "No-ref: " + m["instruction_noref"], font=font(20), fill="#5a6779")
         input_path = m.get("step_input_image") if kind == "multi" else group["source_image"]
         with Image.open(resolve(m["mask"], base)) as raw:
             mask = raw.convert("L")

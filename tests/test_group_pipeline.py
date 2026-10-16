@@ -327,10 +327,24 @@ def test_multi_step_audit_compares_each_actual_input_and_output(tmp_path):
                     audit = dict(decision="pass", target_done=True, non_target_preserved=True,
                                  natural=True, operation_correct=True)
                 else:
-                    audit = {"decision": "pass", **dict.fromkeys(MULTI_REQUIRED_AUDIT_FIELDS, True)}
+                    audit = {"decision": "pass", **dict.fromkeys(MULTI_REQUIRED_AUDIT_FIELDS, True),
+                             "units": [{"unit_id": u["unit_id"], "source_entity": "bag",
+                                        "ref_matches_mask": True, "step_done": True,
+                                        "survives": True, "natural": True} for u in units]}
                 results.append({"job_id": job["job_id"], "semantic_audit": audit})
             return results
     assert audit_multi_groups([group], Model(), tmp_path / "audit")[0]["joint_audit"]["pass"]
+
+    class MissingTarget(Model):
+        def call_batch(self, jobs):
+            results = super().call_batch(jobs)
+            for result in results:
+                if "::" not in result["job_id"]:
+                    result["semantic_audit"]["units"].pop()
+            return results
+    checked = audit_multi_groups([group], MissingTarget(), tmp_path / "missing")[0]
+    assert checked["joint_audit"]["per_target_evidence_pass"] is False
+    assert checked["joint_audit"]["pass"] is False
 
 
 def test_twin_noop_uses_source_fields_and_word_boundaries(tmp_path):

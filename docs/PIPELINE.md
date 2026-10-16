@@ -158,9 +158,9 @@ cat "$ROOT/release/statistics.json"
 ### 7.2 代码路径和数据流
 
 1. `scripts/prepare_group_inputs.py` 加载 benchmark exclusion、50k reservoir 和源注册表，调用 `sa1b_pipeline.source_isolation` 先预留 eval，再调用 `production_sources.materialize` 将 image/dense record 物化到新根目录。正式运行应对每个已有训练清单重复传入 `--existing-manifest PATH`；`--skip-discovery` 只适合已显式列全清单的运行，不能据此宣称与所有历史训练集隔离。
-2. `sa1b_pipeline.group_selection` 对孪生候选执行粒度、面积比、mask 间隔、宿主关系和每源最多两组约束；候选同类约 30%、跨类约 70%，按成员独立识别结果复核类别关系，训练按 `--twin-three-member-fraction` 预留约 15% 的三实例组；评测严格只选双实例组；对 replace/remove 会提前过滤别名列表和文字/阴影等需要额外执行区域的候选。多目标默认使用 `strict_geometry=True`，先用 bbox 下界缩小候选，再在局部联合 bbox 上计算精确 mask gap 和冲突；按 2/3/4/5 目标配额补充不冲突目标。每个多目标组先在 `sa1b_pipeline.multi_operation_balance.operation_schedules` 中枚举可行的操作序列，再用 `balance_multi_operations` 做全局四类配额优化，避免固定序列造成 add/attribute 偏置；`scripts/rebalance_multi_operations.py` 可对已选 shard 只重排合法 `operations` 字段并保留其他选择证据。`--fast-selection` 只用于容量估计，使用 bbox 近邻并明确标记 `geometry_exact=false`，不能进入最终数据。这里不做语义 fallback。
-3. `sa1b_pipeline.group_planning` 为每组提供干净全图和成员 crop contact sheet；后者逐行并列干净裁图与同尺度黑白 mask，避免标注染色干扰外观判断；规划模型每组一次请求返回共享编辑槽位与各成员真实 scope/site（孪生）或每目标 spec（多目标）和 refs。孪生规划后再独立调用一次无定位盲测，仅输入干净原图和共享 no-ref；不提供 mask、crop、ref、成员列表或目标图，不通过则在生图前停止。`scripts/run_group_pipeline.py` 会把未完成组按 `--planner-batch-size` 批量提交 vLLM，同时逐组落盘 checkpoint，避免批处理牺牲恢复能力。`build_twin_group`/`build_multi_group` 通过既有 `instructions.build_unit` 渲染 protocol 2.0 文本，拒绝 operation、ref、payload 或 no-ref 不一致；还会拒绝组内重复 ref、unit/object 错配、属性 no-op 和与 dense 描述主颜色冲突的 ref。
-4. `sa1b_pipeline.group_generation` 复用既有 Qwen-Image-2.1 regional crop、区域权重和 paste-back。孪生成员各自在同一 source/seed 上独立生成；多目标按 `generation_order` 链式生成。每一步写出 input/output、support mask、generation context 和确定性检查。新组运行用 `render.json` 校验源图/链式前一步、mask 内容、指令、seed 和编辑器配置，并验证已有目标图哈希；匹配时复用且保留原生成 context。已变更输入或缺乏可验证 checkpoint 的历史图片会明确拒绝复用，不会静默重标注旧图。`--generate-only` 将通过确定性检查的组持久化到 `generated.jsonl`；`--audit-only --audit-model ...` 在独立审核环境读取该清单，不加载编辑器。所有语义审核结果写入 `audited.jsonl`，包括失败组。
+2. `sa1b_pipeline.group_selection` 对孪生候选执行粒度、面积比、mask 间隔、宿主关系和每源最多两组约束；候选同类约 30%、跨类约 70%，按成员独立识别结果复核类别关系，训练按 `--twin-three-member-fraction` 预留约 15% 的三实例组；评测严格只选双实例组；对 replace/remove 会提前过滤别名列表和文字/阴影等需要额外执行区域的候选。多目标默认使用 `strict_geometry=True`，先用 bbox 下界缩小候选，再在局部联合 bbox 上计算精确 mask gap 和冲突；按 2/3/4/5 目标配额补充不冲突目标。每个多目标组先在 `sa1b_pipeline.multi_operation_balance.operation_schedules` 中枚举可行的操作序列（5 目标完整枚举 240 种，重复操作可位于任意两个目标），再用 `balance_multi_operations` 做全局四类配额优化，避免固定序列造成 add/attribute 偏置；`scripts/rebalance_multi_operations.py` 可对已选 shard 只重排合法 `operations` 字段并保留其他选择证据。`--fast-selection` 只用于容量估计，使用 bbox 近邻并明确标记 `geometry_exact=false`，不能进入最终数据。`group_production.multi_priority` 在相同最终配额单元内优先选择操作更适合对象的排列，不在规划失败后改类。这里不做语义 fallback。
+3. `sa1b_pipeline.group_planning` 为每组提供干净全图和成员 crop contact sheet；多目标 contact sheet 逐行并列干净裁图、同尺度黑白 mask、只保留 mask 内原始像素的抠图；5 行也控制在 1536×1520 内，避免细轮廓把黑色排除区域误认为目标，且不增加图片输入数。孪生保留此前的轮廓视图；规划模型每组一次请求返回共享编辑槽位与各成员真实 scope/site（孪生）或每目标 spec（多目标）和 refs。孪生规划后再独立调用一次无定位盲测，仅输入干净原图和共享 no-ref；不提供 mask、crop、ref、成员列表或目标图，不通过则在生图前停止。`scripts/run_group_pipeline.py` 会把未完成组按 `--planner-batch-size` 批量提交 vLLM，同时逐组落盘 checkpoint，避免批处理牺牲恢复能力。`build_twin_group`/`build_multi_group` 通过既有 `instructions.build_unit` 渲染 protocol 2.0 文本，拒绝 operation、ref、payload 或 no-ref 不一致；还会拒绝组内重复 ref、unit/object 错配、属性 no-op 和与 dense 描述主颜色冲突的 ref。
+4. `sa1b_pipeline.group_generation` 复用既有 Qwen-Image-2.1 regional crop、区域权重和 paste-back。孪生成员各自在同一 source/seed 上独立生成；多目标按 `generation_order` 链式生成。`multi_support_preflight` 在规划前检查源 mask 不重叠；扩张 support 与邻居相交时直接裁掉交叠边缘，不因扩张圈大而拒绝。生成时额外保护前面步骤已经改变的像素，实际执行 mask 记录为 `chain_execution_mask`，保护区为 `chain_protected_mask`。原始 source mask 的指代含义不变，add 仍解析实际附着部位。remove 区分独立物体露出背景与穿戴/覆盖物露出底下宿主，避免把手套与手一起删除；新提示版本进入渲染指纹。每一步写出 input/output、support mask、generation context 和确定性检查。新组运行用 `render.json` 校验源图/链式前一步、mask 内容、指令、seed 和编辑器配置，并验证已有目标图哈希；匹配时复用且保留原生成 context。已变更输入或缺乏可验证 checkpoint 的历史图片会明确拒绝复用，不会静默重标注旧图。`--generate-only` 将通过确定性检查的组持久化到 `generated.jsonl`；`--audit-only --audit-model ...` 在独立审核环境读取该清单，不加载编辑器。所有语义审核结果写入 `audited.jsonl`，包括失败组。
 5. `sa1b_pipeline.group_audit` 接入 27B，先对每个孪生成员/多目标链式步骤调用带 `operation_correct` 的 50k 单条审核协议，再对整组审核成员完成度、非目标保持、唯一指代、可比性、相邻串扰和整图自然性；任一成员或组级字段失败都会 all-or-nothing 丢弃。审核请求按 auditor batch size 分批。孪生组使用干净全图及逐成员 SOURCE / RESULT / MASK ONLY 黑白定位拼图，并附每个目标 contract；不能把标注图当作编辑结果。`scripts/review_group_data.py` 生成图片内嵌 PDF 和人工 ledger；人工复核未完成时 `release.json.published` 必须为 false。
 
 ### 7.3 交付字段和状态
@@ -671,3 +671,37 @@ SAM3 独立修正 4 个成员总计 16.25 s（含加载、读写和重新确定�
 根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016`。共享部署包与提交 ID 在 `deployment/manifest.json`；独立入口为 `deployment/arnold_entry_full.sh`。全部运行命令和恢复办法见 FOURNODE_RUN_GUIDE.md 首节。
 
 本次自动测试 333 项通过（14 个既有 pycocotools 警告）；新增配额整数守恒、失败补样／恢复、源图哈希去重与评测隔离、进程锁、空批次跳过和本地模型缓存身份测试。冻结代码前另检查 shell 语法、代码差异空白和两个仓库的协议文件一致性。
+
+
+### 7.14 多目标小批验证与 remove 修复（2026-10-16）
+
+当前完整链式流程和分阶段恢复已跑通，但**多目标总体尚不建议放量**。从训练候选固定 10 张不同源图，目标数 2/3/4/5 为 2/3/3/2 组，初始 add/attribute/replace/remove 为 9/9/9/8 个。没有看结果后更换源图，也没有使用 eval。
+
+| 轮次 | 实际生成 | 自动通过 | 逐图完整合格 |
+|---|---:|---:|---:|
+| 首轮：旧扩张圈门禁 | 1 组 / 3 步 | 1 | 0 |
+| 同 10 组抠图与保护对照 | 6 组 / 21 步 | 0 | 0 |
+| 同一盾牌计划的 remove 修复复测 | 1 组 / 3 步 | 1 | 1 |
+
+对照轮在模型调用前排除 3 组源 mask 交叠；7 次规划中 1 组遗漏目标，6 组进入生成。2 组被确定性检查拦截，其余 4 组未过语义审核。`generated.jsonl` 只有 4 条待审核记录，全部 6 组实际输出在 `generated/*/group.json`。已生成类型为 add 4、attribute 6、replace 6、remove 5；没有最终合格池，不能据此宣称类别均衡。
+
+**局部成功与主要问题。** 棚顶蝴蝶结、佛像供钵、盾牌羽毛、标牌换形、皮带换绳环和旗帜改色有可用局部效果。但云层 mask 仍被规划为摩天轮，服装 mask 被写成整个人，滤嘴被写成整根烟；木纹桌面被误标 replace，耳朵变耳环也混淆了 replace/add。抠图输入没有彻底解决 grounding，主要瓶颈仍在规划范围与操作适配，不是把生图步数调低就能解决。
+
+**已验证的针对性修复。** `sa_2416017` 的旧 remove 把手套连同手一起删掉；修改 `editor.edit_prompt`，要求穿戴/覆盖物去除后恢复下方身体/宿主，复用原计划、seed 和 40 步重测，得到自然握住火把的裸手，羽毛和绳环也保留。三目标整组自动审核和 assistant 逐图检查均通过。只有 1 组，不能外推总体成功率。
+
+![通过的三目标修复样例：原图、该步结果、最终图、源 mask](assets/multi_remove_reveal_20261016.jpg)
+
+![失败样例：三个局部编辑成功，但云层被错指为摩天轮](assets/multi_mask_mismatch_20261016.jpg)
+
+**审核边界。** 新对照轮过滤了全部完整失败组；旧图审核回归纠正了“红电线杆仍是灰色”的误判，但旧火炮组的深色服装填充仍被放行。联合审核有时笼统判通过，逐步审核才拦住类型错误或删手。因此仍保留 N 次逐步＋1 次联合审核，不能声称所有严重问题已保证过滤。自动结论与视觉结论分别记录。
+
+**速度。** 单台 8×H100，Flash 规划 TP4，最多 6 个编辑器并行：规划 396.4 秒（7 次请求，含加载）；21 步生图 134.7 秒；单步平均 19.56 秒，范围 18.23–21.30 秒；审核最长成功分片 150.3 秒。共享盘审核 contract 并发可见性错误修复并续跑后，总阶段跨度 878.7 秒（14.6 分钟）；正常成功阶段相加约 11.4 分钟，但不是另一轮端到端实测。单组 remove 复测无需新规划，含生成与审核启动共 212.7 秒。当前合格吞吐不足以推算 5k 交付时间。对全部 6 组及修复组的像素复核显示，各步骤在其他源目标上的变化比例及最终执行区域外变化比例均为 0；这验证了串扰保护，但不证明指令语义正确。成功组 33 个媒体路径引用已检查为根目录内的相对路径。
+
+**文件。** 共同前缀 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/`：
+
+- `sa1b_samtok_multi_v2_20261016_cutout/质量分析.md`：完整中文报告、逐源图结论与下一步顺序。
+- 同目录 `inspection/multi_target_validation_10sources_plus_fix.pdf`：12 页，包含 10 组全部验证和成功修复对照；不是 10 组合格样本。
+- `sa1b_samtok_multi_v2_20261016_remove_reveal/accepted_visual.jsonl`：本次唯一视觉确认合格组；`verified/multi_preview.jsonl` 的相对媒体路径以修复根目录为基准，媒体已复制进去。
+- `experiment_summary.json`、`visual_review.json`、`regression_audit/`、`material_guard_replay.json`、`stage_attempts.jsonl` 保留不同口径与恢复证据。
+
+新增 `scripts/review_multi_batch.py --root RUN_ROOT --font /path/to/NotoSansCJKsc-Regular.otf` 可生成全批诊断 PDF，包含确定性失败的真实图片和未生图提案。四机冻结包仍为上一提交快照，本轮未更新部署包或启动全量。下一步先以固定反例提升 mask 识别和类型适配，再测新样本与稳态速度。

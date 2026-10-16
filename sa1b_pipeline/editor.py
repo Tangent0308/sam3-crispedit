@@ -55,8 +55,12 @@ def edit_prompt(unit: dict[str, Any], *, target_hint: str | None = None,
     if operation == "remove":
         return (
             f"{instruction} Completely erase only the explicitly named object, part or section. "
-            "For subpart removal or trimming, retain the remaining host; the source mask may select that host. "
-            "Reconstruct the newly exposed background using the surrounding texture, perspective, lighting and occlusion; "
+            "For subpart removal or trimming, retain the remaining host; the source mask selects the removed region. "
+            "Reconstruct what was physically behind the removed item, using the surrounding texture, perspective, lighting and occlusion. "
+            "If the item is worn on or covers a body or supporting object, reveal that underlying body or host, "
+            "rather than cutting a hole through it: removing a glove must reveal a natural bare hand that still grips any held object. "
+            "Never erase the underlying limb, leave a floating held object, or substitute background through a solid body. "
+            "For independent objects, reconstruct the exposed background; "
             "leave no recolored silhouette, outline, placeholder, cyan/gray patch or duplicate. "
             "Keep every unrequested object, instance, part, boundary, occluder and background unchanged."
             + locator + guide
@@ -105,7 +109,7 @@ class DiffusersQwenImageEditor:
                        "fp32": torch.float32, "float32": torch.float32}[dtype]
         self.pipe = load_qwen21_omni_pipeline(model_id, tensor_parallel_size=tensor_parallel_size)
         self.steps = steps
-        self.config = dict(backend="qwen-omni", model_id=model_id, steps=steps, dtype=dtype, tensor_parallel_size=tensor_parallel_size, compositor_version=3)
+        self.config = dict(backend="qwen-omni", model_id=model_id, steps=steps, dtype=dtype, tensor_parallel_size=tensor_parallel_size, compositor_version=3, prompt_version="region-edit-4-reveal-host")
         self.crop_instruction = crop_instruction
         if crop_instruction:
             self.config['instruction_frame'] = 'experimental-crop-noref-v1'

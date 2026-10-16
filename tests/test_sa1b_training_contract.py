@@ -96,5 +96,6 @@ def test_add_instruction_requires_a_new_item_payload(tmp_path: Path):
 def test_remove_editor_prompt_requires_background_reconstruction():
     prompt = edit_prompt({"operation": "remove", "instruction_ref": "Remove the selected chair."})
     assert "Completely erase" in prompt
-    assert "newly exposed background" in prompt
+    assert "For independent objects, reconstruct the exposed background" in prompt
+    assert "reveal that underlying body or host" in prompt
     assert "cyan/gray patch" in prompt

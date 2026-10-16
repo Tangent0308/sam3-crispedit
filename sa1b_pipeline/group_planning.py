@@ -47,22 +47,21 @@ Fields: target_part and qualifier are empty because these source candidates have
 '''
 
 
-MULTI_PROMPT = r'''Plan one joint editing group from the original scene. Image 1 is the clean original scene. Image 2 has one row per candidate: a clean source crop on the LEFT and its aligned black-and-white mask on the RIGHT. White identifies the target; black is excluded. Unit and object IDs are printed above each row. Read all appearance from clean photographs only. Select every provided candidate exactly once and give each a natural, concise instruction grounded in the unmarked original image.
+MULTI_PROMPT = r'''Plan ONE multi-target edit group in ONE response. Image 1 is the clean original scene. Image 2 has THREE aligned columns per candidate row: clean SOURCE, binary MASK, and SELECTED PIXELS ONLY on neutral gray. The third column contains ONLY pixels inside that source mask, without changing their original color. Gray outside it is padding, not scene content. White selects the exact source entity; black excludes it. Read appearance from the clean photographs only. IDs connect rows to records, never enter instructions.
 
-Operations and target order are assigned by the caller. Do not change an operation, merge targets, add fallback targets, or refer to a target created by an earlier step. Each ref must uniquely identify its own original target. Verify color words against the unmarked pixels; never call a black object red because a small detail is red. If color is uncertain, use a stable position or host instead. At least one preselected pair is adjacent. Avoid conflicting edits such as removing a host while editing its part. Add uses the directly supporting host first. Remove never removes human anatomy or essential support; replace changes form/design; attribute changes one visible property.
+Identify EVERY mask independently before designing its edit. Name what is visible in the SELECTED PIXELS ONLY column, verifying its extent against the binary mask and clean source. Black holes exclude objects even when the outer contour surrounds them. Name its actual physical extent, not a convenient adjacent object or the most salient part of a larger mask. A complete car is not just its trunk; a canopy is not the whole boat. Dense labels are not evidence. Occlusion, clipping, size and unusual but plausible taste alone are not rejection reasons.
+Operations and target IDs are assigned. Use every candidate exactly once without changing its operation. All refs and masks refer to the ORIGINAL scene, never a newly created object. Use the shortest unique noun phrase. Compare against the nearest similar neighbor in the full scene; use a verified ordinal or short host relation when left/right is ambiguous. No trailing explanatory clauses. Do not depend on the color/shape of another target that an earlier step will change. Prefer generation order remove, replace, attribute, add, while respecting dependencies. Reject destructive conflicts: deleting a host while editing its part, removing essential supports, or a replacement that occupies another target's location.
 
-Return JSON only:
-{"feasible":true,"generation_order":["U1",...],"targets":[{"unit_id":"U1","object_id":"...","operation":"...","scope":"...","ref_phrase":"the ...","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","evidence":"brief"}],"evidence":"brief"}
-Use exactly the assigned operation for each target and exactly the assigned target IDs. No annotation-color, mask, ID or crop references in instructions; genuine source colors are allowed. scope is only the short object/part noun, without articles or instance/location qualifiers; put those in ref_phrase.
-Field requirements are strict: every target must have a nonempty scope and ref_phrase. For
-attribute, set exactly one nonempty attributes item with property and value that is
-visibly different from the selected source (never repeat a color, material, finish or
-pattern already used in its ref or scope), and leave payload empty. For add, set a concrete new-object noun in payload and a non-null
-placement with relation and anchor_mode; choose anchor_mode=support whenever the new
-object can sit on or attach directly to the masked host. For replace, set a concrete
-replacement object/design in payload and leave attributes empty. For remove, leave
-payload and attributes empty and use a valid remove_mode. Never emit an empty object,
-empty list, or null value for a field required by its operation.
+Choose an ordinary, physically plausible photo-editing request for each target:
+- add: choose a visible direct support/attachment surface BEFORE a modest new item. Check current occupancy: do not add an accessory already present at that site. Printed decorations must be explicitly named as printed. A free-standing item needs a stable visible plane; attachable surfaces can receive a suitable accessory. Select a concrete singular item, not a distant object. scope/ref name the initial mask; placement.site is its necessary attachment subpart, or empty when the selected entity itself is that site. The pipeline derives the precise site mask from image differences. No remote/neighbor reference anchors.
+- remove: erase an independently removable entity without leaving unsupported people, objects or body remnants. No human anatomy or essential functional supports. Do not broaden a fragment mask to an entire object.
+- replace: choose a new physical form/design that fits the same location, mounting and scale. A new color/material alone is attribute, not replace. Do not replace only a part of a whole-object mask.
+- attribute: one visible property, new value different from the source, appropriate to its material and use. Preserve shape, markings and unrelated materials. Do not paint skin/food or make transparent glass opaque. Do not reinterpret a whole person as clothing.
+
+Return JSON only. Every target includes concise independent grounding BEFORE its edit fields:
+{"feasible":true,"targets":[{"unit_id":"U1","object_id":"ID","grounding":{"entity":"exact scope noun","mask_description":"includes ...; excludes ...","current_value":"original attribute value or empty","edit_feasible":true,"reason":"specific physical fit, at most 12 words"},"scope":"singular object or part noun","ref_phrase":"the ...","operation":"ASSIGNED","payload":"","target_part":"","remove_mode":"whole","placement":null,"attributes":[],"qualifier":"","evidence":"brief"}],"generation_order":["U1"],"evidence":"brief"}
+Fields target_part and qualifier must be empty; remove_mode=whole. For add/replace payload is an explicit concise new-object noun phrase with an article; otherwise empty. Only attribute has attributes=[{"property":"color|material|finish|pattern|texture|text|tint|opacity","value":"..."}]. Only add has placement={"relation":"on","site":"","anchor_mode":"support"}; all others null.
+For add, relation must be EXACTLY one of: on, in, inside, to, around, across, along, over, at, attached to, clipped to, hanging from, resting on, mounted on, sewn onto, tied around, pinned to, hooked over, strapped over. A site goes in site, NEVER inside relation: use relation="on", site="the rear corner", not relation="on the rear corner of". Site must not repeat scope. grounding.entity must equal scope. Use feasible=false with one concrete reason if any assigned edit is incompatible; do not force a bad edit for a quota.
 '''
 
 
@@ -151,10 +150,10 @@ def _overlay(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.
     return canvas
 
 
-def _crop_sheet(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.ndarray], *, locator_outline: bool = False) -> Image.Image:
+def _crop_sheet(source: Image.Image, objects: list[dict[str, Any]], masks: list[np.ndarray], *, locator_outline: bool = False, locator_cutout: bool = False) -> Image.Image:
     """Aligned clean crop and binary locator; never tint source appearance."""
-    width, height, header = 640, 400, 32
-    sheet = Image.new("RGB", (width * (3 if locator_outline else 2), (height + header) * len(objects)), (35, 35, 35))
+    width, height, header = (512, 272, 32) if locator_cutout else (640, 400, 32)
+    sheet = Image.new("RGB", (width * (3 if locator_outline or locator_cutout else 2), (height + header) * len(objects)), (35, 35, 35))
     draw = ImageDraw.Draw(sheet)
     for index, (obj, mask) in enumerate(zip(objects, masks)):
         ys, xs = np.where(mask)
@@ -175,7 +174,14 @@ def _crop_sheet(source: Image.Image, objects: list[dict[str, Any]], masks: list[
             resized = tile.resize(size, Image.Resampling.LANCZOS if column == 0 else Image.Resampling.NEAREST)
             sheet.paste(resized, (column * width + (width - size[0]) // 2,
                                  top + header + (height - size[1]) // 2))
-        if locator_outline:
+        if locator_cutout:
+            # Retain the selected pixels' real color/texture. A contour alone
+            # can ambiguously outline both a foreground object and its background.
+            selected = Image.composite(clean, Image.new("RGB", clean.size, (100, 100, 100)), locator.convert("L"))
+            draw.text((2 * width + 8, top + 8), f"U{index+1} - SELECTED PIXELS ONLY", fill="white")
+            sheet.paste(selected.resize(size, Image.Resampling.LANCZOS),
+                        (2*width+(width-size[0])//2, top+header+(height-size[1])//2))
+        elif locator_outline:
             # The optional third column adds a contour outside the selector;
             # the first column remains the untouched appearance reference.
             photo = clean.resize(size, Image.Resampling.LANCZOS)
@@ -224,13 +230,13 @@ def _located_scene(source: Image.Image, masks: list[np.ndarray]) -> Image.Image:
 
 def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], directory: str | Path,
                 *, image_size: tuple[int, int] | None = None, locator_outline: bool = False,
-                locate_in_scene: bool = False) -> tuple[list[str], list[str], str]:
+                locate_in_scene: bool = False, locator_cutout: bool = False) -> tuple[list[str], list[str], str]:
     """Build two stable images plus binary mask files for a single group call."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     source = Image.open(candidate["image_path"]).convert("RGB")
     masks = [load_mask(obj, source.size) for obj in objects]
-    key = json.dumps({"version": "clean-binary-outline-v4" if locator_outline else "clean-binary-v3",
+    key = json.dumps({"version": "clean-binary-cutout-v5" if locator_cutout else ("clean-binary-outline-v4" if locator_outline else "clean-binary-v3"),
                       **({"scene_locator_version": 1} if locate_in_scene else {}),
                       "source": hashlib.sha256(source.tobytes()).hexdigest(),
                       "ids": [o.get("object_id") for o in objects],
@@ -249,7 +255,7 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
     if not marked.exists():
         _overlay(source, objects, masks).save(marked, compress_level=1)
     if not sheet.exists():
-        _crop_sheet(source, objects, masks, locator_outline=locator_outline).save(sheet, compress_level=1)
+        _crop_sheet(source, objects, masks, locator_outline=locator_outline, locator_cutout=locator_cutout).save(sheet, compress_level=1)
     for obj, mask in zip(objects, masks):
         path = root / f"mask_{obj['object_id']}.png"
         if not path.exists():
@@ -288,7 +294,7 @@ def _shared_raw(plan: dict[str, Any], ref: str, object_id: str, unit_index: int,
 def _validate_group_edit_fields(plan: dict[str, Any]) -> None:
     """Catch observed malformed fields before spending editor time.
 
-    This catches explicit color-only replacements, not all semantic mismatches;
+    This catches explicit color/material-only replacements, not all semantic mismatches;
     source appearance and physical plausibility still require visual review.
     """
     operation = plan.get("operation")
@@ -301,13 +307,15 @@ def _validate_group_edit_fields(plan: dict[str, Any]) -> None:
             raise ValueError("add placement site repeats the host scope")
     if operation == "replace":
         colors = r"red|green|blue|yellow|orange|purple|pink|black|white|grey|gray|brown|silver|gold|beige|cyan|magenta"
-        modifiers = re.compile(r"\b(?:a|an|the|solid|bright|dark|light|" + colors + r")\b", re.I)
+        materials = r"wood|wooden|metal|metallic|steel|plastic|glass|ceramic|marble|leather|fabric|brass|copper|stone|concrete|matte|glossy|polished"
+        modifiers = re.compile(r"\b(?:a|an|the|solid|bright|dark|light|" + colors + "|" + materials + r")\b", re.I)
         def without_color(value: Any) -> str:
             return " ".join(modifiers.sub(" ", str(value or "")).lower().split())
         scope = without_color(plan.get("scope"))
         payload = without_color(plan.get("payload"))
-        if scope and payload == scope:
-            raise ValueError("replace needs a different physical form, not only a color")
+        reference = without_color(plan.get("ref_phrase"))
+        if payload and payload in {scope, reference}:
+            raise ValueError("replace needs a different physical form, not only a color or material")
 
 
 def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], plan: dict[str, Any],
@@ -403,7 +411,8 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
 
 def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], plan: dict[str, Any],
                       mask_paths: list[str], *, split: str, group_id: str,
-                      geometry: list[dict[str, Any]], assignments: dict[str, str]) -> dict[str, Any]:
+                      geometry: list[dict[str, Any]], assignments: dict[str, str],
+                      require_grounding: bool = False) -> dict[str, Any]:
     if plan.get("feasible") is not True:
         raise ValueError("infeasible multi plan")
     targets = plan.get("targets")
@@ -419,6 +428,21 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
         if (not item or str(item.get("unit_id")) != expected_unit_id
                 or item.get("operation") != assignments.get(str(obj["object_id"]))):
             raise ValueError("multi operation or object mismatch")
+        if require_grounding:
+            grounding = item.get("grounding") or {}
+            if (grounding.get("entity") != item.get("scope")
+                    or grounding.get("edit_feasible") is not True
+                    or not grounding.get("mask_description") or not grounding.get("reason")):
+                raise ValueError("multi target lacks consistent visual grounding")
+            if item.get("operation") == "attribute":
+                current = str(grounding.get("current_value", "")).strip().casefold()
+                if not current or any(str(a.get("value", "")).strip().casefold() == current
+                                      for a in item.get("attributes", [])):
+                    raise ValueError("multi attribute is missing source value or repeats it")
+            if item.get("target_part") or item.get("qualifier") or item.get("remove_mode", "whole") != "whole":
+                raise ValueError("multi edit exceeds the preselected source extent")
+            if item.get("operation") == "add" and (item.get("placement") or {}).get("anchor_mode") != "support":
+                raise ValueError("multi add requires a direct support anchor")
         _validate_group_edit_fields(item)
         raw = {"feasible": True, "object_id": str(obj["object_id"]), "unit_index": index,
                "operation": item["operation"], "ref_phrase": item["ref_phrase"],

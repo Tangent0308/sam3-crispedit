@@ -25,7 +25,7 @@ from typing import Any
 from PIL import Image
 
 from sa1b_pipeline.geometry import load_mask, mask_geometry
-from sa1b_pipeline.group_generation import (generate_multi_group, generate_twin_group,
+from sa1b_pipeline.group_generation import (multi_support_preflight, generate_multi_group, generate_twin_group,
                                              twin_support_preflight, parallel_group_generation)
 from sa1b_pipeline.group_geometry import normalized_category
 from sa1b_pipeline.group_audit import audit_multi_groups, audit_twin_groups, audit_twin_groups_joint
@@ -526,8 +526,11 @@ def main(argv=None):
                           "selection": str(selected_path),
                           "summary": str(root / "selection.json")}, ensure_ascii=False))
         return 0
-    planner = _planner(args)
     plans_dir = root / "planned"; plans_dir.mkdir(exist_ok=True)
+    needs_planning = any(not (plans_dir / f"{_group_id(args.kind, row)}.json").exists()
+                         and not (root / "rejected" / f"{_group_id(args.kind, row)}.json").exists()
+                         for row in selected)
+    planner = _planner(args) if needs_planning else None
     planned = []
     try:
         pending = []
@@ -544,7 +547,8 @@ def main(argv=None):
             objects = selection["objects"]
             views, mask_paths, view_digest = group_views(selection["candidate"], objects, root / "planning_views",
                                                           locator_outline=args.outline_planning_crops,
-                                                          locate_in_scene=args.locate_planning_scene)
+                                                          locate_in_scene=args.locate_planning_scene,
+                                                          locator_cutout=args.kind == "multi")
             geometries = _geometry(mask_paths)
             if planner is None:
                 # Generation-only resume is allowed: selections rejected by a
@@ -553,6 +557,20 @@ def main(argv=None):
                 if args.plan_only:
                     raise RuntimeError("planner model is required to create new group plans")
                 continue
+            if args.kind == "multi":
+                # Source overlap is knowable before a costly visual planning
+                # call. Expanded collars are clipped, not a rejection reason.
+                probe = {"source_image": selection["candidate"]["image_path"], "units": [
+                    {"unit_id": f"U{i+1}", "mask": mask, "operation": op,
+                     "unit": {"operation": op, "mask_path": mask}}
+                    for i, (mask, op) in enumerate(zip(mask_paths, selection["operations"]))]}
+                precheck = multi_support_preflight(probe, root / "preflight" / gid)
+                if not precheck["pass"]:
+                    atomic_json(rejected_path, {"group_id": gid, "status": "preplan_rejected",
+                        "reason": "multi source masks overlap; cannot preserve both complete targets",
+                        "geometry": precheck, "selection": selection})
+                    print(json.dumps({"id": gid, "status": "preplan_rejected"}), flush=True)
+                    continue
             if args.kind == "twins":
                 areas = [g["area_fraction"] for g in geometries]
                 if min(areas) <= 0 or max(areas) > 3 * min(areas):
@@ -570,7 +588,7 @@ def main(argv=None):
 
             else:
                 assignments = {str(obj["object_id"]): op for obj, op in zip(objects, selection["operations"])}
-                order = [f"U{i+1}" for i in range(len(objects))]
+                order = [f"U{i+1}" for i in sorted(range(len(objects)), key=lambda i: ("remove", "replace", "attribute", "add").index(selection["operations"][i]))]
                 prompt = multi_prompt(assignments, objects, order)
             if args.locate_planning_scene:
                 prompt = prompt.replace("Image 1 is the clean original scene.",
@@ -619,14 +637,19 @@ def main(argv=None):
                         else:
                             group = build_multi_group(selection["candidate"], objects, raw, item["mask_paths"],
                                                       split=args.split, group_id=item["gid"], geometry=item["geometries"],
-                                                      assignments=item["assignments"])
+                                                      assignments=item["assignments"], require_grounding=True)
                             group["adjacent_pairs"] = selection["adjacent_pairs"]
+                            group["support_preflight"] = multi_support_preflight(group, root / "generated" / item["gid"])
+                            if not group["support_preflight"]["pass"]:
+                                raise ValueError("multi source masks overlap; cannot preserve both complete targets")
                     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                         # One malformed/infeasible completion must not discard
                         # valid siblings from the same continuous batch. Keep the
                         # raw answer and selection evidence for audit/retry.
                         rejection = {"group_id": item["gid"], "status": "plan_rejected",
-                                     "reason": str(exc), "raw": raw, "selection": selection}
+                                     "reason": str(exc), "raw": raw, "selection": selection,
+                                     "planning_prompt": item["prompt"], "planning_views": item["views"],
+                                     "planner_model": getattr(planner, "model_id", "unknown")}
                         atomic_json(root / "rejected" / f"{item['gid']}.json", rejection)
                         print(json.dumps({"planned": len(planned), "total": len(selected),
                                           "id": item["gid"], "status": "rejected", "reason": str(exc)},
