@@ -101,3 +101,24 @@ def test_multi_audit_schema_requires_integrity_and_step_evidence():
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(minimal, multi_audit_schema())
     jsonschema.validate({**minimal, 'host_integrity':True, 'observed_change':'Color changed.'}, multi_audit_schema())
+
+
+def test_grounding_label_modifiers_do_not_cause_false_rejection():
+    from sa1b_pipeline.multi_semantics import same_scope_identity
+    for a,b in [("white t-shirt","t-shirt"),("vertical post","post"),
+                ("plaid shirt sleeve","sleeve"),("chair","orange plastic chair")]:
+        assert same_scope_identity(a,b)
+    for a,b in [("rear bumper of the car","car"),("person","shirt"),
+                ("chair backrest","chair"),("left sleeve","right sleeve"),
+                ("lower body","body"),("", "shirt")]:
+        assert not same_scope_identity(a,b)
+
+
+def test_opacity_decoder_blocks_malformed_values_before_generation():
+    import jsonschema
+    from sa1b_pipeline.multi_plan_schema import multi_plan_schema
+    schema=multi_plan_schema()["properties"]["targets"]["items"]["properties"]["attributes"]["items"]
+    jsonschema.validate({"property":"opacity","value":"opaque"},schema)
+    jsonschema.validate({"property":"finish","value":"frosted"},schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"property":"opacity","value":"frosted"},schema)

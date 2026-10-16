@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .group_geometry import candidate_category
-from .multi_semantics import MULTI_PLAN_VERSION, validate_multi_semantics
+from .multi_semantics import MULTI_PLAN_VERSION, validate_multi_semantics, same_scope_identity
 
 import hashlib
 import json
@@ -534,7 +534,7 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
             raise ValueError("multi operation or object mismatch")
         if require_grounding:
             grounding = item.get("grounding") or {}
-            if (grounding.get("entity") != item.get("scope")
+            if (not same_scope_identity(grounding.get("entity", ""), item.get("scope", ""))
                     or grounding.get("edit_feasible") is not True
                     or not grounding.get("mask_description") or not grounding.get("reason")):
                 raise ValueError("multi target lacks consistent visual grounding")

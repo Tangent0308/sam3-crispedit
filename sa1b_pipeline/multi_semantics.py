@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-MULTI_PLAN_VERSION = "multi-affordance-hints-3"
+MULTI_PLAN_VERSION = "multi-affordance-hints-4-binding"
 _PEOPLE = {"person", "people", "man", "woman", "boy", "girl", "child", "customer"}
 _ANATOMY = {"head", "face", "arm", "hand", "leg", "foot", "finger", "ear", "eye", "nose", "mouth", "neck", "torso", "body"}
 _CORE_CLOTHES = {"jeans", "trousers", "pants", "shorts", "shirt", "t-shirt", "blouse", "jacket", "coat", "dress", "skirt", "sleeve", "sweater", "clothing", "garment", "hijab"}
@@ -54,3 +54,27 @@ def validate_multi_semantics(item, source_category=""):
 MULTI_PHYSICAL_RULES = """Before approving an edit, verify the selected entity, its host and what must remain.
 Removing worn clothing must NOT erase the covered person: a missing leg, cut-off lower body or floating torso is a severe failure even if background inpainting is seamless. Removing a glove may pass when a plausible bare hand remains. Removing an independent complete person may pass when no body fragments remain. Never use the instruction to excuse physically impossible remnants.
 The source mask of a shirt/sleeve is fabric, not the person/arm; a head mask is not a hair-only mask. Recoloring clothes while saying 'change the person blue' is a scope failure. A new object added next to an unchanged original is not replacement. Add needs an actually visible new item with the requested contact relationship; a chin strap drawn on top of a hat is not correctly installed. Minor texture variation, source blur or unconventional plausible style alone is not a failure."""
+
+
+def same_scope_identity(entity: str, scope: str) -> bool:
+    """Allow noun-preserving modifiers, never a host/part or location rewrite.
+
+    This only checks duplicate label consistency. It is not visual grounding.
+    Keep the original strings in the record for later visual audits.
+    """
+    def words(value):
+        return re.sub(r"^(?:the|a|an)\s+", "", str(value).strip().casefold()).split()
+    left, right = words(entity), words(scope)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    short, long = sorted((left, right), key=len)
+    if long[-len(short):] != short:
+        return False
+    prefix = set(long[:-len(short)])
+    # Relational phrases and explicit partial extents can change the entity.
+    if prefix & {"of", "in", "on", "at", "with", "without", "behind", "under",
+                 "above", "below", "part", "portion", "section", "half", "upper", "lower"}:
+        return False
+    return True
