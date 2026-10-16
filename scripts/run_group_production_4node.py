@@ -119,6 +119,9 @@ def prepare(args):
         "mask_semantics": "2.0",
         "instruction_style": "benchmark-concise-3-blind-1",
         "steps": 40,
+        "multi_commit_policy": "keep-passed-v1",
+        "multi_audit_devices": "6,7",
+        "multi_groups_in_flight": 16,
         "targets": targets,
         "rank_targets": {k: split_cells(v) for k, v in targets.items()},
         "planner_model": MODEL_BASE + "Qwen3.8-Flash-Next-FP8",
@@ -365,6 +368,21 @@ def run_wave(args, c, kind, wave, chosen):
     if not read_rows(wave / "planned.jsonl"):
         write_rows(wave / "generated.jsonl", [])
         write_rows(wave / "audited.jsonl", [])
+        return
+    if kind == "multi" and c.get("multi_commit_policy", "all-or-nothing") == "keep-passed-v1":
+        audit_devices = c.get("multi_audit_devices", "6,7")
+        audit_ids = set(audit_devices.split(","))
+        editor_devices = ",".join(x for x in args.editor_devices.split(",") if x not in audit_ids)
+        if not editor_devices:
+            raise ValueError("transactional multi needs separate editor and audit GPUs")
+        command(wave, "transactional_generation_audit", [
+            args.mllm_python, str(REPO / "scripts/run_multi_transactional.py"),
+            "--planned-manifest", str(wave / "planned.jsonl"), "--output-root", str(wave),
+            "--editor-python", args.editor_python, "--audit-python", args.mllm_python,
+            "--editor-model", c["editor_model"], "--audit-model", c["audit_model"],
+            "--editor-devices", editor_devices, "--audit-devices", audit_devices,
+            "--groups-in-flight", str(c.get("multi_groups_in_flight", 16)),
+        ], ",".join(dict.fromkeys(editor_devices.split(",") + audit_devices.split(","))))
         return
     command(
         wave,

@@ -17,6 +17,10 @@ exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_tra
 
 新入口 `scripts/run_group_production_4node.py` 按最终通过配额补样，支持模型本地缓存、分阶段 GPU 并行、逐组恢复、全部媒体归档以及每 5 分钟的 tqdm 风格日志。完整命令、资源、恢复及初步 3–7 天预算见 [四机指南首节](docs/FOURNODE_RUN_GUIDE.md#当前分组训练任务15k-孪生5k-多目标2026-10-16)。自动通过清单与人工验收分开，缺额保留为 partial，不降低质量门槛凑数。
 
+## 多目标逐步保留入口
+
+新建任务使用 `keep-passed-v1`：每步生成后立即审核，通过才更新当前图，失败回退后继续其他操作；至少保留两个目标，并重新检查类型组合、邻接关系与最终整图。入口为 `scripts/run_multi_transactional.py`，复用 `run_group_pipeline.py --plan-only` 的计划，不重复规划。新准备的四机配置自动接入：每节点 6 个编辑器＋2 个审核器分卡常驻，不同组交错执行，逐步审核合批；旧冻结部署包保持原流程。调用和恢复见 [四机指南](docs/FOURNODE_RUN_GUIDE.md#多目标逐步保留版本keep-passed-v1)。
+
 ## 已完成的 50k 数据
 
 本批共生成并审核 79,821 条，自动通过 **50,000 条**，add/replace/remove/attribute 各 12,500 条，覆盖 1,132 张源图。推荐训练入口：

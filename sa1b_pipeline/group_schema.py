@@ -188,9 +188,19 @@ def validate_multi_record(record: dict[str, Any], *, expected_split: str | None 
         raise ValueError("multi targets must be distinct objects")
     for unit in units:
         _validate_member(unit)
+    if operations != [u["instruction_spec"].get("operation") for u in units]:
+        raise ValueError("operations do not match retained instructions")
+    if len(set(ids)) != n:
+        raise ValueError("duplicate multi unit IDs")
     adjacent = record.get("adjacent_pairs")
     if not isinstance(adjacent, list) or not adjacent:
         raise ValueError("multi group requires an adjacent pair")
+    objects = {str(u["object_id"]) for u in units}
+    if any(not isinstance(pair, dict) or pair.get("eligible") is not True
+           or len(pair.get("object_ids", [])) != 2
+           or len(set(map(str, pair["object_ids"]))) != 2
+           or not set(map(str, pair["object_ids"])).issubset(objects) for pair in adjacent):
+        raise ValueError("adjacency references removed or ineligible targets")
     if not isinstance(record.get("joint_audit"), dict):
         raise ValueError("joint_audit must be an object")
 

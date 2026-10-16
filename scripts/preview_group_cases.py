@@ -88,7 +88,8 @@ def page(group, kind, number, total, base):
     if kind == "multi":
         by_id = {m["unit_id"]: m for m in members}
         members = [by_id[uid] for uid in group["generation_order"]]
-    if not members or any(not target(m) for m in members):
+    empty_committed = kind == "multi" and group.get("commit_policy") == "keep-passed-v1" and not members
+    if (not members and not empty_committed) or any(not target(m) for m in members):
         raise ValueError("preview requires every generated target in the group")
     width, gap, margin = 3300, 24, 52
     height = 1020 + 650 * len(members)

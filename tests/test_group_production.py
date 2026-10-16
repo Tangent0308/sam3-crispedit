@@ -374,3 +374,20 @@ def test_rank_coordinator_refills_rejects_and_resumes_without_generation(
     second = run_kind(args, cfg, "twins")
     assert second["complete"] and len(calls) == 2
     assert (tmp_path / "nodes/node0/twins/accepted.jsonl").read_bytes() == before
+
+
+def test_new_multi_wave_uses_transactional_workers_and_no_second_audit(tmp_path,monkeypatch):
+    args=SimpleNamespace(root=tmp_path,mllm_python='mllm',editor_python='editor',editor_devices='0,1,6,7')
+    c=dict(planner_model='p',planner_tp=4,editor_model='e',audit_model='a',site_model='s',
+           multi_commit_policy='keep-passed-v1',multi_audit_devices='6,7')
+    wave=tmp_path/'wave';(wave/'inputs').mkdir(parents=True)
+    calls=[]
+    def fake(wave,name,cmd,devices):
+        calls.append((name,cmd,devices))
+        if name=='planning':(wave/'planned.jsonl').write_text('{"multi_id":"x"}\n')
+    monkeypatch.setattr('scripts.run_group_production_4node.command',fake)
+    run_wave(args,c,'multi',wave,[proposal('s')])
+    assert [x[0] for x in calls]==['planning','transactional_generation_audit']
+    cmd=calls[-1][1]
+    assert cmd[cmd.index('--editor-devices')+1]=='0,1'
+    assert cmd[cmd.index('--audit-devices')+1]=='6,7'
