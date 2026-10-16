@@ -182,3 +182,82 @@ def test_audit_stage_retries_only_transient_contract_visibility(tmp_path, monkey
     monkeypatch.setattr(stage, "immutable_json", changed)
     with pytest.raises(ValueError, match="changed"):
         stage.main()
+
+
+def grounding_first_fixture():
+    return {
+        'grounding_version': 2,
+        'regions': [{'unit_id': 'U1', 'object_id': '7', 'entity': 'sleeve',
+                     'ref_phrase': 'the red sleeve', 'extent': 'part',
+                     'mask_description': 'red fabric on upper arm', 'excluded': 'hand and torso'}],
+        'targets': [{'unit_id': 'U1', 'object_id': '7', 'operation': 'attribute',
+                     'current_value': 'red', 'edit_feasible': True, 'reason': 'ordinary fabric recolor'}],
+    }
+
+
+def test_grounding_binding_cannot_expand_part_into_host():
+    import pytest
+    from sa1b_pipeline.group_planning import normalize_multi_grounding
+    plan = grounding_first_fixture()
+    objects = [{'object_id': '7'}]
+    normalized = normalize_multi_grounding(plan, objects)
+    assert normalized['targets'][0]['scope'] == 'sleeve'
+    assert normalized['targets'][0]['grounding']['excluded'] == 'hand and torso'
+    assert 'scope' not in plan['targets'][0]  # raw model evidence stays immutable
+    plan['targets'][0]['scope'] = 'person'
+    with pytest.raises(ValueError, match='overrides'):
+        normalize_multi_grounding(plan, objects)
+
+
+def test_grounding_requires_all_ids_exact_binding_and_resolved_ownership():
+    import pytest
+    from sa1b_pipeline.group_planning import normalize_multi_grounding
+    for field, value, message in [('object_id', '8', 'every target'),
+                                  ('unit_id', 'U2', 'binding'),
+                                  ('extent', 'uncertain', 'ownership'),
+                                  ('excluded', '', 'ownership')]:
+        plan = grounding_first_fixture()
+        plan['regions'][0][field] = value
+        with pytest.raises(ValueError, match=message):
+            normalize_multi_grounding(plan, [{'object_id': '7'}])
+    plan = grounding_first_fixture()
+    plan['regions'] *= 2
+    with pytest.raises(ValueError, match='every target'):
+        normalize_multi_grounding(plan, [{'object_id': '7'}, {'object_id': '8'}])
+
+
+def test_selected_grid_cannot_leak_excluded_foreground_and_retains_last_tile():
+    from sa1b_pipeline.group_planning import _selected_grid
+    source = Image.new('RGB', (100, 100), 'red')
+    mask = np.ones((100, 100), dtype=bool)
+    mask[25:75, 25:75] = False
+    alternate = np.asarray(source).copy()
+    alternate[~mask] = (0, 0, 255)
+    objects = [{'object_id': str(i)} for i in range(5)]
+    a = np.asarray(_selected_grid(source, objects, [mask]*5))
+    b = np.asarray(_selected_grid(Image.fromarray(alternate), objects, [mask]*5))
+    assert a.shape == (1296, 1280, 3)
+    assert np.array_equal(a, b)  # even boundary interpolation cannot reveal excluded pixels
+    assert tuple(a[2*432+232, 320]) == (100, 100, 100)
+    assert tuple(a[2*432+40, 320]) == (255, 0, 0)
+
+
+def test_context_cutout_keeps_alignment_and_has_distinct_cache(tmp_path):
+    from sa1b_pipeline.group_planning import group_views, multi_prompt
+    source = tmp_path / 'photo.png'
+    Image.new('RGB', (100, 100), 'red').save(source)
+    mask = np.ones((100, 100), np.uint8)*255
+    mask[25:75, 25:75] = 0
+    path = tmp_path / 'hole.png'; Image.fromarray(mask).save(path)
+    objects = [{'object_id': '7', 'mask_path': str(path)}]
+    candidate = {'image_path': str(source)}
+    views, _, context_digest = group_views(candidate, objects, tmp_path/'views', context_cutout=True)
+    _, _, selected_digest = group_views(candidate, objects, tmp_path/'views', selected_only=True)
+    assert context_digest != selected_digest
+    panel = np.asarray(Image.open(views[1]))
+    assert panel.shape == (304, 1024, 3)
+    assert tuple(panel[168, 256]) == (255, 0, 0)  # context retains the excluded center
+    assert tuple(panel[168, 768]) == (100, 100, 100)  # selected tile hides it
+    assert tuple(panel[48, 256]) == tuple(panel[48, 768]) == (255, 0, 0)
+    prompt = multi_prompt({'7': 'remove'}, objects, ['U1'], grounding_first=True, context_cutout=True)
+    assert 'TWO aligned columns' in prompt and 'numbered grid' not in prompt
