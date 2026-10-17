@@ -144,6 +144,7 @@ def test_material_only_replacement_rejected_but_new_shape_allowed():
 
 def test_audit_stage_retries_only_transient_contract_visibility(tmp_path, monkeypatch):
     import sys
+    import pytest
     from scripts.group_production import stage
 
     (tmp_path / "generated.jsonl").write_text("")
@@ -162,25 +163,26 @@ def test_audit_stage_retries_only_transient_contract_visibility(tmp_path, monkey
             "test-model",
         ],
     )
+    import errno
+    from sa1b_pipeline import production_state
+    from sa1b_pipeline.group_audit import group_audit_contract
+    contract = tmp_path / 'audit_checkpoints/contract.json'
+    production_state.atomic_json(contract, group_audit_contract('multi', 'test-model'))
+    read = Path.read_text
     attempts = []
-
-    def transient(path, value):
-        attempts.append(value)
-        if len(attempts) < 3:
-            raise FileNotFoundError(path)
-
-    monkeypatch.setattr(stage, "immutable_json", transient)
-    monkeypatch.setattr(stage.time, "sleep", lambda _: None)
+    def transient(path, *args, **kwargs):
+        if path == contract:
+            attempts.append(path)
+            if len(attempts) < 3:
+                raise FileNotFoundError(errno.ENOENT, 'visibility lag', str(path))
+        return read(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', transient)
+    monkeypatch.setattr(production_state.time, 'sleep', lambda _: None)
     stage.main()
     assert len(attempts) == 3
-    assert (tmp_path / "audited_worker0.jsonl").read_text() == ""
-    import pytest
-
-    def changed(path, value):
-        raise ValueError("checkpoint/config changed")
-
-    monkeypatch.setattr(stage, "immutable_json", changed)
-    with pytest.raises(ValueError, match="changed"):
+    assert (tmp_path / 'audited_worker0.jsonl').read_text() == ''
+    production_state.atomic_json(contract, {'changed': True})
+    with pytest.raises(ValueError, match='changed'):
         stage.main()
 
 

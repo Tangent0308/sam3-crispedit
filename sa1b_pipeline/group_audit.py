@@ -31,9 +31,30 @@ MULTI_GROUP_PROMPT += "\n" + MULTI_PHYSICAL_RULES + "\nFor EVERY units entry als
 MULTI_REQUIRED_AUDIT_FIELDS = ("unique_refs", "operations_correct", "all_targets_done", "no_crosstalk", "outside_preserved", "natural")
 
 
+
+MULTI_LOCATION_NOVELTY_RULES = """Record what is actually visible before deciding: source_entity, observed_change and observed_location (each at most 12 words; overall evidence at most 35 words). Do not repeat the desired edit as an observation.
+ref_matches_mask checks that the original description identifies exactly the selected source region. location_correct checks the ACTUAL changed part/site against every explicit position/contact requirement. Screen-left/right means the original image; 'her/his right' means anatomical right, which is not automatically screen-right. If the instruction does not specify a side, do not invent a side requirement. Never approve a specified side by checking only that the object is somewhere on its host.
+addition_is_new is true for non-add. For add, it is true only when a new object/detail is visible at the requested site AND the original host/content remains except natural occlusion by that distinct new item: replacing or painting over an existing sign/logo is not a new addition. A newly printed motif on a previously blank patch is valid. Decide from source versus result, not from the verb Add.
+Reject concrete wrong targets/sites, missing edits, damaged host structure, unsupported items and changes to unrelated objects. Plausible shape variation of a requested replacement, changed shading on a recolored surface, and minor boundary/texture differences are acceptable. Changing the physical construction of a panel/ceiling (slats, coffers, molding) can be replace; merely repainting or resurfacing unchanged geometry is attribute. Do not demand details never specified in the instruction; do not call a replacement wrong merely because its shape differs from the source. Explain each failed boolean with the visible contradiction. If physical evidence supports the edit, unusual taste alone is not a failure."""
+MULTI_GROUP_PROMPT += "\n" + MULTI_LOCATION_NOVELTY_RULES
+
+
+def multi_step_prompt(instruction, operation):
+    from .validate import OPERATION_AUDIT_RULES
+    return ("Audit one edit. Images: 1 clean full SOURCE, 2 clean full RESULT, 3 aligned SOURCE/RESULT/BINARY MASK crops. "
+            "White in the binary mask selects the source region; black excludes it. The mask is never an output image. "
+            "For add it selects the source attachment site, not the new item's silhouette. "
+            "Judge the clean photos. Compare this one step; earlier legitimate edits are already in both full images.\n"
+            + MULTI_LOCATION_NOVELTY_RULES + "\n" + MULTI_PHYSICAL_RULES + "\n"
+            + OPERATION_AUDIT_RULES.replace("{operation}", operation) + "\n" + BLIND_RULE
+            + "\nReturn the supplied JSON schema. host_integrity is true when remaining host/body/support is coherent; "
+              "target_done means the full requested edit is visible. non_target_preserved checks unrelated content. "
+              "Any failed check makes decision=fail.\nInstruction: " + instruction)
+
+
 def group_audit_contract(kind: str, model: str) -> dict[str, str]:
     return {"model": model, "kind": kind, "mode": "joint-core-defects-v4" if kind == "twins"
-            else "multi-host-integrity-schema-v5"}
+            else "multi-location-novelty-schema-v6"}
 
 
 def multi_audit_schema(*, joint: bool = False) -> dict[str, Any]:
@@ -46,9 +67,12 @@ def multi_audit_schema(*, joint: bool = False) -> dict[str, Any]:
     common = {"decision": {"enum": ["pass", "fail"]},
               "failure_reasons": {"type": "array", "items": text}, "evidence": text}
     if not joint:
-        return obj({**common, **bools(("operation_correct", "target_done", "non_target_preserved",
-                                      "natural", "host_integrity")), "observed_change": text})
-    unit = obj({"unit_id": text, "source_entity": text,
+        return obj({"source_entity": text, "observed_change": text, "observed_location": text,
+                    **bools(("ref_matches_mask", "location_correct", "addition_is_new")),
+                    **common, **bools(("operation_correct", "target_done", "non_target_preserved",
+                                      "natural", "host_integrity"))})
+    unit = obj({"unit_id": text, "source_entity": text, "observed_location": text,
+                **bools(("location_correct", "addition_is_new")),
                 **bools(("ref_matches_mask", "step_done", "survives", "natural", "host_integrity")),
                 "observed_change": text, "issue": text})
     return obj({**common, **bools(MULTI_REQUIRED_AUDIT_FIELDS),
@@ -153,9 +177,7 @@ def _single_member_audits(groups: list[dict[str, Any]], model: VLLMAuditor,
             panel = _target_panel(row, panel_dir, binary_locator=True)
             prompt = audit_prompt(row["instruction"], operation=row["operation"], binary_locator=True)
             if kind == "multi":
-                prompt = prompt.replace('"natural":bool',
-                    '"natural":bool,"host_integrity":bool,"observed_change":"brief actual visible change"', 1)
-                prompt += "\n" + MULTI_PHYSICAL_RULES + "\nAlso return host_integrity: bool and observed_change: brief actual visible change. The remaining body/host/support must be intact; background replacing a covered body is a failure. If no host is affected, host_integrity=true."
+                prompt = multi_step_prompt(row["instruction"], row["operation"])
             jobs.append({"job_id": f"{group.get('twin_id') or group.get('multi_id')}::{member['unit_id']}",
                          "images": [row["source_image"], row["edited_image"], panel],
                          "prompt": prompt,
@@ -420,6 +442,11 @@ def _enforce_multi_integrity(audit: dict[str, Any], *, joint: bool = False) -> d
         if not isinstance(row, dict) or row.get("host_integrity") is not True:
             failures.append("host_integrity_not_verified")
             continue
+        for key in ("ref_matches_mask", "location_correct", "addition_is_new"):
+            # Old diagnostic responses remain readable; v6 structured decoding
+            # requires all three fields for every new call.
+            if row.get(key) is False:
+                failures.append(key + "_failed")
         evidence = [str(row.get(k, "")) for k in ("evidence", "issue", "observed_change")]
         if _multi_hard_defects(evidence):
             failures.append("acknowledged_serious_defect")

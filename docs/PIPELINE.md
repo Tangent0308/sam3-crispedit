@@ -736,7 +736,7 @@ SAM3 独立修正 4 个成员总计 16.25 s（含加载、读写和重新确定�
 
 `multi_semantics.py` 在配额分配前排除明确不合理的操作/对象组合，包含人体、核心穿着衣物及直接附着部位的范围检查；`group_selection.py` 与 `group_production.py` 共用它，不把 mask 本身判为无效。源类别提示可能错误，不能当视觉真值；保守规则仍可能排除未穿着衣物的合理 remove。`group_planning.py` 加入逐目标类别提示、精确范围和 replace 结构区别要求；`multi_plan_schema.py` 约束输出数组、字段和枚举；`run_group_pipeline.py` 对 multi/legacy 的结构化规划使用该 schema，仍每组一次调用、无补问。规划版本为 `multi-affordance-hints-3`。
 
-`group_audit.py` 要求逐步/联合审核说明实际变化、宿主完整性，并检查“文字承认严重缺陷但 decision=pass”的矛盾；局部小图允许放大，避免缩成图标。`audit_backend.py` 支持每个请求的输出 schema，避免漏 `host_integrity` 字段造成正常编辑被拒绝。当前默认审核 contract 为 **`multi-host-integrity-schema-v5`**，保持每目标一次逐步审核＋每组一次联合审核；孪生审核路径不变。另试的聚焦裁剪 v6 有召回改善但也引入误拒绝和左右位置漏检，已从默认代码撤回。
+`group_audit.py` 要求逐步/联合审核说明实际变化、宿主完整性，并检查“文字承认严重缺陷但 decision=pass”的矛盾；局部小图允许放大，避免缩成图标。`audit_backend.py` 支持每个请求的输出 schema，避免漏 `host_integrity` 字段造成正常编辑被拒绝。本节当时采用的审核 contract 为 **`multi-host-integrity-schema-v5`**（最新修复见第 7.19 节），保持每目标一次逐步审核＋每组一次联合审核；孪生审核路径不变。另试的聚焦裁剪 v6 有召回改善但也引入误拒绝和左右位置漏检，已从默认代码撤回。
 
 | 指标 | 旧完整验证 | 第一轮适配/提示 | 第二轮结构化规划＋v5 审核 |
 |---|---:|---:|---:|
@@ -786,7 +786,7 @@ SAM3 独立修正 4 个成员总计 16.25 s（含加载、读写和重新确定�
 
 ![黑包缺口与相邻蓝椅保护边界](assets/multi_followup/bag_failure.jpg)
 
-审核实验均用固定图片：8 个正反例中，v5 为 TP/TN/FP/FN=2/4/0/2；更宽松 v7 为 4/1/3/0，v8 为 2/4/0/2；追加选中像素放大和逐步观察的 v9 为 3/4/0/1。继续在本轮 7 个审核候选上测 v9，却新增放过黑包缺口，且两组误拒未改善。因此 **v7/v8/v9 全部撤回，默认仍为 v5**。严重错目标、悬空、人体破坏、缺失编辑和串改继续拒绝；小纹理变化、源模糊和合理风格不单独拒绝。误拒未解决，不能宣称审核已可靠。
+审核实验均用固定图片：8 个正反例中，v5 为 TP/TN/FP/FN=2/4/0/2；更宽松 v7 为 4/1/3/0，v8 为 2/4/0/2；追加选中像素放大和逐步观察的 v9 为 3/4/0/1。继续在本轮 7 个审核候选上测 v9，却新增放过黑包缺口，且两组误拒未改善。因此本轮 **v7/v8/v9 全部撤回，当时默认仍为 v5**（最新修复见第 7.19 节）。严重错目标、悬空、人体破坏、缺失编辑和串改继续拒绝；小纹理变化、源模糊和合理风格不单独拒绝。误拒未解决，不能宣称审核已可靠。
 
 组级实验完整墙钟 807.36 秒，单步均值 19.96 秒。逐 mask 10 图的规划 460.36 秒（模型加载 187.68，35 请求的批次推理 269.48），生图＋审核 276.33 秒；6 图大 crop 规划 319.75 秒（加载 179.59，19 请求的批次推理 137.53），生图＋审核 301.03 秒。后两轮分阶段运行，时间相加分别为 736.70/620.78 秒，排除了 CPU 回放、等待及规划最终退出，不是连续全流程墙钟。单步约 20 秒，尚无稳态加速证据；审核回放仅为实验，不加入生产调用链。
 
@@ -820,3 +820,35 @@ SAM3 独立修正 4 个成员总计 16.25 s（含加载、读写和重新确定�
 真实生图＋逐步审核含冷启动 **321.58 秒**；编辑器单请求平均 **18.02 秒**，26 请求累计工作 468.59 秒（并行，不是墙钟）。冻结联合诊断另耗 125.23 秒，CPU 回放/续跑校验另耗 123.29 秒；复用已有计划，本轮没有测规划，也未重新测最终组合一次连续全流程，不能据此更新四机总工期。
 
 目录 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_transactional_validation_20261016/`：`质量分析.md`、`experiment_summary.json`、`rollback_verification.json`、`worker_timing.json`、全部决策检查点；10 页 PDF 为 `final_replay/inspection/multi_batch_src_mask_tar.pdf`，包含最终 SRC/MASK/TAR 和丢弃尝试。`verified/multi_preview.jsonl` 保存 2 个自动/视觉双通过检查样本，媒体以实验根目录解析；3 个自动通过原记录仍单独保留，未冒充全部人工合格。370 项测试通过；协议模块与 benchmark 未变。
+
+
+### 7.19 可见状态规划、实体绑定与位置审核（2026-10-17）
+
+当前多目标规划版本为 `multi-visible-fit-6-bound`，审核为 `multi-location-novelty-schema-v6`。`group_planning.py::MULTI_PROMPT` 在同次响应里先记录实际实体及 `visible_before`，再设计自然编辑；要求 add 使用可见直接附着面并保留原内容，remove 保持剩余结构，replace 有实质形态变化，Ref 最短且唯一。`multi_plan_schema.py` 使用 `grounding_version=3`，只输出一次实体名，由 `normalize_multi_grounding` 绑定 scope，避免将模板“singular noun”当真实类别。真实矛盾仍拒绝；旧响应仅能用其独立识别的实体恢复占位词，原始响应保留，不补问模型。
+
+`group_audit.py::multi_step_prompt` 要求实际变化与位置证据，增加 `ref_matches_mask`、`location_correct`、`addition_is_new`；`_enforce_multi_integrity` 防止明确否定检查项却最终 pass。新增物可自然遮挡宿主，但不能重绘旧标牌冒充 add；错目标、错附着、缺失编辑和宿主损坏仍拒绝，轻微纹理与合理风格不单独拒绝。`multi_semantics.py` 拒绝 her/his 等重复所有者的 site。共享 instruction/mask 协议仍为 2.0，与 benchmark 字节一致。孪生与已冻结四机包未升级。
+
+固定原 10 候选、原 mask、原指定类型实测：10 次规划，经同次响应绑定恢复 3 组格式拒绝，最终 9 组成图、32 次编辑；25 项保留、7 项失败回退，所有输入/最终图哈希与 units 提交记录一致。30 次逐步审核、7 次联合审核，无生成重试。9 组都剩至少两个目标，2 组因原组合/邻接条件拒绝。自动通过 **5/9**；assistant 逐图复核这 5 组为 **3 基本合格、1 失败、1 不确定**。另有 1 个视觉合格组被误拒。全成图为 4 好/4 失败/1 不确定；相比前轮同 10 候选的双通过 2 组，本轮为 3 组，但全部视觉好例仍为 4/10，不能宣称总体出图质量稳定提升。
+
+自动通过目标分布 add/remove/replace/attribute 为 **6/2/2/3**，双通过为 **4/2/1/2**。单步自动保留率为 8/10、5/8、5/6、7/8，不能当人工质量成功率。仍需按最终配额补额，小样本尚不能证明类别均衡。
+
+好例包括浮雕加月桂冠并删除底座、阳台加旗帜并调整顶层窗色、街景五目标。失败包括下巴带画在帽冠、裤子主要改色却归 replace、店面 tint 范围过大；新增装置像摄像头而非烟感，列为不确定。Ref 还有重复 site 和“衣物在行走”等问题。失败回退能挽回部分操作，但无法弥补错误的逐步审核。
+
+![浮雕双目标基本合格：SRC、mask、TAR](assets/multi_quality_v6/bust_good.jpg)
+
+![反例：下巴带画到帽冠，自动审核漏放](assets/multi_quality_v6/strap_failure.jpg)
+
+尝试将联合审核压为三列、先观察后判定，冻结 7 个图各审核一次：自动变 7/9，双通过 4/10，找回商场误拒，却新增放过主要改色的 replace，帽带错误仍漏检。该 `multi-observe-final-schema-v7` **未采用**，代码恢复本轮 v6；不能把自动率升高解释成质量变好。候选代码和输入输出留在实验目录，不进入默认链。
+
+规划含加载/退出 **488.57 秒**；首批 6 组生图＋审核 **398.51 秒**，3 个绑定恢复组另 **275.96 秒**（再次冷启动）。分阶段相加约 **19 分 23 秒**，不含修改、等待和复核，不是最终版本的一次连续全流程测速。32 个编辑请求均值 **18.06 秒**，上一轮 18.02 秒，速度基本不变。联合诊断另耗加载 71.43 秒、处理 85.96 秒，另有一次 spawn 初始化失败与退出清理；不加入正常生产成本估计。每组一次规划、每目标至多一次生图/逐步审核的预算不变，40 steps 未降。
+
+最终单实体 schema 和衣物措辞提醒等收尾修改仅经 CPU 单测/真实原响应回放，没有重新采样新的规划批次。当前结果仍不支持直接扩大量产；下一步应优先检验 payload 的可见安装端点与可写空间、replace 的真实结构差异，以及审核是否在描述实际形状而非复述请求。保持调用次数，用未见过的小批量检验泛化。
+
+实验目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_quality_v6_20261017/`。
+
+- `质量分析.md`：中文逐例结论、各阶段速度、采用/回退依据。
+- `complete/inspection/multi_batch_src_mask_tar.pdf`：10 页，9 组成图和 1 个规划拒绝，含 SRC/MASK/TAR、丢弃尝试及中文结论。
+- `complete/audited.jsonl`、`complete/accepted.jsonl`：9 个结果、5 个自动通过；`complete/verified/multi_preview.jsonl` 为 3 个双通过检查样本，媒体路径为共享目录绝对路径。
+- `complete/experiment_summary.json`、`step_summary.json`、`rollback_verification.json`、`visual_review.json` 保存统计和证据；`binding_recovery/` 保存无新增规划调用的绑定恢复，`audit_final_v7/` 保存未采用终审实验。
+
+最终 **387 项测试通过**；共享协议字节一致、失败回退哈希校验通过。旧 50k 数据和冻结生产部署未改。

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-MULTI_PLAN_VERSION = "multi-affordance-hints-4-binding"
+MULTI_PLAN_VERSION = "multi-visible-fit-6-bound"
 _PEOPLE = {"person", "people", "man", "woman", "boy", "girl", "child", "customer"}
 _ANATOMY = {"head", "face", "arm", "hand", "leg", "foot", "finger", "ear", "eye", "nose", "mouth", "neck", "torso", "body"}
 _CORE_CLOTHES = {"jeans", "trousers", "pants", "shorts", "shirt", "t-shirt", "blouse", "jacket", "coat", "dress", "skirt", "sleeve", "sweater", "clothing", "garment", "hijab"}
@@ -43,6 +43,8 @@ def validate_multi_semantics(item, source_category=""):
     # This is a narrow contradiction gate, not a complete attachment ontology.
     if item.get("operation") == "add":
         site = str((item.get("placement") or {}).get("site", "")).lower()
+        if re.match(r"^(?:the\s+)?(?:his|her|its|their)\s+", site):
+            raise ValueError("multi attachment site must be a host-relative noun without a possessive")
         if (_heads(item.get("scope", "")) & {"jeans", "trousers", "pants", "shorts", "skirt"}
                 and re.search(r"\b(?:breast|chest|shoulder|collar|lapel)\b", site)):
             raise ValueError("multi direct attachment site lies outside the lower garment")

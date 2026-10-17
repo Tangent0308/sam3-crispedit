@@ -74,9 +74,9 @@ def test_multi_decoder_schema_rejects_nested_target_layout():
     from sa1b_pipeline.multi_plan_schema import multi_plan_schema
     schema = multi_plan_schema()
     jsonschema.Draft202012Validator.check_schema(schema)
-    jsonschema.validate({'feasible': False, 'targets': [], 'generation_order': [], 'evidence': 'incompatible'}, schema)
+    jsonschema.validate({'grounding_version': 3, 'feasible': False, 'targets': [], 'generation_order': [], 'evidence': 'incompatible'}, schema)
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate({'feasible': True, 'targets': [{'targets': []}], 'generation_order': [], 'evidence': ''}, schema)
+        jsonschema.validate({'grounding_version': 3, 'feasible': True, 'targets': [{'targets': []}], 'generation_order': [], 'evidence': ''}, schema)
 
 
 def test_nonhuman_arm_and_impossible_garment_site_regressions():
@@ -100,7 +100,7 @@ def test_multi_audit_schema_requires_integrity_and_step_evidence():
                'operation_correct':True, 'target_done':True, 'non_target_preserved':True, 'natural':True}
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(minimal, multi_audit_schema())
-    jsonschema.validate({**minimal, 'host_integrity':True, 'observed_change':'Color changed.'}, multi_audit_schema())
+    jsonschema.validate({**minimal, 'host_integrity':True, 'observed_change':'Color changed.', 'source_entity':'chair', 'observed_location':'chair surface', 'ref_matches_mask':True, 'location_correct':True, 'addition_is_new':True}, multi_audit_schema())
 
 
 def test_grounding_label_modifiers_do_not_cause_false_rejection():
