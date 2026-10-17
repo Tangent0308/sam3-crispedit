@@ -1,0 +1,166 @@
+"""Parallel local edits with serial conflict components and verified pixel fusion.
+
+All components start at the original photograph. Overlapping writable supports
+(and explicit dependencies) are serialized in the planner's existing order.
+Only accepted edits enter a component result; disjoint accepted supports are
+copied once into the original. Crops provide context, never fusion ownership.
+"""
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from itertools import combinations
+from pathlib import Path
+import json
+import time
+
+import numpy as np
+from PIL import Image
+
+from .geometry import load_mask
+from .group_generation import multi_support_preflight, _union_support, _write_mask
+from .multi_transactional import (run_committed_step, finalize_committed_group,
+                                  _verify_hashes)
+from .production_state import atomic_json, immutable_json, file_hash, digest
+
+POLICY = 'parallel-components-v1'
+
+
+def conflict_components(group):
+    """Connect writes, not crop boxes; connected targets keep planned order."""
+    order = group['generation_order']
+    units = {u['unit_id']: u for u in group['units']}
+    size = Image.open(group['source_image']).size
+    supports = {uid: load_mask({'mask_path': units[uid]['unit']['execution_mask_path']}, size)
+                for uid in order}
+    neighbors = {uid: set() for uid in order}
+    edges = []
+    for a, b in combinations(order, 2):
+        overlap = int(np.count_nonzero(supports[a] & supports[b]))
+        if overlap:
+            neighbors[a].add(b); neighbors[b].add(a)
+            edges.append({'units': [a, b], 'reason': 'writable_support_overlap', 'pixels': overlap})
+    # Optional explicit pairs are an extension to the plan, not inferred from nouns.
+    for pair in group.get('edit_dependencies', []):
+        if (not isinstance(pair, (list, tuple)) or len(pair) != 2
+                or any(uid not in units for uid in pair) or pair[0] == pair[1]):
+            raise ValueError('invalid edit dependency')
+        a, b = pair
+        if order.index(a) >= order.index(b):
+            raise ValueError('generation order contradicts explicit dependency')
+        neighbors[a].add(b); neighbors[b].add(a)
+        edges.append({'units': [a, b], 'reason': 'explicit_dependency'})
+    unseen = set(order); components = []
+    for first in order:
+        if first not in unseen: continue
+        stack = [first]; found = set()
+        while stack:
+            uid = stack.pop()
+            if uid in found: continue
+            found.add(uid); unseen.discard(uid)
+            stack.extend(neighbors[uid] - found)
+        components.append([uid for uid in order if uid in found])
+    return components, edges
+
+
+def fuse_components(source, results, directory):
+    """Copy already-feathered accepted pixels once; refuse competing ownership."""
+    directory = Path(directory)
+    original = np.asarray(Image.open(source).convert('RGB'))
+    fused = original.copy(); owned = np.zeros(original.shape[:2], bool)
+    evidence = []
+    for i, result in enumerate(results):
+        kept = result['kept']
+        if not kept: continue
+        support = _union_support(source, kept)
+        if (owned & support).any():
+            raise ValueError('parallel fusion has overlapping accepted supports')
+        final = np.asarray(Image.open(result['current']).convert('RGB'))
+        if final.shape != original.shape:
+            raise ValueError('parallel component dimensions changed')
+        # The compositor must preserve every source pixel outside accepted writes.
+        if np.any(final[~support] != original[~support]):
+            raise ValueError('parallel component changed pixels outside accepted support')
+        fused[support] = final[support]
+        owned |= support
+        path = _write_mask(directory / f'component_{i:02d}_accepted_support.png', support)
+        evidence.append({'component': i, 'kept': [u['unit_id'] for u in kept],
+                         'image': result['current'], 'image_sha256': file_hash(result['current']),
+                         'support': path, 'support_sha256': file_hash(path),
+                         'copied_pixels': int(support.sum())})
+    output = directory / 'fused.png'; output.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(fused).save(output)
+    proof = {'version': 1, 'source_sha256': file_hash(source), 'output_sha256': file_hash(output),
+             'disjoint_component_supports': True, 'outside_union_exactly_preserved': True,
+             'no_second_alpha_blend': True, 'components': evidence}
+    atomic_json(directory / 'fusion_proof.json', proof)
+    return str(output), proof
+
+
+def generate_parallel_multi_group(plan, directory, editor_factory, auditor, *, seed=0,
+                                  save_crop_evidence=False):
+    """One generation per target, one step audit, one final audit; no retries."""
+    root = Path(directory); root.mkdir(parents=True, exist_ok=True)
+    if plan.get('commit_policy') or plan.get('joint_target'):
+        raise ValueError('parallel generation requires an ungenerated plan')
+    ids = [u['unit_id'] for u in plan['units']]; order = plan['generation_order']
+    if len(set(ids)) != len(ids) or len(order) != len(ids) or set(order) != set(ids):
+        raise ValueError('invalid parallel generation order')
+    editor_config = editor_factory().config
+    immutable_json(root / 'transaction_contract.json', {
+        'policy': POLICY, 'plan': plan, 'seed': seed, 'editor': editor_config,
+        'auditor': auditor.config, 'save_crop_evidence': save_crop_evidence,
+        'source_sha256': file_hash(plan['source_image']),
+        'mask_sha256': {u['unit_id']: file_hash(u.get('mask_v1') or u['mask']) for u in plan['units']},
+        'code': {p.name: file_hash(p) for p in Path(__file__).parent.glob('*.py')}})
+    committed = root / 'committed.json'
+    if committed.exists():
+        saved = json.loads(committed.read_text()); _verify_hashes(saved['image_hashes'])
+        if saved['group_sha256'] != digest(saved['group']):
+            raise ValueError('parallel final record changed')
+        for component in saved['group']['parallel']['fusion']['components']:
+            _verify_hashes({component['image']: component['image_sha256'],
+                            component['support']: component['support_sha256']})
+        return saved['group']
+    group = deepcopy(plan); group['commit_policy'] = POLICY
+    preflight = multi_support_preflight(group, root)
+    if not preflight['pass']: raise ValueError('parallel source masks overlap')
+    group['support_preflight'] = preflight
+    components, edges = conflict_components(group)
+    atomic_json(root / 'schedule.json', {'components': components, 'edges': edges})
+    by_id = {u['unit_id']: u for u in group['units']}
+    original = np.asarray(Image.open(group['source_image']).convert('RGB'), dtype=np.int16)
+    started = time.monotonic()
+
+    def run_component(item):
+        component_id, uids = item
+        current = group['source_image']; kept = []; decisions = []
+        editor = editor_factory()  # Thread-local adapter, shared remote GPU pool.
+        for uid in uids:
+            index = order.index(uid) + 1
+            step_dir = root / f'step_{index:02d}_{uid}'
+            decision = run_committed_step(group, by_id[uid], current, original, step_dir,
+                                          editor, auditor, index=index, seed=seed,
+                                          save_crop_evidence=save_crop_evidence)
+            member = decision['member']
+            decisions.append({'unit_id': uid, 'operation': member['operation'],
+                              'accepted': decision['accepted'], 'reasons': decision['reasons'],
+                              'checkpoint': str(step_dir / 'decision.json')})
+            if decision['accepted']:
+                kept.append(member); current = member['step_output_image']
+            atomic_json(root / f'component_{component_id:02d}_progress.json', {
+                'attempted': len(decisions), 'planned': len(uids), 'current_image': current,
+                'kept': len(kept), 'decisions': decisions})
+            print(json.dumps({'group': group['multi_id'], 'component': component_id, 'step': uid,
+                              'commit': decision['accepted'], 'kept': len(kept)}), flush=True)
+        return {'current': current, 'kept': kept, 'decisions': decisions}
+
+    with ThreadPoolExecutor(max_workers=len(components)) as executor:
+        results = list(executor.map(run_component, enumerate(components)))
+    current, proof = fuse_components(group['source_image'], results, root / 'fusion')
+    decisions = sorted([d for r in results for d in r['decisions']], key=lambda d: order.index(d['unit_id']))
+    kept = [u for r in results for u in r['kept']]
+    group['parallel'] = {'components': components, 'edges': edges, 'fusion': proof,
+                         'generation_and_step_audit_seconds': time.monotonic() - started,
+                         'source_policy': 'original per component; committed previous step within component'}
+    return finalize_committed_group(plan, group, kept, decisions, current, root, auditor)

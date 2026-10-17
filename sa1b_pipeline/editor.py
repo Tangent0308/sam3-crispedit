@@ -188,6 +188,16 @@ class DiffusersQwenImageEditor:
         radius = _support_radius(local, unit["operation"], unit.get("support_policy"))
         expanded = local_support
         alpha = Image.fromarray((_feather(expanded, max(2, radius // 3)) * 255).astype("uint8"), mode="L")
+        if unit.get("diagnostic_dir"):
+            directory = Path(unit["diagnostic_dir"])
+            directory.mkdir(parents=True, exist_ok=True)
+            evidence = {}
+            for name, picture in (("source_crop", crop), ("raw_crop", raw),
+                                  ("resized_crop", edited_crop), ("alpha", alpha)):
+                path = directory / (name + ".png")
+                picture.save(path)
+                evidence[name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            self.last_generation_context["crop_evidence"] = evidence
         output = image.copy()
         output.paste(edited_crop, (x0, y0), alpha)
         return output

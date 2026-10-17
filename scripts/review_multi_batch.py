@@ -30,7 +30,8 @@ def append_retention_evidence(canvas, group, font_path):
     y = canvas.height + 20
     draw.text((52,y), f"逐步保留：原计划 {retention['planned_n_targets']} 项 → 实际保留 {group['n_targets']} 项", font=font(32),fill="#182b43")
     draw.text((52,y+48), "保留：" + ", ".join(retention['kept_unit_ids']) + "；丢弃：" + ", ".join(retention['dropped_unit_ids']),font=font(28),fill="#33445b")
-    draw.text((52,y+90), "下列失败尝试没有进入上面的最终 TAR；后续编辑从最近的合格图继续。",font=font(26),fill="#a73836")
+    continuation = "同一分量内从最近的合格图继续，分量之间从原图独立编辑。" if group.get("parallel") else "后续编辑从最近的合格图继续。"
+    draw.text((52,y+90), "下列失败尝试没有进入上面的最终 TAR；" + continuation,font=font(26),fill="#a73836")
     col=(width-140)//3
     for index, decision in enumerate(dropped):
         member=json.loads(Path(decision['checkpoint']).read_text())['member']
@@ -41,7 +42,8 @@ def append_retention_evidence(canvas, group, font_path):
         with Image.open(member['mask']) as im:mask=im.convert('L')
         box=mask.getbbox();pad=max(32,round(max(box[2]-box[0],box[3]-box[1])*.35))
         box=(max(0,box[0]-pad),max(0,box[1]-pad),min(mask.width,box[2]+pad),min(mask.height,box[3]+pad))
-        for j,(label,path) in enumerate([('SRC / LAST COMMITTED INPUT',member['step_input_image']),('MASK',member['mask']),('REJECTED ATTEMPT / NOT FINAL',member['step_output_image'])]):
+        input_label = 'SRC / COMPONENT COMMITTED INPUT' if group.get('parallel') else 'SRC / LAST COMMITTED INPUT'
+        for j,(label,path) in enumerate([(input_label,member['step_input_image']),('MASK',member['mask']),('REJECTED ATTEMPT / NOT FINAL',member['step_output_image'])]):
             x=52+j*(col+15)
             draw.text((x,y+115),label,font=font(22),fill="#33445b")
             with Image.open(path) as raw:tile=ImageOps.contain(raw.convert('RGB').crop(box),(col,440))

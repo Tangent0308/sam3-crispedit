@@ -21,6 +21,8 @@ exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_tra
 
 新建任务使用 `keep-passed-v1`：每步生成后立即审核，通过才更新当前图，失败回退后继续其他操作；至少保留两个目标，并重新检查类型组合、邻接关系与最终整图。入口为 `scripts/run_multi_transactional.py`，复用 `run_group_pipeline.py --plan-only` 的计划，不重复规划。新准备的四机配置自动接入：每节点 6 个编辑器＋2 个审核器分卡常驻，不同组交错执行，逐步审核合批；旧冻结部署包保持原流程。调用和恢复见 [四机指南](docs/FOURNODE_RUN_GUIDE.md#多目标逐步保留版本keep-passed-v1)。
 
+另提供显式实验选项 `--generation-mode parallel-components --save-crop-evidence`：互不冲突的可写区域从同一原图并行编辑，有冲突的目标保持串行回退，通过后按像素区域融合并做一次联合审核。默认仍为串行，四机冻结入口不变；设计和同计划质量/速度对照见 [PIPELINE 第 7.20 节](docs/PIPELINE.md#720-并行局部编辑与合格区域融合2026-10-17)。
+
 ## 已完成的 50k 数据
 
 本批共生成并审核 79,821 条，自动通过 **50,000 条**，add/replace/remove/attribute 各 12,500 条，覆盖 1,132 张源图。推荐训练入口：
