@@ -15,6 +15,12 @@ from collections import Counter
 from typing import Any, Callable, Iterable
 
 from .schema import OPERATIONS
+from .multi_semantics import operation_preference_cost
+
+
+def schedule_preference_cost(row, schedule):
+    return sum(operation_preference_cost(obj.get("category", ""), operation)
+               for obj, operation in zip(row.get("objects", []), schedule))
 
 
 def _target_counts(total_members: int) -> dict[str, int]:
@@ -89,6 +95,7 @@ def _greedy_assignment(
 def _milp_assignment(
     options: list[list[tuple[str, ...]]],
     targets: dict[str, int],
+    preference_costs: list[list[float]] | None = None,
 ):
     """Solve the min-max quota deviation problem with scipy when available."""
     try:
@@ -108,9 +115,14 @@ def _milp_assignment(
     integrality = np.zeros(variable_total)
     lower_bounds = np.zeros(variable_total)
     upper_bounds = np.full(variable_total, np.inf)
+    # Every complete assignment contributes < 0.25 preference cost, so
+    # integer quota deviations always take priority over this tie breaker.
+    preference_scale = 0.25 / max(1.0, sum(max(c, default=0) for c in (preference_costs or [])))
     column = 0
     for row_index, schedules in enumerate(options):
-        for schedule in schedules:
+        for schedule_index, schedule in enumerate(schedules):
+            if preference_costs:
+                objective[column] = preference_scale * preference_costs[row_index][schedule_index]
             matrix[row_index, column] = 1.0
             integrality[column] = 1.0
             upper_bounds[column] = 1.0
@@ -173,12 +185,21 @@ def balance_multi_operations(
             raise ValueError(f"no feasible operation schedule for group index {index}")
         options.append(schedules)
     targets = _target_counts(sum(len(row.get("objects", [])) for row in rows))
-    assignment = _milp_assignment(options, targets)
+    preference_costs = [[schedule_preference_cost(row, schedule) for schedule in schedules]
+                        for row, schedules in zip(rows, options)]
+    assignment = _milp_assignment(options, targets, preference_costs)
     if assignment is None:
         assignment = _greedy_assignment(rows, options, targets, seed)
+        # Preserve every group's operation multiset in the fallback, so a
+        # preference cannot perturb downstream greedy quota decisions.
+        assignment = [min((choice for choice in choices if Counter(choice) == Counter(chosen)),
+                          key=lambda choice: (schedule_preference_cost(row, choice), choice))
+                      for row, choices, chosen in zip(rows, options, assignment)]
     loads: Counter[str] = Counter()
     for row, schedule in zip(rows, assignment):
         row["operations"] = list(schedule)
+        row["operation_assignment"] = {"version": "quota-first-affordance-1",
+                                       "preference_cost": schedule_preference_cost(row, schedule)}
         loads.update(schedule)
     actual = {operation: int(loads[operation]) for operation in OPERATIONS}
     deviations = {operation: actual[operation] - targets[operation] for operation in OPERATIONS}
@@ -190,5 +211,7 @@ def balance_multi_operations(
         "deviation": deviations,
         "max_abs_deviation": max((abs(value) for value in deviations.values()), default=0),
         "solver": "scipy_milp_or_greedy_fallback",
+        "preference_version": "quota-first-affordance-1",
+        "preference_cost": sum(schedule_preference_cost(row, schedule) for row, schedule in zip(rows, assignment)),
     }
 

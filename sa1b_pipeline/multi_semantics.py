@@ -80,3 +80,33 @@ def same_scope_identity(entity: str, scope: str) -> bool:
                  "above", "below", "part", "portion", "section", "half", "upper", "lower"}:
         return False
     return True
+
+
+# Advisory costs only: labels can be imprecise and no mask/operation is
+# prohibited by these preferences. The planner still checks the actual image.
+_SUPPORT_LABELS = {"arch", "arches", "archway", "archways", "column", "columns",
+                   "pillar", "pillars", "beam", "beams", "roof", "roofs",
+                   "staircase", "staircases", "step", "steps", "shelf", "shelves",
+                   "stem", "stems", "trunk", "trunks"}
+_SURFACE_HOST_LABELS = {"table", "tables", "desk", "desks", "counter", "counters"}
+_NON_SOLID_LABELS = {"shadow", "shadows", "reflection", "reflections", "cloud", "clouds",
+                     "sky", "smoke", "fog", "mist", "rainbow", "rainbows",
+                     "highlight", "highlights"}
+
+
+def operation_preference_cost(category: str, operation: str) -> float:
+    """Break quota-equivalent schedule ties using weak physical affordances.
+
+    Prefer removing standalone items over structural supports, and attach
+    new items to tangible hosts rather than optical/atmospheric regions.
+    This never changes operation eligibility or validates an instruction.
+    """
+    heads = _heads(category)
+    if operation == "remove":
+        if heads & _SUPPORT_LABELS:
+            return 3.0
+        if heads & _SURFACE_HOST_LABELS:
+            return 1.0
+    if operation == "add" and heads & _NON_SOLID_LABELS:
+        return 3.0
+    return 0.0

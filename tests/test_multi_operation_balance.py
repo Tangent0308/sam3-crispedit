@@ -69,3 +69,50 @@ def test_pipeline_preflight_rejects_fixed_order_skew():
     else:
         raise AssertionError("fixed-order multi selection must fail quota preflight")
 
+
+
+def test_equal_quota_schedule_prefers_removing_standalone_item():
+    rows=[{'candidate':{'source_id':'scene'},'objects':[
+        {'object_id':'1','category':'arch'}, {'object_id':'2','category':'bottle'},
+        {'object_id':'3','category':'chair'}, {'object_id':'4','category':'shadow'}]}]
+    report=balance_multi_operations(rows,image_size_for=lambda row:(100,100),
+                                    allowed=lambda obj,op,size:True)
+    pairs=dict(zip((x['category'] for x in rows[0]['objects']),rows[0]['operations']))
+    assert report['max_abs_deviation']==0
+    assert pairs['arch']!='remove' and pairs['shadow']!='add'
+    assert report['preference_cost']==0
+
+
+def test_preferences_do_not_forbid_valid_masks_or_worsen_quotas():
+    from sa1b_pipeline.multi_operation_balance import _milp_assignment
+    options=[ [('remove','add'),('attribute','replace')] ]
+    targets=dict(add=1,remove=1,attribute=0,replace=0)
+    assert _milp_assignment(options,targets,[[1000,0]])==[('remove','add')]
+    # When a restrictive eligibility gate leaves one costly schedule,
+    # preference must not discard the source or silently relabel it.
+    rows=[{'objects':[{'category':'arch'},{'category':'shadow'}]}]
+    report=balance_multi_operations(rows,image_size_for=lambda row:(100,100),
+       allowed=lambda obj,op,size:op==('remove' if obj['category']=='arch' else 'add'))
+    assert rows[0]['operations']==['remove','add'] and report['preference_cost']==6
+
+
+def test_preference_uses_head_nouns_without_broad_substring_exclusions():
+    from sa1b_pipeline.multi_semantics import operation_preference_cost,operation_exclusion
+    assert operation_preference_cost('stone arch','remove')==3
+    assert operation_preference_cost('archery target','remove')==0
+    assert operation_preference_cost('stone arches','remove')==3
+    assert not operation_exclusion('arch','remove')
+
+
+def test_greedy_fallback_preserves_original_group_operation_multisets(monkeypatch):
+    import sa1b_pipeline.multi_operation_balance as balance
+    rows=[{'candidate':{'source_id':str(i)},'objects':[
+        {'object_id':str(j),'category':category} for j,category in enumerate(('arch','bottle','chair','shadow'))]}
+        for i in range(4)]
+    allowed=lambda obj,op,size:True
+    options=[balance.operation_schedules(row['objects'],(100,100),allowed) for row in rows]
+    original=balance._greedy_assignment(rows,options,balance._target_counts(16),0)
+    monkeypatch.setattr(balance,'_milp_assignment',lambda *args,**kwargs:None)
+    report=balance.balance_multi_operations(rows,image_size_for=lambda row:(100,100),allowed=allowed)
+    for row,schedule in zip(rows,original):assert Counter(row['operations'])==Counter(schedule)
+    assert report['preference_cost']==0
