@@ -1,11 +1,13 @@
 """Atomic shared checkpoints; SQLite queues remain node-local and disposable."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import shutil
 import uuid
+import time
 from pathlib import Path
 
 OPERATIONS = ('add', 'replace', 'remove', 'attribute')
@@ -50,11 +52,34 @@ def write_rows(path, rows):
     atomic_text(path, ''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in rows))
 
 
+def read_json_visible(path, *, attempts=8, initial_delay=0.1):
+    """Read shared JSON with bounded retries for ENOENT/ESTALE visibility lag.
+
+    Never create or rewrite the file. Malformed JSON, permission errors and
+    contract mismatches are permanent errors, not reasons to reset a checkpoint.
+    """
+    if attempts < 1 or initial_delay < 0:
+        raise ValueError("invalid shared-file retry settings")
+    path = Path(path)
+    for attempt in range(attempts):
+        try:
+            return json.loads(path.read_text())
+        except OSError as exc:
+            if exc.errno not in (errno.ENOENT, errno.ESTALE) or attempt == attempts - 1:
+                raise
+            time.sleep(min(initial_delay * 2 ** attempt, 1.0))
+
+
+def require_json(path, value):
+    """Read-only check of a contract published by the owning coordinator."""
+    if read_json_visible(path) != value:
+        raise ValueError(f'checkpoint/config changed: {path}')
+
+
 def immutable_json(path, value):
     path = Path(path)
     if path.exists():
-        if json.loads(path.read_text()) != value:
-            raise ValueError(f'checkpoint/config changed: {path}')
+        require_json(path, value)
     else:
         atomic_json(path, value)
 

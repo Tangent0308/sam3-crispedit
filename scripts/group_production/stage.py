@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from sa1b_pipeline.production_state import (
     atomic_json,
     digest,
-    immutable_json,
+    require_json,
     read_rows,
     write_rows,
 )
@@ -67,16 +67,8 @@ def main():
     cache = root / "audit_checkpoints"
     cache.mkdir(exist_ok=True)
     from sa1b_pipeline.group_audit import group_audit_contract
-    # Shared FUSE metadata can report exists() just before open() becomes
-    # visible. Retry only that transient ENOENT, never a changed contract.
-    for attempt in range(6):
-        try:
-            immutable_json(cache / "contract.json", group_audit_contract(args.kind, args.model))
-            break
-        except FileNotFoundError:
-            if attempt == 5:
-                raise
-            time.sleep(.1 * (attempt + 1))
+    # Only the coordinator publishes this shared contract; workers never write it.
+    require_json(cache / "contract.json", group_audit_contract(args.kind, args.model))
     pending = []
     for g in groups:
         gid = g.get("twin_id") or g["multi_id"]

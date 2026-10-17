@@ -32,6 +32,7 @@ from sa1b_pipeline.production_state import (
     atomic_json,
     file_hash,
     immutable_json,
+    require_json,
     portable,
     read_rows,
     write_rows,
@@ -405,7 +406,9 @@ def run_wave(args, c, kind, wave, chosen):
     # Publish the shared audit contract once before spawning readers. Avoid
     # concurrent rename/visibility races on the mounted shared filesystem.
     from sa1b_pipeline.group_audit import group_audit_contract
-    immutable_json(wave / "audit_checkpoints/contract.json", group_audit_contract(kind, c["audit_model"]))
+    contract = group_audit_contract(kind, c["audit_model"])
+    immutable_json(wave / "audit_checkpoints/contract.json", contract)
+    require_json(wave / "audit_checkpoints/contract.json", contract)
     workers = min(4, len(generated))
     with cf.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
