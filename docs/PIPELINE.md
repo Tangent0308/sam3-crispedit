@@ -929,3 +929,28 @@ python scripts/run_multi_transactional.py \
 实验根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_contrast_validation_20261017/`。`质量分析.md` 记录正反例、分母和版本；`footprint_replay/inspection/multi_batch_src_mask_tar.pdf` 为全 10 候选的 SRC/MASK/TAR PDF（含规划拒绝）；原始真实生成位于根目录 `generated/`，最终审核/融合位于 `footprint_replay/`，各版冻结代码与回放证据保留。全套 **395 项测试通过**，共享 instruction 协议与 benchmark 保持字节一致。
 
 四机状态快照（2026-10-17 07:36 UTC）：孪生已持久化 **55/15,000**，尚无本次重启新增；四节点日志新鲜，均在复制 FlashNext 本地缓存，约 53%/48%/53%/53%，未见新的启动错误。旧 progress 中 failed 是上次运行记录，不能覆盖当前 bootstrap 日志。完整标注 ETA 等恢复持续产出后再估计。
+
+
+### 7.22 Flash-Next 审核替换对照（2026-10-17）
+
+用户提出尝试更强模型后，确认现有规划已经使用 Qwen3.8-Flash-Next-FP8，审核使用 Qwen3.8-27B。因此本轮只比较审核模型，不重新生图、不改变 prompt、不修改运行中的冻结四机。使用第 7.21 节代码 `d04e438`、`multi-operation-contrast-v8.2`，两模型输入图片、顺序、结构化 schema、temperature=0、max_tokens=1000、batch_size=4 相同；输入文件逐个校验 SHA256。调用现有 `audit_backend.py::VLLMAuditor`，分别 TP1 和 TP4（Flash-Next 使用已有 Engram CPU offload 配置）。
+
+选取 17 个已生成编辑：10 个明确合格、5 个明确错误、2 个待确认。原本把其中一个远处阳台改棕案例作为错误，运行时放大复看发现棕色变化确实包含栏杆，不能继续断言只改窗框；在查看任何模型响应前将其改为待确认并保留原标签。这是对第 7.21 节商场失败归因的更正：上一轮 6 组目前应计为明确合格 3、失败 1、待确认 2；自动与视觉双通过仍是 3/10。旧实验文件保留历史记录，本节及本轮标签修订记录优先。另一待确认例是 `the light shirt` 的指代唯一性。两例均不进入准确率统计。
+
+| 指标 | Qwen3.8-27B | Qwen3.8-Flash-Next-FP8 |
+|---|---:|---:|
+| 明确案例判断正确 | 13/15（86.7%） | 10/15（66.7%） |
+| 明确坏例成功拒绝 | 3/5 | 1/5 |
+| 明确好例保留 | 10/10 | 9/10 |
+| 17 请求总时间，不含加载/退出 | 90.77 秒 | 168.79 秒 |
+| 模型初始化 | 76.99 秒 | 188.76 秒 |
+| 使用 GPU 数 | 1 | 4 |
+| 请求时间 × GPU 数，仅占卡成本近似 | 90.77 GPU·秒 | 675.17 GPU·秒 |
+
+Flash-Next 仍把旧标牌改写当新增、帽面上的黑带当合格下巴带、局部磨砂当完整窗户替换，并接受灰色立面；只拦截了仅改裤子颜色的假替换。它还把实际删除栏杆的图片说成“源图与目标图相同”，误拒一项好编辑。27B 本轮拦截标牌、帽带及裤子，但仍漏掉磨砂窗和灰色店面。二者均保留新雕像花冠，说明简单切换模型并没有解决真实新增与空间关系判断。27B 此次帽带判定不同于上一轮，提示批处理/推理仍有波动，temperature=0 不代表逐次判断必然相同。
+
+结论：**不替换默认审核器**。本小批中 Flash-Next 错误更多，请求耗时为 1.86 倍、占卡时间近似为 7.44 倍。这里只证明当前 prompt、输入视图、量化与部署配置下直接替换没有收益，不能推出该模型在所有审核任务上更差。固定历史回归集很小，不是未见数据的泛化评估；模型的 tokenization 也不同。机上有其他任务，耗时是本次批次观测，不能外推为四机完整 pipeline 吞吐。
+
+下一步优先修复可观察证据的表达：在现有一次审核内要求区分附着点与新物体形状、被修改部分与仍未完成部分；减少重复规则，让模型回答具体前后差异，并使用约 30 张未见图片验证。规划已经是 Flash-Next，仍需针对一次规划的实体范围、短指代和可执行 payload 优化，不能把换到同一模型当升级。正式默认仍为当前 27B 审核；孪生四机配置、模型和输出目录未改，本轮新增生图次数为 0。
+
+实验目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_model_ablation_20261017/`。`质量分析.md` 为中文报告；`visualization/audit_model_comparison.pdf` 为 17 页逐例 SOURCE/TARGET/MASK、人工基准及两个模型结论；`jobs.json` 保存完整 prompt/schema/图片哈希，`labels_initial.json` 与 `labels.json` 保存标签修订，`comparison.json` 保存完整回答与确定性最终判定，`summary.json` 保存统计。两模型均正常退出并清理自有进程。未改运行时代码，沿用第 7.21 节 395 项测试的版本。
