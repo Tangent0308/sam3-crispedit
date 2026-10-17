@@ -38,6 +38,9 @@ addition_is_new is true for non-add. For add, it is true only when a new object/
 Reject concrete wrong targets/sites, missing edits, damaged host structure, unsupported items and changes to unrelated objects. Plausible shape variation of a requested replacement, changed shading on a recolored surface, and minor boundary/texture differences are acceptable. Changing the physical construction of a panel/ceiling (slats, coffers, molding) can be replace; merely repainting or resurfacing unchanged geometry is attribute. Do not demand details never specified in the instruction; do not call a replacement wrong merely because its shape differs from the source. Explain each failed boolean with the visible contradiction. If physical evidence supports the edit, unusual taste alone is not a failure."""
 MULTI_GROUP_PROMPT += "\n" + MULTI_LOCATION_NOVELTY_RULES
 
+MULTI_CONTRAST_RULES = """Read the SOURCE crop before the instruction's desired result. In source_state name what occupies the selected site and its visible form; in result_state name what is visibly there now (each at most 10 words). An intended payload name is not visual evidence.
+For add, distinguish the HOST SURFACE from an EXISTING ITEM of the same role as the payload. Redesigning a source sign into another sign with the original sign gone is replacement. But a distinct new item may naturally cover its host surface: headwear hides hair, a badge hides fabric, a sign hides a wall. This is valid occlusion, even with matching material/color; do NOT require the covered host pixels to stay visible. Reject only visible host damage beyond that occlusion, or clear substitution of an existing payload-like item. For contact, trace where the item actually meets the host/body, not where the request says it should meet. For replace, identify the changed silhouette, construction or component layout; color/material alone cannot prove replacement. For attribute, inspect coverage of the selected surface, without requiring changes in excluded holes or occluded pixels. Do not demand photorealistic sharpness from a blurred source or reject modest texture differences. Base each boolean on this observed contrast; a fluent explanation cannot override a wrong operation or contact."""
+
 
 def multi_step_prompt(instruction, operation):
     from .validate import OPERATION_AUDIT_RULES
@@ -45,7 +48,10 @@ def multi_step_prompt(instruction, operation):
             "White in the binary mask selects the source region; black excludes it. The mask is never an output image. "
             "For add it selects the source attachment site, not the new item's silhouette. "
             "Judge the clean photos. Compare this one step; earlier legitimate edits are already in both full images.\n"
-            + MULTI_LOCATION_NOVELTY_RULES + "\n" + MULTI_PHYSICAL_RULES + "\n"
+            + MULTI_LOCATION_NOVELTY_RULES + "\n"
+            + (MULTI_CONTRAST_RULES + "\n" if operation in {"add", "replace"} else "")
+            + ("The detail crops center the ACTUAL CHANGED FOOTPRINT. Inspect what was there in SOURCE, including black/excluded parts of the anchor mask. The white mask is the attachment site, not the full area occupied by the new item.\n" if operation == "add" else "")
+            + MULTI_PHYSICAL_RULES + "\n"
             + OPERATION_AUDIT_RULES.replace("{operation}", operation) + "\n" + BLIND_RULE
             + "\nReturn the supplied JSON schema. host_integrity is true when remaining host/body/support is coherent; "
               "target_done means the full requested edit is visible. non_target_preserved checks unrelated content. "
@@ -54,10 +60,10 @@ def multi_step_prompt(instruction, operation):
 
 def group_audit_contract(kind: str, model: str) -> dict[str, str]:
     return {"model": model, "kind": kind, "mode": "joint-core-defects-v4" if kind == "twins"
-            else "multi-location-novelty-schema-v6"}
+            else "multi-operation-contrast-v8.2"}
 
 
-def multi_audit_schema(*, joint: bool = False) -> dict[str, Any]:
+def multi_audit_schema(*, joint: bool = False, contrast: bool = False) -> dict[str, Any]:
     """Require safety evidence in the first response, without repair calls."""
     def obj(fields):
         return {"type": "object", "properties": fields, "required": list(fields),
@@ -67,7 +73,9 @@ def multi_audit_schema(*, joint: bool = False) -> dict[str, Any]:
     common = {"decision": {"enum": ["pass", "fail"]},
               "failure_reasons": {"type": "array", "items": text}, "evidence": text}
     if not joint:
-        return obj({"source_entity": text, "observed_change": text, "observed_location": text,
+        return obj({"source_entity": text,
+                    **({"source_state": text, "result_state": text} if contrast else {}),
+                    "observed_change": text, "observed_location": text,
                     **bools(("ref_matches_mask", "location_correct", "addition_is_new")),
                     **common, **bools(("operation_correct", "target_done", "non_target_preserved",
                                       "natural", "host_integrity"))})
@@ -174,14 +182,16 @@ def _single_member_audits(groups: list[dict[str, Any]], model: VLLMAuditor,
         members = group.get("members", []) if kind == "twins" else group.get("units", [])
         for member in members:
             row = _member_audit_row(group, member, kind=kind)
-            panel = _target_panel(row, panel_dir, binary_locator=True)
+            contrast = kind == "multi" and row["operation"] in {"add", "replace"}
+            panel = _target_panel(row, panel_dir, binary_locator=True, tight_detail=contrast,
+                                  focus_change=(contrast and row['operation'] == 'add'))
             prompt = audit_prompt(row["instruction"], operation=row["operation"], binary_locator=True)
             if kind == "multi":
                 prompt = multi_step_prompt(row["instruction"], row["operation"])
             jobs.append({"job_id": f"{group.get('twin_id') or group.get('multi_id')}::{member['unit_id']}",
                          "images": [row["source_image"], row["edited_image"], panel],
                          "prompt": prompt,
-                         **({"output_schema": multi_audit_schema()} if kind == "multi" else {})})
+                         **({"output_schema": multi_audit_schema(contrast=contrast)} if kind == "multi" else {})})
             locations.append((group, member))
     results = _call_batched(model, jobs) if jobs else []
     by_group: dict[str, list[dict[str, Any]]] = {}
@@ -442,9 +452,9 @@ def _enforce_multi_integrity(audit: dict[str, Any], *, joint: bool = False) -> d
         if not isinstance(row, dict) or row.get("host_integrity") is not True:
             failures.append("host_integrity_not_verified")
             continue
-        for key in ("ref_matches_mask", "location_correct", "addition_is_new"):
-            # Old diagnostic responses remain readable; v6 structured decoding
-            # requires all three fields for every new call.
+        for key in ("ref_matches_mask", "location_correct", "addition_is_new", "operation_correct"):
+            # Old diagnostic responses remain readable; structured decoding
+            # requires these fields for every new single-step call.
             if row.get(key) is False:
                 failures.append(key + "_failed")
         evidence = [str(row.get(k, "")) for k in ("evidence", "issue", "observed_change")]

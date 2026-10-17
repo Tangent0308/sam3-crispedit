@@ -876,7 +876,7 @@ python scripts/run_multi_transactional.py \
   --generation-mode parallel-components --save-crop-evidence
 ```
 
-默认 `--generation-mode serial`，生产准备/冻结四机入口未切换。复用第 7.19 节的 9 份可生成计划（原 10 候选，1 个规划拒绝），每种模式各做 32 次编辑，规划调用为 0；40 steps、seed 0、提示词和审核契约相同，两轮均保存 crop 证据、使用相同设备划分。数据根目录为 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_parallel_validation_20261017/`，`serial/` 与 `parallel/` 分别保存全部结果，`implementation/` 为共享冻结代码。质量和耗时以下述最终复核记录为准。
+本节对照实验时默认 `--generation-mode serial`；用户随后确认采用并行，当前默认见第 7.21 节，冻结四机入口始终未切换。复用第 7.19 节的 9 份可生成计划（原 10 候选，1 个规划拒绝），每种模式各做 32 次编辑，规划调用为 0；40 steps、seed 0、提示词和审核契约相同，两轮均保存 crop 证据、使用相同设备划分。数据根目录为 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_parallel_validation_20261017/`，`serial/` 与 `parallel/` 分别保存全部结果，`implementation/` 为共享冻结代码。质量和耗时以下述最终复核记录为准。
 
 | 同计划对照指标 | 串行 | 并行分量融合 |
 |---|---:|---:|
@@ -898,3 +898,34 @@ python scripts/run_multi_transactional.py \
 融合逐像素校验 **9/9** 通过：分量合格 support 互不重叠、融合区域与各分量已审核结果精确一致、合格 support 之外与源图精确一致；64 次生成均保存原始 crop 并校验哈希。保留默认串行和实验开关；下一步优先在原有规划/审核调用中强化可见附着端点、真假新增、replace 形态变化的局部证据，再用未见样本验证，不靠增加循环调用。
 
 本地材料：`comparison/serial_vs_parallel.pdf` 为 9 组同图对照；`parallel/inspection/multi_batch_src_mask_tar.pdf` 为 10 页（含 1 个规划拒绝、失败尝试和 SRC/MASK/TAR）；`质量分析.md` 为完整中文归因，`comparison_summary.json` 为汇总，`parallel/fusion_verification.json` 为融合验证，`parallel/verified/multi_preview.jsonl` 只含两个自动/视觉双通过样本。后者是实验预览而非正式发布。全套测试 **392 passed**；补充原始 crop 哈希校验后相关 **15 项通过**，共享 instruction 协议与 benchmark 字节一致。
+
+
+### 7.21 采用并行融合、物理对比规划与新增审核修复（2026-10-17）
+
+用户确认采用第 7.20 节方案后，`scripts/run_multi_transactional.py` 默认改为 `parallel-components`，`scripts/run_group_production_4node.py` 新准备配置采用 `parallel-components-v1`。旧 `keep-passed-v1` 配置显式走串行，已经启动的冻结孪生四机不修改。这里只改变新任务默认执行方式，不把自动通过等同于质量验收。
+
+按优先级完成两项修改，均不增加生产中的模型调用轮次：
+
+1. `group_planning.py` 的 `multi-visible-fit-7-physical-contrast` 要求在原有一次规划中先写源区域占用和可观察的前后差异；add 选择真实可接触的空位，replace 的 payload 写明结构差异，attribute 依据实际材料，并和相似邻居比较后给最短唯一指代。首个设想不自然时在同一响应内换简单 payload，不直接归咎于 mask。
+2. `group_audit.py` 的 `multi-operation-contrast-v8.2` 仅对 add/replace 增加短的源状态/结果状态字段。新增饰物遮住头发、衣料、墙面可以成立；覆盖同用途的旧物不算新增。`validate.py::_target_panel` 将 add 的局部审核视图对准实际差异与允许 support 的交集，保留上下文和独立源锚点 mask，避免旧标牌藏在锚点的黑色孔洞中被忽略。这只改变审核取景，不替换训练 mask。remove、attribute、联合审核和孪生审核沿用原提示/视图。明确 `operation_correct=false` 必须拒绝。
+
+固定原 10 张候选作回归，**不是未见样本的泛化验证**。新规划通过 6 组，实际生成 19 项；4 组规划拒绝分别涉及 trousers 锚点却向胸口添口袋巾、用材质变化冒充柱子替换、用颜色/花纹变化冒充袖子替换、删除仍托着花束的花瓶。拒绝这些具体计划合理，但也说明单次规划仍未充分找出可行方案。
+
+| 同一批实际成图的审核版本 | 初始选择性 v8 | 最终 v8.2 |
+|---|---:|---:|
+| 单项自动保留 | 13/19 | 15/19 |
+| 整组自动通过 / 已生成组 | 3/6 | 4/6 |
+| 明确视觉合格 / 失败 / 标注待确认 | 2 / 3 / 1 | 3 / 2 / 1 |
+| 自动与视觉同时通过 / 原候选 | 2/10 | 3/10 |
+
+最终 v8.2 是审核回放：复用全部 19 张已生成单步图，逐次验证输入 RGB、执行/保护 mask、指令和 seed 相同后，重新执行真实审核与融合，没有追加生图。最终 6/6 组通过独立逐像素融合校验；support 外与源图完全一致，分量结果未被二次羽化。最终单项自动保留 add 4/6、remove 2/4、replace 3/3、attribute 6/6；最后 4 个自动通过组共 9 项，add/remove/replace/attribute 为 **4/1/1/3**。这是本回归小批分布，不代表配额已均衡，也不代表每项都正确。
+
+亲自查看全部 6 组：阳台花盆通过吊绳连接栏杆＋窗户变蓝、墨镜＋蓝椅子＋木条椅背、雕像花冠＋删除底座基本合格。花冠此前被当成“替换头发”误拒，本次恢复。帽子基部丝带＋衬衫变蓝的画面合格，但 `the light shirt` 在多件浅色衣物中指代不够唯一，暂不收录明确合格集。酒吧磨砂窗不完整且右侧店面被涂成灰色立面；商场阳台改色主要改到门窗框，两组失败且整组自动未通过。已复核 3 组见 `footprint_replay/verified/multi_preview.jsonl`，仅作实验预览。
+
+四个旧严重坏例的独立回归中，v8.2 拦截旧标牌改写、只改裤子颜色却称替换；仍漏过错位帽带和不完整磨砂窗，**只拦截 2/4**。因此尚不适合无人复核放量。下一步优先提升同一次规划内的指代唯一性和 replace 结构变化，并让原有审核明确检查实际接触点及完整覆盖；用新样本验证，不能继续把当前固定坏例上的提示改动当泛化收益。
+
+实测规划 450.15 秒；初始真实生图＋审核 309.94 秒，含冷启动和退出，单编辑请求均值 19.68 秒。两阶段时间和 **760.09 秒（12 分 40 秒）**，中间有间隔，不是一次连续墙钟。最终 v8.2 审核回放另用 301.17 秒（包含 4 个旧坏例、冷启动和退出），未重新测最终版本的完整生成吞吐。本轮只生成 19 项，而旧轮 32 项，不能把总时间缩短当提速；同计划并行提速依据仍是第 7.20 节的 11.3%。
+
+实验根目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_multi_contrast_validation_20261017/`。`质量分析.md` 记录正反例、分母和版本；`footprint_replay/inspection/multi_batch_src_mask_tar.pdf` 为全 10 候选的 SRC/MASK/TAR PDF（含规划拒绝）；原始真实生成位于根目录 `generated/`，最终审核/融合位于 `footprint_replay/`，各版冻结代码与回放证据保留。全套 **395 项测试通过**，共享 instruction 协议与 benchmark 保持字节一致。
+
+四机状态快照（2026-10-17 07:36 UTC）：孪生已持久化 **55/15,000**，尚无本次重启新增；四节点日志新鲜，均在复制 FlashNext 本地缓存，约 53%/48%/53%/53%，未见新的启动错误。旧 progress 中 failed 是上次运行记录，不能覆盖当前 bootstrap 日志。完整标注 ETA 等恢复持续产出后再估计。

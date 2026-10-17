@@ -8,7 +8,7 @@
 
 15,000 组反事实孪生＋5,000 组链式多目标，使用 instruction/mask 2.0。已准备独立目录
 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016`，
-15,994 张源图及标注已复制、按图像哈希分成四份，并排除评测源图。尚未提交四机任务。
+15,994 张源图及标注已复制、按图像哈希分成四份，并排除评测源图。四机任务已启动，2026-10-17 重启后正在恢复；详细状态以各节点日志和进度记录为准。
 
 ```bash
 # Arnold：4 workers × 8 H100，四台填写同一入口。
@@ -19,9 +19,9 @@ exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_tra
 
 ## 多目标逐步保留入口
 
-新建任务使用 `keep-passed-v1`：每步生成后立即审核，通过才更新当前图，失败回退后继续其他操作；至少保留两个目标，并重新检查类型组合、邻接关系与最终整图。入口为 `scripts/run_multi_transactional.py`，复用 `run_group_pipeline.py --plan-only` 的计划，不重复规划。新准备的四机配置自动接入：每节点 6 个编辑器＋2 个审核器分卡常驻，不同组交错执行，逐步审核合批；旧冻结部署包保持原流程。调用和恢复见 [四机指南](docs/FOURNODE_RUN_GUIDE.md#多目标逐步保留版本keep-passed-v1)。
+新建多目标任务使用 `parallel-components-v1`：独立区域从原图并行编辑，冲突区域串行；逐项审核后只融合合格区域。失败回退，至少保留两个目标，并重新检查类型组合、邻接关系与最终整图。入口为 `scripts/run_multi_transactional.py`，复用 `run_group_pipeline.py --plan-only` 的计划，不重复规划。新准备的四机配置自动接入：每节点 6 个编辑器＋2 个审核器分卡常驻，逐步审核合批；旧冻结部署包及旧 `keep-passed-v1` 配置保持原流程。调用和恢复见 [四机指南](docs/FOURNODE_RUN_GUIDE.md#多目标并行融合与逐步保留)。
 
-另提供显式实验选项 `--generation-mode parallel-components --save-crop-evidence`：互不冲突的可写区域从同一原图并行编辑，有冲突的目标保持串行回退，通过后按像素区域融合并做一次联合审核。默认仍为串行，四机冻结入口不变；设计和同计划质量/速度对照见 [PIPELINE 第 7.20 节](docs/PIPELINE.md#720-并行局部编辑与合格区域融合2026-10-17)。
+默认 `--generation-mode parallel-components`；`--generation-mode serial` 可用于串行对照，`--save-crop-evidence` 保存模型合成前后的局部证据。四机冻结入口不变；设计和同计划质量/速度对照见 [PIPELINE 第 7.20 节](docs/PIPELINE.md#720-并行局部编辑与合格区域融合2026-10-17)。最新规划与审核改进见 [PIPELINE 7.21](docs/PIPELINE.md#721-采用并行融合物理对比规划与新增审核修复2026-10-17)：10 候选中自动通过 4 组、视觉明确合格 3 组，提供全候选 PDF；自动放行仍需要视觉复核。
 
 ## 已完成的 50k 数据
 

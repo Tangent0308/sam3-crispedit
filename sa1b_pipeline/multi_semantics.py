@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-MULTI_PLAN_VERSION = "multi-visible-fit-6-bound"
+MULTI_PLAN_VERSION = "multi-visible-fit-7-physical-contrast"
 _PEOPLE = {"person", "people", "man", "woman", "boy", "girl", "child", "customer"}
 _ANATOMY = {"head", "face", "arm", "hand", "leg", "foot", "finger", "ear", "eye", "nose", "mouth", "neck", "torso", "body"}
 _CORE_CLOTHES = {"jeans", "trousers", "pants", "shorts", "shirt", "t-shirt", "blouse", "jacket", "coat", "dress", "skirt", "sleeve", "sweater", "clothing", "garment", "hijab"}

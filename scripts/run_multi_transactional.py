@@ -27,7 +27,7 @@ def main(argv=None):
     p.add_argument('--editor-devices', default='0,1,2,3,4,5'); p.add_argument('--audit-devices', default='6,7')
     p.add_argument('--groups-in-flight', type=int, default=16)
     p.add_argument('--audit-batch-size', type=int, default=4)
-    p.add_argument('--generation-mode', choices=('serial', 'parallel-components'), default='serial')
+    p.add_argument('--generation-mode', choices=('serial', 'parallel-components'), default='parallel-components')
     p.add_argument('--save-crop-evidence', action='store_true')
     args = p.parse_args(argv)
     edit_gpus = [x.strip() for x in args.editor_devices.split(',') if x.strip()]
