@@ -1,8 +1,10 @@
 # 四机运行指南
 
-## 多目标逐步保留版本：keep-passed-v1
+## 多目标并行融合与逐步保留
 
-当前源码新建的四机配置新增 `multi_commit_policy=keep-passed-v1`。多目标在规划结束后进入 `scripts/run_multi_transactional.py`：GPU 0–5 常驻编辑器、6–7 常驻审核器，每组仍串行，不同组交错运行；审核服务按批次处理不同组的请求。孪生流程不变。下面列出的 `sa1b_samtok_group_train_20k_20261016` 是此前已冻结的旧流程，仅补入部署字体修复，没有升级生成流程；缺少该配置键时按原流程续跑。
+2026-10-17 起，按用户确认采用并行方案，当前源码新建的四机配置使用 `multi_commit_policy=parallel-components-v1`。多目标在规划结束后进入 `scripts/run_multi_transactional.py`：GPU 0–5 常驻编辑器、6–7 常驻审核器，独立写区域从原图并行，冲突分量内串行提交/回退；合格区域融合后联合审核。不同组也交错运行，审核请求合批。旧配置 `keep-passed-v1` 显式使用串行模式，缺少配置键继续旧流程。孪生流程不变。
+
+下面列出的 `sa1b_samtok_group_train_20k_20261016` 是此前已冻结的部署，仅补入字体和共享配置读取竞争修复，没有升级生成流程；其运行中的检查点、模型、输出目录及配置均不改。新模式或提示词版本使用新的运行目录和代码快照，不能直接覆盖旧运行。
 
 单机小批可复用已有、尚未生成的 `planned.jsonl`，使用新的输出目录。以下命令在仓库根目录运行，环境与模型路径按当前机器设置：
 
@@ -16,21 +18,23 @@ python scripts/run_multi_transactional.py \
   --editor-python /path/to/editor/bin/python \
   --audit-python /path/to/mllm/bin/python \
   --editor-devices 0,1,2,3,4,5 --audit-devices 6,7 \
-  --groups-in-flight 16 --audit-batch-size 4
+  --groups-in-flight 16 --audit-batch-size 4 \
+  --generation-mode parallel-components
 ```
 
-每个目标至多尝试一次：程序检查失败则不调用语义审核；语义审核通过才提交新图，失败则丢弃该结果并从上个合格图继续。最后实际保留目标数、指令、mask、操作列表、顺序和邻接证据重新构建，再做一次整组审核；不重复逐步审核。少于两个目标、不满足现有类型组合/邻接约束、或最终整组审核失败，都不会发布为多目标数据。
+每个目标至多尝试一次：程序检查失败则不调用语义审核；语义审核通过才提交新图，失败则丢弃该结果并从同一分量上个合格图继续。最后实际保留目标数、指令、mask、操作列表、顺序和邻接证据重新构建，再做一次整组审核；不重复逐步审核。少于两个目标、不满足现有类型组合/邻接约束、或最终整组审核失败，都不会发布为多目标数据。可选 `--save-crop-evidence` 保存合成前后诊断图；串行对照使用 `--generation-mode serial`。
 
 检查点与日志：
 
 - `generated/GROUP/step_NN_UID/decision.json`：该次输入、成图、审核、通过/拒绝决定与校验和。
-- `generated/GROUP/progress.json`：实时已尝试数、已保留数和当前合格图。
+- `generated/GROUP/component_NN_progress.json`：并行模式每个分量的已尝试数、保留数和当前图；串行模式为 `progress.json`。
+- `generated/GROUP/schedule.json` / `fusion/fusion_proof.json`：分量依赖和融合像素校验证据。
 - `generated/GROUP/committed.json`：最终结果及图像校验和；`group.json` 同时保留不合格组。
 - `transactional_progress.json` / `transactional_done.json`：已完成组数、自动通过数、最终目标数和类型分布。
 - `services/{editor,audit}/SESSION/WORKER/worker.log`：模型加载、每个请求批次的数量和耗时。
 - `audited.jsonl` 保存所有完成组；`accepted.jsonl` 为自动通过组，正式配额和发布校验由四机协调器继续执行。
 
-同样命令、目录和代码重启可续跑，已落盘的接受/拒绝决定不重试；已生图但审核未落盘的步骤复用图像，只补未完成审核。源码、计划、源图、mask、模型配置变化会拒绝复用旧检查点。机器回收留下 `transactional.lock` 时，须先确认旧进程停止；同主机确认 PID 消失后入口会自动恢复，跨主机锁须在确认后留档移走，不允许并发写同一 wave。
+已有串行实验续跑时显式使用 `--generation-mode serial`，不能使用新的并行默认。同样命令、目录和代码重启可续跑，已落盘的接受/拒绝决定不重试；已生图但审核未落盘的步骤复用图像，只补未完成审核。源码、计划、源图、mask、模型配置变化会拒绝复用旧检查点。机器回收留下 `transactional.lock` 时，须先确认旧进程停止；同主机确认 PID 消失后入口会自动恢复，跨主机锁须在确认后留档移走，不允许并发写同一 wave。
 
 配额依据最终保留的操作列表和目标数重新计数。例如原四目标组保留三目标，只能计入三目标的对应组合；某组合已满时保留记录但不占其他组合名额，继续补缺额。因此不能用较高的“部分保留率”直接推算全量完成时间。
 

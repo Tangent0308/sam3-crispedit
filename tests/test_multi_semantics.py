@@ -100,7 +100,7 @@ def test_multi_audit_schema_requires_integrity_and_step_evidence():
                'operation_correct':True, 'target_done':True, 'non_target_preserved':True, 'natural':True}
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(minimal, multi_audit_schema())
-    jsonschema.validate({**minimal, 'host_integrity':True, 'observed_change':'Color changed.', 'source_entity':'chair', 'observed_location':'chair surface', 'ref_matches_mask':True, 'location_correct':True, 'addition_is_new':True}, multi_audit_schema())
+    jsonschema.validate({**minimal, 'host_integrity':True, 'source_state':'white chair', 'result_state':'blue chair', 'observed_change':'Color changed.', 'source_entity':'chair', 'observed_location':'chair surface', 'ref_matches_mask':True, 'location_correct':True, 'addition_is_new':True}, multi_audit_schema(contrast=True))
 
 
 def test_grounding_label_modifiers_do_not_cause_false_rejection():

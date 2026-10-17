@@ -178,7 +178,8 @@ def _mask_overlay(source_path: str, mask_path: str, directory: Path) -> str:
     return str(path)
 
 
-def _target_panel(row: dict[str, Any], directory: Path, *, binary_locator: bool = False) -> str:
+def _target_panel(row: dict[str, Any], directory: Path, *, binary_locator: bool = False,
+                  tight_detail: bool = False, focus_change: bool = False) -> str:
     """Build a high-resolution source/edited/mask crop for the semantic auditor."""
     directory.mkdir(parents=True, exist_ok=True)
     # Include the crop policy in the cache key so a pre-existing wide panel
@@ -192,6 +193,12 @@ def _target_panel(row: dict[str, Any], directory: Path, *, binary_locator: bool 
     if row.get('execution_mask_path'):
         digest.update(Path(row['execution_mask_path']).read_bytes())
     digest.update(json.dumps(row.get('instruction_spec') or {}, sort_keys=True).encode())
+    if tight_detail:
+        digest.update(b'multi-tight-detail-v1')
+    if focus_change:
+        digest.update(b'multi-changed-footprint-v1')
+        if row.get('support_mask'):
+            digest.update(Path(row['support_mask']).read_bytes())
     path = directory / (
         Path(row["source_image"]).stem + "__" + Path(row["mask"]).stem
         + f"__panel_{operation}_{'v5_binary' if binary_locator else 'v4'}_{digest.hexdigest()[:20]}.jpg"
@@ -206,6 +213,12 @@ def _target_panel(row: dict[str, Any], directory: Path, *, binary_locator: bool 
         from .instruction_protocol import needs_local_execution
         execution = load_mask({'mask_path': row['execution_mask_path']}, source.size)
         crop_mask = execution if needs_local_execution(row.get('instruction_spec') or {}) else (mask | execution)
+    if focus_change:
+        changed = np.max(np.abs(np.asarray(source, dtype=np.int16) - np.asarray(edited, dtype=np.int16)), axis=2) > 12
+        if row.get('support_mask'):
+            changed &= load_mask({'mask_path': row['support_mask']}, source.size)
+        if changed.any():
+            crop_mask = changed
     ys, xs = np.where(crop_mask)
     if len(xs):
         # Add edits often introduce a small attached item on a larger host.
@@ -214,7 +227,11 @@ def _target_panel(row: dict[str, Any], directory: Path, *, binary_locator: bool 
         # preservation. Other operations keep the wider context so contact,
         # removal boundaries, and neighboring instances remain judgeable.
         margin_factor = 0.55 if row.get("operation") == "add" else 0.9
-        margin = max(32, int(round(margin_factor * max(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1))))
+        if focus_change:
+            margin_factor = .55
+        elif tight_detail:
+            margin_factor = .25
+        margin = max(16 if tight_detail else 32, int(round(margin_factor * max(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1))))
         left = max(0, int(xs.min()) - margin)
         top = max(0, int(ys.min()) - margin)
         right = min(source.width, int(xs.max()) + 1 + margin)

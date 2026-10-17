@@ -4,7 +4,7 @@ from sa1b_pipeline.multi_transactional import member_passes
 from sa1b_pipeline.multi_semantics import validate_multi_semantics
 
 
-@pytest.mark.parametrize('field', ['ref_matches_mask', 'location_correct', 'addition_is_new'])
+@pytest.mark.parametrize('field', ['ref_matches_mask', 'location_correct', 'addition_is_new', 'operation_correct'])
 def test_acknowledged_wrong_target_site_or_repainting_cannot_pass(field):
     result = dict(decision='pass', host_integrity=True, natural=True,
                   operation_correct=True, target_done=True, non_target_preserved=True,
@@ -23,7 +23,7 @@ def test_new_decoding_contract_requires_location_and_novelty_evidence():
     joint = multi_audit_schema(joint=True)['properties']['units']['items']
     for schema in (single, joint):
         assert {'observed_location', 'location_correct', 'addition_is_new'} <= set(schema['required'])
-    assert list(single['properties'])[:3] == ['source_entity', 'observed_change', 'observed_location']
+    assert {'source_state', 'result_state', 'operation_correct'} <= set(multi_audit_schema(contrast=True)['required'])
 
 
 def test_invalid_possessive_site_is_rejected_before_rendering():
