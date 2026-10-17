@@ -1,4 +1,4 @@
-"""Decoder shape for the legacy multi-target planner; semantics stay in validators."""
+"""Structured decoder for the single-call multi-target planner; semantics stay in validators."""
 
 
 def multi_plan_schema():
@@ -8,7 +8,7 @@ def multi_plan_schema():
 
     text = {"type": "string"}
     boolean = {"type": "boolean"}
-    grounding = obj(dict(entity=text, mask_description=text, current_value=text,
+    grounding = obj(dict(entity=text, mask_description=text, visible_before=text, current_value=text,
                          edit_feasible=boolean, reason=text))
     placement = obj(dict(relation={"type": "string", "enum": [
         "on", "in", "inside", "to", "around", "across", "along", "over", "at",
@@ -22,11 +22,11 @@ def multi_plan_schema():
             "color", "material", "finish", "pattern", "texture", "text", "tint"]}, value=text)),
     ]}
 
-    target = obj(dict(unit_id=text, object_id=text, grounding=grounding, scope=text,
+    target = obj(dict(unit_id=text, object_id=text, grounding=grounding,
                      ref_phrase=text, operation={"type": "string", "enum": ["add", "remove", "replace", "attribute"]},
                      payload=text, target_part={"const": ""}, remove_mode={"const": "whole"},
                      placement={"anyOf": [placement, {"type": "null"}]},
                      attributes={"type": "array", "items": attribute, "maxItems": 1},
                      qualifier={"const": ""}, evidence=text))
-    return obj(dict(feasible=boolean, targets={"type": "array", "items": target, "maxItems": 5},
+    return obj(dict(grounding_version={"const": 3}, feasible=boolean, targets={"type": "array", "items": target, "maxItems": 5},
                     generation_order={"type": "array", "items": text, "maxItems": 5}, evidence=text))
