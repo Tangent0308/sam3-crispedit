@@ -27,6 +27,8 @@ def main(argv=None):
     p.add_argument('--editor-devices', default='0,1,2,3,4,5'); p.add_argument('--audit-devices', default='6,7')
     p.add_argument('--groups-in-flight', type=int, default=16)
     p.add_argument('--audit-batch-size', type=int, default=4)
+    p.add_argument('--generation-mode', choices=('serial', 'parallel-components'), default='serial')
+    p.add_argument('--save-crop-evidence', action='store_true')
     args = p.parse_args(argv)
     edit_gpus = [x.strip() for x in args.editor_devices.split(',') if x.strip()]
     audit_gpus = [x.strip() for x in args.audit_devices.split(',') if x.strip()]
@@ -38,7 +40,8 @@ def main(argv=None):
         plans = read_rows(args.planned_manifest)
         if len({g['multi_id'] for g in plans}) != len(plans):
             raise ValueError('duplicate multi IDs')
-        immutable_json(root/'transactional_run.json', {'policy': POLICY,
+        immutable_json(root/'transactional_run.json', {'policy': POLICY if args.generation_mode == 'serial' else 'parallel-components-v1',
+                       'save_crop_evidence': args.save_crop_evidence,
                        'planned_sha256': file_hash(args.planned_manifest),
                        'editor_model': args.editor_model, 'audit_model': args.audit_model, 'steps': 40})
         editors = ServicePool(python=args.editor_python, role='editor', devices=edit_gpus,
@@ -47,7 +50,12 @@ def main(argv=None):
                              model=args.audit_model, directory=root/'services/audit', batch_size=args.audit_batch_size)
         auditor = RemoteAuditor(audits); started = time.monotonic(); results = []
         def run(g):
-            return generate_committed_multi_group(g, root/'generated'/g['multi_id'], RemoteEditor(editors), auditor)
+            if args.generation_mode == 'parallel-components':
+                from sa1b_pipeline.multi_parallel import generate_parallel_multi_group
+                return generate_parallel_multi_group(g, root/'generated'/g['multi_id'],
+                    lambda: RemoteEditor(editors), auditor, save_crop_evidence=args.save_crop_evidence)
+            return generate_committed_multi_group(g, root/'generated'/g['multi_id'], RemoteEditor(editors), auditor,
+                                                  save_crop_evidence=args.save_crop_evidence)
         try:
             with ThreadPoolExecutor(max_workers=args.groups_in_flight) as executor:
                 futures = [executor.submit(run, g) for g in plans]

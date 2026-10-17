@@ -88,7 +88,7 @@ def page(group, kind, number, total, base):
     if kind == "multi":
         by_id = {m["unit_id"]: m for m in members}
         members = [by_id[uid] for uid in group["generation_order"]]
-    empty_committed = kind == "multi" and group.get("commit_policy") == "keep-passed-v1" and not members
+    empty_committed = kind == "multi" and group.get("commit_policy") in {"keep-passed-v1", "parallel-components-v1"} and not members
     if (not members and not empty_committed) or any(not target(m) for m in members):
         raise ValueError("preview requires every generated target in the group")
     width, gap, margin = 3300, 24, 52
@@ -96,7 +96,8 @@ def page(group, kind, number, total, base):
     canvas = Image.new("RGB", (width, height), "#f3f5f9")
     draw = ImageDraw.Draw(canvas)
     gid = group.get("twin_id") or group.get("multi_id")
-    draw.text((margin, 32), f"{'COUNTERFACTUAL TWINS' if kind == 'twins' else 'MULTI-TARGET CHAIN'}"
+    heading = "COUNTERFACTUAL TWINS" if kind == "twins" else ("MULTI-TARGET PARALLEL FUSION" if group.get("parallel") else "MULTI-TARGET CHAIN")
+    draw.text((margin, 32), f"{heading}"
               f"  |  CASE {number:02d}/{total:02d}", font=font(42, True), fill="#162335")
     draw.text((margin, 94), f"{gid}   |   {len(members)} targets", font=font(26), fill="#5a6779")
     label, color = status(group, kind)
@@ -106,6 +107,8 @@ def page(group, kind, number, total, base):
               font=font(23), fill="#5a6779")
     if kind == "twins":
         text = "Shared no-ref: " + group.get("instruction_noref", "")
+    elif group.get("parallel"):
+        text = "Parallel from original: " + " | ".join(" -> ".join(c) for c in group["parallel"]["components"]) + " ; fuse accepted regions"
     else:
         text = "Chain: original -> " + " -> ".join(group["generation_order"]) + " (each step uses previous output)"
     draw.multiline_text((margin, 227), "\n".join(textwrap.wrap(text, 163)),

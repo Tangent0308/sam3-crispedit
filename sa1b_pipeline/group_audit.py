@@ -468,7 +468,7 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
 
 def audit_committed_multi_groups(groups, model, panel_dir):
     """Joint audit only; transactional generation already audited each step."""
-    if any(g.get("commit_policy") != "keep-passed-v1" for g in groups):
+    if any(g.get("commit_policy") not in {"keep-passed-v1", "parallel-components-v1"} for g in groups):
         raise ValueError("joint-only audit requires committed multi groups")
     audits = [[_enforce_multi_integrity(u.get("semantic_audit", {}))
                for u in g["units"]] for g in groups]
