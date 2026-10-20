@@ -48,8 +48,10 @@ def attached(region, core, gap):
     return near[labels]
 
 
-def unit_regions(src, tgt, spec, s_mask, item, d=None):
-    """(execution region, support, paste region, edited region, stats) of one unit on the aligned pair."""
+def unit_regions(src, tgt, spec, s_mask, item, d=None, assigned=None):
+    """(execution region, support, paste region, edited region, stats) of one unit on the aligned pair.
+    assigned: the changed areas the plan gave this unit; inside the support they are part of the edit (several new
+    flowers of one add, a replacement in pieces) and changed pieces attached to them are kept too."""
     op = spec["operation"]
     h, w = s_mask.shape
     gap = max(2.0, ATTACH_GAP * (h * h + w * w) ** 0.5)
@@ -57,15 +59,17 @@ def unit_regions(src, tgt, spec, s_mask, item, d=None):
         base = s_mask | item
         support = mk.grow(base, max(2.0, SUPPORT_GROW["add"] * mk.side(item)))
         region, stats = mk.edited_region(src, tgt, s_mask, item, d=d)
-        paste = item | attached(region & support if region is not None else None, item, gap)
+        core = item | (assigned & support if assigned is not None else False)
+        paste = core | attached(region & support if region is not None else None, core, gap)
         return item, support, paste, region, stats
     grow = SUPPORT_GROW[op]
     support = mk.grow(s_mask, grow * mk.side(s_mask)) if grow else s_mask.copy()
     region, stats = mk.edited_region(src, tgt, s_mask, None if op == "attribute" else support, d=d)
-    if op == "attribute":
+    if op == "attribute":  # a recolor changes S and nothing else: S is exactly the region pasted
         paste = s_mask.copy()
     else:
-        paste = s_mask | attached(region & support if region is not None else None, s_mask, gap)
+        core = s_mask | (assigned & support if assigned is not None else False)
+        paste = core | attached(region & support if region is not None else None, core, gap)
     return paste, support, paste, region, stats
 
 
@@ -124,7 +128,11 @@ def gate_row(run, row, pre, plan, segs, out_dir):
         spec = unit["spec"]
         s_mask = mk.decode(seg["selection"])
         item = mk.decode(seg["footprint"]) if seg.get("footprint") else None
-        exec_mask, support, paste, region, stats = unit_regions(src, tgt, spec, s_mask, item, d)
+        assigned = np.zeros(shape, bool)
+        for area in pre.get("areas", []):
+            if area["n"] in unit.get("areas", []):
+                assigned |= mk.decode(area)
+        exec_mask, support, paste, region, stats = unit_regions(src, tgt, spec, s_mask, item, d, assigned)
         flags, hard = unit_gates(spec, s_mask, item, region, stats)
         geo = mk.geometry(spec, s_mask, exec_mask, unit["slots"].get("host_scope", ""))
         geo_flags, geo_hard = mk.geometry_flags(spec, geo)
