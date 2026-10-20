@@ -1,0 +1,5 @@
+# Server environment of the extedit pipeline: Qwen3.8-27B behind vLLM's OpenAI-compatible API (plan and audit calls).
+# Python 3.11, CUDA 12.9; the same runtime as the benchmark 2.6.0 judge.
+vllm==0.31.0+cu129
+torch==2.13.0+cu129
+transformers==5.17.0
