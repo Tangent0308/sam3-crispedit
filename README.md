@@ -1,32 +1,35 @@
-# CrispEdit labeling
+# CrispEdit / ScaleEdit → 协议 2.0 训练数据（extedit）
 
-分支 `crispedit-labeling` 只维护 CrispEdit：Qwen3.8-27B/vLLM 两阶段筛选 → 编辑单元观察与定位 → SAM3 局部 mask。支持单机 8 卡和四机各 8 卡，保留原 shard / row_idx。仅处理 add、color、motion、remove、replace。
+分支 `extedit-protocol2-labeling`：把 CrispEdit-2M、ScaleEdit 的原始编辑对打标成 SAMTokEdit 训练数据，格式与 D3（单目标）、D4（多目标）相同。数据标准包括：
+- 指令协议 2.0；
+- mask 语义 2.0；
+- 区域外与 BEFORE 逐像素相同；
+- SAMTok token 能还原 S。
 
-本地仓库：`/opt/tiger/tanyue/sam3-crispedit-crispedit-labeling`。四个节点各自 git clone、安装本地环境；完整入口与共享结果日志路径见四机指南。
+本分支基于 `crispedit-labeling`，复用其中的 `sam3/` 和 `crispedit/mask/`（SAM3 分割）；其余 CrispEdit 两阶段筛选代码保留但不再使用。
 
-- [当前方法、运行命令、数据与结果、可视化](docs/CRISPEDIT_MASK.md)
-- [mask 迭代记录与已知问题](docs/CRISPEDIT_MASK_ITERATION.md)
-- [四机完整流水线入口与日志](docs/CRISPEDIT_4NODE.md)
+本地仓库：`/opt/tiger/tanyue/sam3-extedit-protocol2-labeling`。
+
+- [方法、运行命令、输出格式、验证结果](docs/EXTEDIT_PROTOCOL2.md)
 
 ```text
-crispedit/
-  common.py, inference.py   数据工具、Qwen3.8/vLLM 推理
-  prefilter/               图像对质量筛选
-  difficulty/              难定位局部编辑筛选
-  mask/                    编辑单元、grounding、SAM3、结果契约
-  distributed.py           四节点调度、交接、合并与恢复
-scripts/                   安装、运行、下载、验证、可视化
-tests/                     当前实现的回归测试
-sam3/                      实际运行依赖的上游 SAM3 代码与资源
+extedit/
+  sources.py      取数：两个来源统一成一种行格式，按类型配额，排除旧流程用过的行和 benchmark 图
+  pixels.py       像素预检（尺寸、配准、改动图）、贴回及其检查
+  plan.py         27B 规划（质量 + 编辑单元 + 协议槽位 + 框），一次调用
+  segment.py      SAM3 分割 S，add 锚点切到落点，SAMTok 往返
+  gate.py         改动区域、门限、几何检查、贴回
+  audit.py        渲染 ref / no-ref 句子，27B 审核
+  export.py       D3 / D4 记录、token 缓存、拒收清单、汇总、审阅图
+  masks.py, slots.py, views.py, llm.py
+  instruction_protocol.py, instruction_style.py   benchmark 2.6.0 原文件，逐字节复制（测试固定哈希）
+scripts/extedit_pipeline.py   命令行，每步一个子命令，可断点续跑
+tests/test_extedit_pipeline.py
+requirements/extedit-worker.txt, extedit-vllm.txt
 ```
 
-根目录四个 `crispedit_*.py` 是命令行入口，实现位于 `crispedit/`。其他数据集和已撤回实验代码不在本分支维护。历史实验数据未删除；旧图归档位置见迭代文档。
-
-安装与测试（CUDA 12.9，8 卡）：
+测试：
 
 ```bash
-bash scripts/setup_crispedit_env.sh
-.venv-crispedit/bin/python -m pytest -q
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. <worker env>/bin/python -m pytest -q -p no:cacheprovider tests/test_extedit_pipeline.py
 ```
-
-所有 MLLM 使用 Qwen3.8-27B。mask 的 `OK` 是自动结构/QC 状态，不代表语义准确率；全量 mask 质量尚未验收。
