@@ -22,26 +22,50 @@ from . import masks as mk
 from . import pixels as px
 
 SUPPORT_GROW = {"attribute": 0.0, "remove": 0.18, "replace": 0.50, "add": 0.18}
-# Covered: share of S that changed.  Validation 1 (2026-10-20, 120 pairs): every accepted recolor and replacement
-# covered at least 0.92 of S, and the four between 0.76 and 0.83 were complete edits whose SAM3 mask reached a little
-# past the object; under 0.75 counts as half done (the C3 failure), 0.75-0.90 is flagged for stricter subsets.
-EDIT_GATES = {"s_unchanged": 0.1, "max_noise": 15.0, "replace_covered": 0.75, "attribute_covered": 0.75,
-              "covered_review": 0.90, "anchor_changed": 0.60}
+ATTACH_GAP = 0.01        # changed pieces within 1 % of the diagonal of S (add: the new item) belong to the edit
+# Paste band beyond the paste region, as a share of the short side: a recolor stays inside its object (0.5 %), other
+# edits keep their soft edges, shadows and contact (2 %, clean_pairs.PASTE_DILATE).
+PASTE_BAND = {"attribute": 0.005, "remove": 0.02, "replace": 0.02, "add": 0.02}
+# Covered: share of S that changed.  It is a poor measure of a finished recolor: cars keep their chrome, tires and
+# glass, a GIVE WAY sign its white center, train seats their white frames, and complete edits of these covered only
+# 0.33-0.72 of S (validation 2026-10-20).  So the hard limits only catch an edit that left most of S as it was
+# (recolor under 0.3, replacement under 0.5); below 0.9 (recolor) or 0.85 (replacement) a unit is flagged for
+# stricter subsets, and the audit's "result" point judges whether the edit looks finished.
+EDIT_GATES = {"s_unchanged": 0.1, "max_noise": 15.0, "replace_covered": 0.5, "attribute_covered": 0.3,
+              "replace_review": 0.85, "attribute_review": 0.90, "anchor_changed": 0.60}
+
+
+def attached(region, core, gap):
+    """The pieces of `region` within `gap` pixels of `core` (an edit's own pixels: its shadow, reflection, revealed
+    background), without the isolated specks of re-rendering noise elsewhere in the support."""
+    import cv2
+    if region is None or not region.any():
+        return np.zeros_like(core)
+    count, labels = cv2.connectedComponents(region.astype(np.uint8), connectivity=8)
+    near = np.zeros(count, bool)
+    near[np.unique(labels[mk.grow(core, gap) & region])] = True
+    near[0] = False
+    return near[labels]
 
 
 def unit_regions(src, tgt, spec, s_mask, item, d=None):
     """(execution region, support, paste region, edited region, stats) of one unit on the aligned pair."""
     op = spec["operation"]
+    h, w = s_mask.shape
+    gap = max(2.0, ATTACH_GAP * (h * h + w * w) ** 0.5)
     if op == "add":
         base = s_mask | item
         support = mk.grow(base, max(2.0, SUPPORT_GROW["add"] * mk.side(item)))
         region, stats = mk.edited_region(src, tgt, s_mask, item, d=d)
-        paste = item | (region & support if region is not None else False)
+        paste = item | attached(region & support if region is not None else None, item, gap)
         return item, support, paste, region, stats
     grow = SUPPORT_GROW[op]
     support = mk.grow(s_mask, grow * mk.side(s_mask)) if grow else s_mask.copy()
     region, stats = mk.edited_region(src, tgt, s_mask, None if op == "attribute" else support, d=d)
-    paste = s_mask | (region & support if region is not None and op != "attribute" else False)
+    if op == "attribute":
+        paste = s_mask.copy()
+    else:
+        paste = s_mask | attached(region & support if region is not None else None, s_mask, gap)
     return paste, support, paste, region, stats
 
 
@@ -67,7 +91,7 @@ def unit_gates(spec, s_mask, item, region, stats, params=EDIT_GATES):
             hard.append("replace_incomplete")
         elif op == "attribute" and stats["s_covered"] < params["attribute_covered"]:
             hard.append("attribute_incomplete")
-        elif op in ("replace", "attribute") and stats["s_covered"] < params["covered_review"]:
+        elif op in ("replace", "attribute") and stats["s_covered"] < params[f"{op}_review"]:
             flags.append("s_partly_changed")
     else:
         rest = s_mask & ~mk.grow(item, 2)
@@ -108,7 +132,7 @@ def gate_row(run, row, pre, plan, segs, out_dir):
         entry["hard"] += hard + geo_hard
         entry.update(geometry=geo, edited_stats=stats, execution_region=mk.encode(exec_mask),
                      paste_region=mk.encode(paste))
-        pastes.append(paste)
+        pastes.append(mk.grow(paste, max(2, int(PASTE_BAND[spec["operation"]] * min(shape)))))
     if any(e["hard"] for e in units):
         return {"id": row["id"], "status": "rejected", "reason": "unit_gate", "units": units}
     paste_union = np.logical_or.reduce(pastes)
@@ -121,7 +145,12 @@ def gate_row(run, row, pre, plan, segs, out_dir):
     checks = {"blob": round(blob, 5), "unexplained": round(unexplained, 4)}
     if blob > px.GATE["blob_max"]:
         hard_row.append("unrelated_change")
-    pasted, grown = px.paste(src, tgt, paste_union)
+    # The generator often shifts the tone of the whole image; matched on the pixels away from the edit, the pasted
+    # band then joins BEFORE without a halo.
+    away = ~mk.grow(paste_union, 0.04 * max(shape))
+    tgt, tone = px.tone_match(src, tgt, away, valid)
+    checks["tone"] = tone
+    pasted, grown = px.paste(src, tgt, paste_union, band=0)
     cut, mad = px.ring_metrics(src, tgt, grown)
     final = px.stats(src, pasted, paste_union)
     checks.update(ring_cut=round(cut, 4), ring_mad=round(mad, 2), fill=round(final["fill"], 4),

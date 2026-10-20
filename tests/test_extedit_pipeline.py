@@ -108,11 +108,11 @@ def test_unit_gates_attribute_incomplete():
     s_mask = np.zeros((100, 100), bool)
     s_mask[20:60, 20:60] = True
     region = np.zeros_like(s_mask)
-    region[20:60, 20:40] = True  # half of S changed
-    stats = {"area_frac": 0.08, "dropped_far_frac": 0.0, "in_anchor": 1.0, "noise": 2.0, "s_covered": 0.5}
+    region[20:60, 20:28] = True  # a fifth of S changed
+    stats = {"area_frac": 0.08, "dropped_far_frac": 0.0, "in_anchor": 1.0, "noise": 2.0, "s_covered": 0.2}
     _, hard = gt.unit_gates(spec, s_mask, None, region, stats)
     assert hard == ["attribute_incomplete"]
-    flags, hard = gt.unit_gates(spec, s_mask, None, region, {**stats, "s_covered": 0.8})
+    flags, hard = gt.unit_gates(spec, s_mask, None, region, {**stats, "s_covered": 0.6})
     assert not hard and "s_partly_changed" in flags
 
 
@@ -130,6 +130,26 @@ def test_site_spot_cuts_a_large_anchor():
     item[170:230, 100:140] = True
     spot, info = mk.site_spot(host, item)
     assert spot is not None and spot.sum() < 0.2 * host.sum() and (spot & host).sum() == spot.sum()
+
+
+def test_tone_match_removes_a_global_shift():
+    src, tgt = synthetic_pair()
+    shifted = np.clip(tgt.astype(int) + 9, 0, 255).astype(np.uint8)  # AFTER rendered 9 levels brighter
+    away = np.ones(src.shape[:2], bool)
+    away[180:320, 230:400] = False
+    out, info = px.tone_match(src, shifted, away)
+    assert info["applied"] and info["after"] < 1.5 < info["before"]
+    assert np.abs(out[away].astype(int) - src[away].astype(int)).mean() < 1.5
+
+
+def test_paste_region_keeps_only_pieces_attached_to_s():
+    s_mask = np.zeros((200, 200), bool)
+    s_mask[80:120, 80:120] = True
+    region = s_mask.copy()
+    region[120:126, 80:120] = True     # its shadow, touching S
+    region[10:14, 10:14] = True        # a speck of re-rendering noise far away
+    kept = gt.attached(region, s_mask, 3)
+    assert kept[122, 100] and not kept[12, 12]
 
 
 if __name__ == "__main__":

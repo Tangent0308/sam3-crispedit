@@ -19,6 +19,7 @@ from . import PIPELINE_VERSION, PROTOCOL_SHA256
 from . import instruction_protocol as ip
 from . import masks as mk
 from . import views as vw
+from .gate import PASTE_BAND
 
 STAGES = ("ingest", "precheck", "plan", "segment", "gate", "audit")
 
@@ -102,7 +103,7 @@ def export(run, out=None):
         if failed:
             keys = sorted({k for a in failed for k in ("edit", "relation", "target", "outline", "noref", "wording",
                                                        "result") if a.get(k) != "pass"})
-            rejected.append({**base, "stage": "audit", "reason": "audit:" + ",".join(keys),
+            rejected.append({**base, "stage": "audit", "reason": ",".join(keys),
                              "problems": " || ".join(a.get("problems", "") for a in failed)})
             continue
         units = [unit_record(row_id, u, s, g, a) for u, s, g, a in
@@ -113,6 +114,9 @@ def export(run, out=None):
         for u in units:
             for key in ("selection", "execution_region", "edited_region"):
                 allowed |= mk.decode(u[key])
+        for u, g in zip(plan["plan"]["units"], gate["units"]):  # the paste band and its soft edge belong to the edit
+            band = max(2, int(PASTE_BAND[u["spec"]["operation"]] * min(src.shape[:2]))) + 8
+            allowed |= mk.grow(mk.decode(g["paste_region"]), band)
         drift = {"size_ok": tgt.shape == src.shape, **drift_stats(src, tgt, allowed)}
         common = {"source_image": row["source_image"], "target_image": gate["target_pasted"], "id": row_id,
                   "dataset": row["dataset"], "type_before": row["native_type"], "instruction_before": row["instruction"],
