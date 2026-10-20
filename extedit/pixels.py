@@ -151,14 +151,46 @@ def coherent_outside(src, tgt, z, thr=30.0, open_radius=3, margin=0.06, valid=No
     return float(areas.max() / lab.size)
 
 
-def paste(src, tgt, z):
-    """Target inside the region dilated by 2% of the short side (Gaussian edge), source elsewhere."""
-    r = max(2, int(PASTE_DILATE * min(z.shape)))
-    grown = mk.grow(z, r)
+def paste(src, tgt, z, band=None):
+    """Target inside the region grown by `band` pixels (default 2% of the short side) with a soft (Gaussian) edge,
+    exactly the source beyond it."""
+    r = max(2, int(PASTE_DILATE * min(z.shape))) if band is None else band
+    grown = mk.grow(z, r) if r else z.copy()
     alpha = ndimage.gaussian_filter(grown.astype(np.float32), sigma=2)[..., None]
     alpha[~mk.grow(grown, 6)] = 0.0  # exactly the source beyond the soft edge
     out = tgt.astype(np.float32) * alpha + src.astype(np.float32) * (1 - alpha)
     return np.clip(np.rint(out), 0, 255).astype(np.uint8), grown
+
+
+TONE = {"gain_min": 0.85, "gain_max": 1.18, "min_gain_levels": 1.0, "sample": 4}
+
+
+def tone_match(src, tgt, away, valid=None, params=TONE):
+    """The target with a per-channel gain and offset that map its tone onto the source's on the pixels away from the
+    edit, applied only when that lowers their mean difference by at least `min_gain_levels`; and what was done."""
+    m = away if valid is None else away & valid
+    step = params["sample"]
+    a = src[::step, ::step][m[::step, ::step]].astype(np.float32)
+    b = tgt[::step, ::step][m[::step, ::step]].astype(np.float32)
+    if len(a) < 1000:
+        return tgt, {"applied": False, "reason": "few_pixels"}
+    gains, offsets = [], []
+    for c in range(3):
+        x, y = b[:, c], a[:, c]
+        var = x.var()
+        gain = ((x - x.mean()) * (y - y.mean())).mean() / var if var > 1e-3 else 1.0
+        gain = float(np.clip(gain, params["gain_min"], params["gain_max"]))
+        gains.append(gain)
+        offsets.append(float(y.mean() - gain * x.mean()))
+    gains, offsets = np.array(gains, np.float32), np.array(offsets, np.float32)
+    before = float(np.abs(b - a).mean())
+    after = float(np.abs(np.clip(b * gains + offsets, 0, 255) - a).mean())
+    info = {"gain": [round(float(g), 4) for g in gains], "offset": [round(float(o), 2) for o in offsets],
+            "before": round(before, 2), "after": round(after, 2)}
+    if before - after < params["min_gain_levels"]:
+        return tgt, {"applied": False, **info}
+    out = np.clip(np.rint(tgt.astype(np.float32) * gains + offsets), 0, 255).astype(np.uint8)
+    return out, {"applied": True, **info}
 
 
 def ring_metrics(src, tgt, grown):
