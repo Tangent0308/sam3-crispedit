@@ -304,4 +304,4 @@ $PY run --run $RUN --whole-shards --node 0/1 --crispedit add=0,remove=0,replace=
 ## 7. 已知限制
 - **大片表面上的 add：**天空、墙面、水面上的 add，锚点被切成一块没有边界的区域，SAMTok 难以还原，往返 IoU 常 < 0.5，这些单元不收。D3 有同样的问题。add 产量 17%–36%。
 - **重新构图：**AFTER 被整张重画、换了构图的对配准不上，在预检丢弃。约占 11%–14%，主要是 ScaleEdit 删除类和 CrispEdit 部分分片。
-- **多机脚本未在 ARNOLD 上实测：**`scripts/extedit_node.sh` 只在本机按单节点验证过各步命令。
+- **多机脚本未在 ARNOLD 上实测：**`scripts/extedit_node.sh` 已在本机做过单节点冒烟（10-21，配额共 24 行）：7 卡起服务、整片取数、流式全流程、导出、退出时关服务都正常。多机下的路径和环境要在 ARNOLD 上确认。
