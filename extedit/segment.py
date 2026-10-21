@@ -9,6 +9,7 @@ decoded token with S, and training uses a unit only when it is at least MIN_ROUN
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -87,6 +88,52 @@ class Segmenter:
         return out
 
 
+TEXT_SCOPE = re.compile(r"\b(lettering|letters?|logo|wordmark|words?|label|number|text|inscription|caption|slogan|"
+                        r"title|graffiti|monogram)\b", re.I)
+
+
+def is_text_unit(spec):
+    """A change of written text, or the removal of lettering or a logo: S is a text area."""
+    if spec["operation"] == "attribute":
+        return spec["attributes"][0]["property"] == "text"
+    return spec["operation"] == "remove" and bool(TEXT_SCOPE.search(spec["scope"]))
+
+
+def convex_fill(mask):
+    import cv2
+    ys, xs = np.nonzero(mask)
+    hull = cv2.convexHull(np.stack([xs, ys], 1).astype(np.int32))
+    out = np.zeros(mask.shape, np.uint8)
+    cv2.fillConvexPoly(out, hull, 1)
+    return out > 0
+
+
+def closed_fill(mask, frac=0.02):
+    """Strokes closed into a region (2 % of the long side) with its holes filled."""
+    import cv2
+    r = max(3, int(frac * max(mask.shape)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    closed = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel) > 0
+    outside = closed.astype(np.uint8).copy()
+    cv2.floodFill(outside, np.zeros((mask.shape[0] + 2, mask.shape[1] + 2), np.uint8), (0, 0), 1)
+    return closed | (outside == 0)
+
+
+def text_area(seg, image, mask):
+    """S of a text unit as an area, not as strokes: SAM3 traces the letters, which SAMTok cannot rebuild from two
+    codes (validation 2026-10-21: 62 % of stroke masks round-trip at >= 0.5, 73 % of their convex hulls).  The
+    convex hull, the closed strokes and the strokes themselves are tried in that order (the old ScaleEdit labels
+    were convex polygons around the changed characters); the first that round-trips is S, else the best one."""
+    candidates = [("convex_hull", convex_fill(mask)), ("closed", closed_fill(mask)), ("sam3_strokes", mask)]
+    trips = seg.roundtrip(image, [m for _, m in candidates])
+    scored = [(name, m, trip) for (name, m), trip in zip(candidates, trips)]
+    for name, m, trip in scored:
+        if trip[2] >= MIN_ROUNDTRIP:
+            return m, name, {n: t[2] for n, _, t in scored}
+    name, m, _ = max(scored, key=lambda x: x[2][2])
+    return m, name, {n: t[2] for n, _, t in scored}
+
+
 def footprint(unit, areas, change, shape):
     """Where the new item of an add is: the unit's changed areas, kept to its AFTER box grown by 10 % when there is
     one, and only the main piece (protocol_v2_adapt.main_item)."""
@@ -115,7 +162,11 @@ def segment_unit(seg, image, key, unit, areas, change):
         mask, meta = seg.segment(image, unit["s_box"], sl.sam_prompt(spec, part="part_as_s" in unit["fixes"]), key)
         if not mask.any():
             return None, {"reason": "sam3_empty", "sam3": meta}
-        return mask, {"source": "sam3", "sam3": meta, "flags": mk.sam3_flags(mask, unit["s_box"])}
+        info = {"source": "sam3", "sam3": meta, "flags": mk.sam3_flags(mask, unit["s_box"])}
+        if is_text_unit(spec):
+            mask, how, trips = text_area(seg, image, mask)
+            info.update(source="sam3_" + how if how != "sam3_strokes" else "sam3", text_area=how, text_roundtrips=trips)
+        return mask, info
     item, how = footprint(unit, areas, change, shape)
     if item is None:
         return None, {"reason": "add_" + how}

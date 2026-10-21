@@ -110,13 +110,35 @@ def read_rows(path, indices, columns):
     return {k: {c: table.column(c)[k].as_py() for c in columns} for k in indices}
 
 
-def ingest(run, crispedit_quota, scaleedit_quota, seed=20261020, per_source=3, benchmark=None):
-    """Write rows.jsonl and the images of a run; return the counts of kept and dropped rows.
+def whole_shard_jobs(crispedit_quota, scaleedit_quota, node=(0, 1)):
+    """Shard-by-shard plan for production: every row of a shard is read in one pass.  Shards are dealt to nodes
+    round-robin by their position in the sorted list; a type stops when its quota is met (0 = no limit)."""
+    k, n = node
+    jobs = []
+    shards = crispedit_shards()
+    for kind in crispedit_quota:
+        for i, path in enumerate(shards.get(kind, [])):
+            if i % n == k:
+                jobs.append(("crispedit", kind, path))
+    if scaleedit_quota:
+        paths = sorted(Path(SCALEEDIT).glob("expand-dl300k20261020*.parquet"))
+        jobs += [("scaleedit", None, path) for i, path in enumerate(paths) if i % n == k]
+    return jobs
+
+
+def ingest(run, crispedit_quota, scaleedit_quota, seed=20261020, per_source=3, benchmark=None, whole_shards=False,
+           node=(0, 1)):
+    """Write rows.jsonl (row by row, so that a following precheck can start at once) and the images of a run, then
+    the DONE marker; return the counts of kept and dropped rows.
     benchmark: (sha1 set, dHash list) of the benchmark's source images (benchmark_index); exact or near copies
-    (dHash distance <= NEAR_DHASH) are dropped."""
+    (dHash distance <= NEAR_DHASH) are dropped.
+    whole_shards: production mode (whole_shard_jobs), else rows sampled at random over the shards (validation)."""
+    from .llm import mark_done
     run = Path(run)
     rng = random.Random(seed)
-    rows, dropped, per_image = [], Counter(), Counter()
+    (run / "ingest").mkdir(parents=True, exist_ok=True)
+    stream = open(run / "ingest" / "rows.jsonl", "a")
+    kept, dropped, per_image = Counter(), Counter(), Counter()
 
     def keep(row_id, dataset, native_type, native_op, instruction, src_bytes, tgt_bytes, provenance):
         digest = sha1(src_bytes)
@@ -135,38 +157,69 @@ def ingest(run, crispedit_quota, scaleedit_quota, seed=20261020, per_source=3, b
             src.unlink()
             tgt.unlink()
             return
-        rows.append({"id": row_id, "dataset": dataset, "native_type": native_type, "native_op": native_op,
-                     "instruction": (instruction or "").strip(), "source_image": str(src.relative_to(run)),
-                     "target_image": str(tgt.relative_to(run)), "source_size": list(src_size),
-                     "target_size": list(tgt_size), "source_sha1": digest, "provenance": provenance})
+        row = {"id": row_id, "dataset": dataset, "native_type": native_type, "native_op": native_op,
+               "instruction": (instruction or "").strip(), "source_image": str(src.relative_to(run)),
+               "target_image": str(tgt.relative_to(run)), "source_size": list(src_size),
+               "target_size": list(tgt_size), "source_sha1": digest, "provenance": provenance}
+        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        stream.flush()
+        kept[f"{dataset}/{native_type}"] += 1
 
-    by_shard = defaultdict(list)
-    for row_id, path, k, kind in sample_crispedit(crispedit_quota, rng):
-        by_shard[path].append((row_id, k, kind))
-    for path, items in sorted(by_shard.items()):
-        data = read_rows(path, [k for _, k, _ in items], ["input_img", "output_img", "instruction", "type"])
-        for row_id, k, kind in items:
-            r = data[k]
-            keep(row_id, "crispedit", kind, CRISPEDIT_TYPES[kind], r["instruction"], r["input_img"]["bytes"],
-                 r["output_img"]["bytes"], {"repo": "WeiChow/CrispEdit-2M", "revision": CRISPEDIT_REVISION,
-                                            "shard": path.name, "row": k})
-    by_shard = defaultdict(list)
-    for row_id, path, k, task, sid in sample_scaleedit(scaleedit_quota, rng):
-        by_shard[path].append((row_id, k, task, sid))
-    for path, items in sorted(by_shard.items()):
-        data = read_rows(path, [k for _, k, _, _ in items], ["source_image", "edited_image", "final_instruction"])
-        for row_id, k, task, sid in items:
-            r = data[k]
-            keep(row_id, "scaleedit", task, SCALEEDIT_TYPES[task], r["final_instruction"], r["source_image"],
-                 r["edited_image"], {"repo": "InternVL-U/ScaleEdit-12M via QingyuShi/scaleedit-filtered-6m",
-                                     "shard": path.name, "row": k, "sample_id": sid})
-    (run / "ingest").mkdir(parents=True, exist_ok=True)
-    with open(run / "ingest" / "rows.jsonl", "w") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    counts = {"rows": len(rows), "by_type": dict(Counter(f"{r['dataset']}/{r['native_type']}" for r in rows)),
-              "dropped": dict(dropped)}
+    def crispedit_row(path, k, kind, r):
+        keep(f"crispedit-{path.stem}-{k:03d}", "crispedit", kind, CRISPEDIT_TYPES[kind], r["instruction"],
+             r["input_img"]["bytes"], r["output_img"]["bytes"],
+             {"repo": "WeiChow/CrispEdit-2M", "revision": CRISPEDIT_REVISION, "shard": path.name, "row": k})
+
+    def scaleedit_row(path, k, task, sid, r):
+        keep(f"scaleedit-{hashlib.sha1(sid.encode()).hexdigest()[:20]}", "scaleedit", task, SCALEEDIT_TYPES[task],
+             r["final_instruction"], r["source_image"], r["edited_image"],
+             {"repo": "InternVL-U/ScaleEdit-12M via QingyuShi/scaleedit-filtered-6m", "shard": path.name, "row": k,
+              "sample_id": sid})
+
+    if whole_shards:
+        used = set()
+        if Path(SCALEEDIT_USED).exists():
+            used = set(pq.read_table(SCALEEDIT_USED, columns=["sample_id"]).column("sample_id").to_pylist())
+        full = lambda dataset, kind: 0 < ({**crispedit_quota, **scaleedit_quota}.get(kind) or 0) <= kept[f"{dataset}/{kind}"]
+        for dataset, kind, path in whole_shard_jobs(crispedit_quota, scaleedit_quota, node):
+            if dataset == "crispedit":
+                if full("crispedit", kind):
+                    continue
+                table = pq.read_table(path, columns=["input_img", "output_img", "instruction", "type"])
+                for k, r in enumerate(table.to_pylist()):
+                    if not full("crispedit", kind):
+                        crispedit_row(path, k, kind, r)
+            else:
+                index = pq.read_table(path, columns=["sample_id", "final_task"]).to_pylist()
+                wanted = [k for k, r in enumerate(index) if r["final_task"] in scaleedit_quota
+                          and r["final_task"] in SCALEEDIT_TYPES and r["sample_id"] not in used]
+                if not wanted or all(full("scaleedit", index[k]["final_task"]) for k in wanted):
+                    continue  # no image bytes are read for a shard without a wanted row
+                table = pq.read_table(path, columns=["source_image", "edited_image", "final_instruction"])
+                for k in wanted:
+                    task = index[k]["final_task"]
+                    if not full("scaleedit", task):
+                        scaleedit_row(path, k, task, index[k]["sample_id"],
+                                      {c: table.column(c)[k].as_py() for c in table.column_names})
+    else:
+        by_shard = defaultdict(list)
+        for row_id, path, k, kind in sample_crispedit(crispedit_quota, rng):
+            by_shard[path].append((k, kind))
+        for path, items in sorted(by_shard.items()):
+            data = read_rows(path, [k for k, _ in items], ["input_img", "output_img", "instruction", "type"])
+            for k, kind in items:
+                crispedit_row(path, k, kind, data[k])
+        by_shard = defaultdict(list)
+        for row_id, path, k, task, sid in sample_scaleedit(scaleedit_quota, rng):
+            by_shard[path].append((k, task, sid))
+        for path, items in sorted(by_shard.items()):
+            data = read_rows(path, [k for k, _, _ in items], ["source_image", "edited_image", "final_instruction"])
+            for k, task, sid in items:
+                scaleedit_row(path, k, task, sid, data[k])
+    stream.close()
+    counts = {"rows": sum(kept.values()), "by_type": dict(kept), "dropped": dict(dropped)}
     (run / "ingest" / "summary.json").write_text(json.dumps(counts, indent=1))
+    mark_done(run / "ingest")
     return counts
 
 

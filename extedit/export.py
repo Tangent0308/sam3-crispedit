@@ -215,3 +215,42 @@ def review(run, out_dir, n_accept=40, n_reject=40, seed=0):
         vw.sheet(panels, lines).save(path, quality=88)
         written.append(path)
     return written
+
+
+def publish(runs, out):
+    """Merge the final records of several runs (the nodes of a production run) into one dataset folder: the source
+    images and the pasted AFTER copied under images/<id[-2:]>/, paths relative to the folder, manifests, token
+    caches, rejections (with their run) and a summary."""
+    import shutil
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    names = ("manifest_protocol_v2.jsonl", "manifest_multi_protocol_v2.jsonl", "tokens.jsonl", "multi_tokens.jsonl",
+             "rejected.jsonl")
+    merged = {name: [] for name in names}
+    summaries = []
+    for run in map(Path, runs):
+        final = run / "final"
+        summaries.append({"run": str(run), **json.loads((final / "summary.json").read_text())})
+        for name in names:
+            for record in map(json.loads, open(final / name)):
+                if name.startswith("manifest"):
+                    for key, kind in (("source_image", "source"), ("target_image", "target")):
+                        src = run / record[key]
+                        dst = out / "images" / record["id"][-2:] / f"{record['id']}.{kind}{src.suffix}"
+                        if not dst.exists():
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(src, dst)
+                        record[key] = str(dst.relative_to(out))
+                elif name == "rejected.jsonl":
+                    record["run"] = run.name
+                merged[name].append(record)
+    for name, records in merged.items():
+        with open(out / name, "w") as stream:
+            for record in records:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    total = {"runs": summaries, "rows": sum(s["rows"] for s in summaries),
+             "accepted_single": len(merged["manifest_protocol_v2.jsonl"]),
+             "accepted_multi": len(merged["manifest_multi_protocol_v2.jsonl"]),
+             "rejected": len(merged["rejected.jsonl"]), "pipeline_version": PIPELINE_VERSION}
+    (out / "summary.json").write_text(json.dumps(total, indent=1, ensure_ascii=False))
+    return total

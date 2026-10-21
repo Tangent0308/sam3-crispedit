@@ -7,6 +7,8 @@ labeled outlines replaced by the changed areas the precheck found, and the writi
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from PIL import Image
 
 from . import instruction_protocol as ip
@@ -28,9 +30,7 @@ TYPE_LABELS = {"text": "text (a change to written text)", "attribute": "attribut
 PLAN_PROMPT = """You turn one example of an image-editing dataset into structured training records.
 Image 1 is BEFORE (the original photo); boxes refer to this image. Image 2 is BEFORE with the areas whose pixels changed outlined and numbered. Image 3 is AFTER (the edited photo, aligned to BEFORE). Image 4 is a close-up around the changed areas, BEFORE on the left and AFTER on the right.
 
-Original instruction (written before the edit; it may be vague, wrong or only partly carried out): "{instruction}"
-Original type label: {label}
-Changed areas in image 2, found by comparing pixels (they can include shadows, reflections, revealed background or faint noise): {legend}
+After the images come the original instruction (written before the edit; it may be vague, wrong or only partly carried out), the original type label, and the list of changed areas in image 2, found by comparing pixels (they can include shadows, reflections, revealed background or faint noise).
 
 Describe the edit as AFTER shows it; never choose a different or better edit. Read colors from image 1, never from the outline colors.
 
@@ -47,7 +47,7 @@ Describe the edit as AFTER shows it; never choose a different or better edit. Re
 - replace: an object or part becomes a different kind of object or part (its structure or category changes). A change of only color, pattern or material is not replace.
 - remove: an object, a part of it, or its contents disappear.
 - attribute: the object keeps its identity and shape and only an appearance property changes: color, material, finish (glossy or matte), pattern, texture, text (what written text says), tint (color of a transparent object) or opacity.
-- Written text: deleting text or a logo is remove; changing what text says is attribute with property "text"; writing new text where there was none is add.
+- Written text: deleting text or a logo is remove; changing what text says is attribute with property "text"; writing new text where there was none is add. New text must be fully legible and spelled as real words, names or numbers (a shop or brand name is fine); if AFTER shows garbled, misspelled, run-together or partly unreadable letters, even when the instruction asked for them, quality is "reject" with problem "defect".
 - No unit for moving, re-posing, resizing, style or whole-image changes: then quality is "reject".
 
 5. The source object S of a unit, which must be visible in BEFORE:
@@ -97,10 +97,19 @@ def legend(areas, more):
     return "; ".join(items) if items else "none found"
 
 
+# The rules are the same for every pair: they go first, before the images, so that vLLM's prefix cache holds them
+# once per engine; the pair's own text follows the images.
+PLAN_RULES = PLAN_PROMPT.format(max_units=MAX_UNITS, writing_rules=WRITING_RULES)
+PAIR_TEXT = """Original instruction: "{instruction}"
+Original type label: {label}
+Changed areas in image 2: {legend}
+
+Answer with the JSON described above."""
+
+
 def plan_prompt(row, areas, more):
-    return PLAN_PROMPT.format(instruction=row["instruction"].replace('"', "'"),
-                              label=TYPE_LABELS.get(row["native_op"], row["native_op"]), legend=legend(areas, more),
-                              max_units=MAX_UNITS, writing_rules=WRITING_RULES)
+    return PAIR_TEXT.format(instruction=row["instruction"].replace('"', "'"),
+                            label=TYPE_LABELS.get(row["native_op"], row["native_op"]), legend=legend(areas, more))
 
 
 def plan_parts(source, target, areas):
@@ -126,6 +135,34 @@ def as_box(value):
         return None
     box = [min(1000, max(0, v)) for v in box]
     return box if box[0] < box[2] and box[1] < box[3] else None
+
+
+def overlap(a, b):
+    """Shared area of two 0-1000 boxes over the smaller one (1 when one holds the other)."""
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    return ix * iy / max(1, min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])))
+
+
+MIN_AREA_OVERLAP = 0.1
+
+
+def box_problems(unit, areas):
+    """The box of what changed (S, or the new item of an add) must reach the changed areas the unit names: those were
+    found in the pixels, so a box away from all of them is misplaced (validation 2026-10-21: 2-4 % of units, almost
+    all lost later; some had y scaled by the width instead of the height)."""
+    boxes = {a["n"]: a["box_1000"] for a in areas}
+    named = [boxes[n] for n in unit["areas"] if n in boxes]
+    add = unit["spec"]["operation"] == "add"
+    box = unit["item_box"] if add else unit["s_box"]
+    if not named or not box:
+        return []
+    union = [min(b[0] for b in named), min(b[1] for b in named), max(b[2] for b in named), max(b[3] for b in named)]
+    if overlap(box, union) >= MIN_AREA_OVERLAP:
+        return []
+    return [f"{'item_box' if add else 's_box'} {box} does not reach the changed areas it names "
+            f"({', '.join(str(n) for n in unit['areas'])}, together at {union}); boxes are [x1, y1, x2, y2] normalized "
+            "to 0-1000 by image 1's own width (x) and height (y)"]
 
 
 def parse_unit(raw, n_areas):
@@ -163,7 +200,10 @@ def parse_unit(raw, n_areas):
             "areas": areas, "comparable": bool(raw.get("comparable"))}, problems
 
 
-def parse_plan(text, n_areas):
+def parse_plan(text, areas):
+    """(plan, problems) from one answer; `areas` are the numbered changed areas (or just their count, without the
+    box check)."""
+    n_areas = areas if isinstance(areas, int) else len(areas)
     raw = parse_json(text)
     quality = ip.clean(raw.get("quality")).lower()
     if quality not in ("clean", "reject"):
@@ -184,20 +224,22 @@ def parse_plan(text, n_areas):
         if not isinstance(unit, dict):
             raise ValueError(f"unit {k} is not an object")
         parsed, unit_problems = parse_unit(unit, n_areas)
+        if parsed["spec"] is not None and not isinstance(areas, int):
+            unit_problems += box_problems(parsed, areas)
         out["units"].append(parsed)
         problems += [f"unit {k}: {p}" for p in unit_problems]
     return out, problems
 
 
-async def plan_pair_with_parts(client, row, parts, areas, more):
+async def plan_pair_with_parts(client, row, parts, areas, more, base=None):
     """The plan call, asked again with the problems stated until the units form valid specs."""
-    base = plan_prompt(row, areas, more)
+    base = base or plan_prompt(row, areas, more)
     prompt, record = base, {"id": row["id"], "attempts": [], "tokens": 0}
     for seed in range(ATTEMPTS):
-        response = await client.call(parts, prompt, "plan", seed=seed)
+        response = await client.call(parts, prompt, "plan", seed=seed, prefix=PLAN_RULES)
         record["tokens"] += response["tokens"]
         try:
-            plan, problems = parse_plan(response["text"], len(areas))
+            plan, problems = parse_plan(response["text"], areas)
             if problems:
                 raise ValueError("; ".join(problems))
             record["attempts"].append({"seed": seed, "ok": True})
@@ -217,3 +259,10 @@ def open_images(run, row, align):
     src = load_rgb(run / row["source_image"])
     tgt = apply_alignment(load_rgb(run / row["target_image"]), src.shape[:2], align)
     return Image.fromarray(src), Image.fromarray(tgt)
+
+
+def plan_request(run, row, pre):
+    """(content parts, pair text) of one pair; a top-level function so that a process pool builds the views (resizing,
+    outlines, JPEG and base64 encoding) off the event loop that sends the requests."""
+    source, target = open_images(Path(run), row, pre["align"])
+    return plan_parts(source, target, pre["areas"]), plan_prompt(row, pre["areas"], pre.get("more_areas", 0))
