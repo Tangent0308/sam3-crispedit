@@ -140,10 +140,24 @@ def ingest(run, crispedit_quota, scaleedit_quota, seed=20261020, per_source=3, b
     run = Path(run)
     rng = random.Random(seed)
     (run / "ingest").mkdir(parents=True, exist_ok=True)
-    stream = open(run / "ingest" / "rows.jsonl", "a")
     kept, dropped, per_image = Counter(), Counter(), Counter()
+    # A resumed ingest (a restarted node) keeps the rows it already wrote and counts them against the quotas.
+    existing = set()
+    if (run / "ingest" / "rows.jsonl").exists():
+        for line in open(run / "ingest" / "rows.jsonl"):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row["id"] not in existing:
+                existing.add(row["id"])
+                kept[f"{row['dataset']}/{row['native_type']}"] += 1
+                per_image[row["source_sha1"]] += 1
+    stream = open(run / "ingest" / "rows.jsonl", "a")
 
     def keep(row_id, dataset, native_type, native_op, instruction, src_bytes, tgt_bytes, provenance):
+        if row_id in existing:
+            return
         digest = sha1(src_bytes)
         if benchmark is not None and (digest in benchmark[0] or near(dhash(src_bytes), benchmark[1])):
             dropped["benchmark_image"] += 1

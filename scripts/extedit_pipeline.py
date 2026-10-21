@@ -11,6 +11,7 @@ Stages, each resumable (a stage skips ids it already wrote; failed records are r
   export                                                                     final/
   review    [--accept 40 --reject 40]                                        review sheets
   run       all of the above on one node, the stages running side by side (each one --follow)
+  status    --runs <run> ...: rows per stage (progress of the nodes of a production run)
   publish   --runs <run> ... --out <dataset folder>: merge the final/ of several runs (nodes)
   serve-command                                                              prints the vLLM command
 With --follow a stage keeps taking the rows its upstream stage writes until that stage is done (its DONE marker), so
@@ -402,6 +403,31 @@ def cmd_export(args):
     print(json.dumps(summary, indent=1, ensure_ascii=False))
 
 
+def cmd_status(args):
+    """Rows per stage of each run (a node of a production run), and how long it has been running."""
+    total = {}
+    for run in map(Path, args.runs):
+        counts = {"ingest": len(ex.rows(run)) if (run / "ingest" / "rows.jsonl").exists() else 0}
+        for stage in ("precheck", "plan", "segment", "gate", "audit"):
+            records = ex.read_stage(run, stage) if (run / stage).exists() else {}
+            counts[stage] = len(records)
+            if stage == "precheck":
+                counts["precheck_keep"] = sum(r.get("decision") == "keep" for r in records.values())
+            if stage == "gate":
+                counts["gate_passed"] = sum(r.get("status") == "passed" for r in records.values())
+            if stage == "audit":
+                counts["audit_passed"] = sum(all(u.get("passed") is True for u in r["units"]) for r in records.values())
+            if llm.is_done(run / stage):
+                counts[stage + "_done"] = True
+        counts["finished"] = (run / "final" / "summary.json").exists()
+        print(run.name, json.dumps(counts))
+        for k, v in counts.items():
+            if isinstance(v, int) and not isinstance(v, bool):
+                total[k] = total.get(k, 0) + v
+    if len(args.runs) > 1:
+        print("total", json.dumps(total))
+
+
 def cmd_publish(args):
     total = ex.publish(args.runs, args.out)
     print(json.dumps({k: v for k, v in total.items() if k != "runs"}, indent=1))
@@ -479,6 +505,9 @@ def main():
     s.add_argument("--run", required=True)
     s.add_argument("--out", default=None)
     s.set_defaults(func=cmd_export)
+    s = sub.add_parser("status", help="rows per stage of one or more runs")
+    s.add_argument("--runs", nargs="+", required=True)
+    s.set_defaults(func=cmd_status)
     s = sub.add_parser("publish", help="merge the final/ of several runs into one dataset folder")
     s.add_argument("--runs", nargs="+", required=True)
     s.add_argument("--out", required=True)
