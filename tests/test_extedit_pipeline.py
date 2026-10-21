@@ -152,5 +152,46 @@ def test_paste_region_keeps_only_pieces_attached_to_s():
     assert kept[122, 100] and not kept[12, 12]
 
 
+def test_box_away_from_its_changed_areas_is_asked_again():
+    areas = [{"n": 1, "box_1000": [400, 600, 500, 900]}]
+    _, problems = pl.parse_plan(answer(s_box=[400, 330, 500, 590], item_box=[]), areas)  # y scaled by the width
+    assert any("does not reach the changed areas" in p for p in problems)
+    _, problems = pl.parse_plan(answer(s_box=[390, 580, 510, 910], item_box=[]), areas)
+    assert not problems
+
+
+def test_tail_reads_only_new_complete_lines(tmp_path):
+    from extedit import llm
+    path = tmp_path / "records.jsonl"
+    path.write_text('{"id": "a"}\n{"id": "b"')  # the second line is still being written
+    tail = llm.Tail(tmp_path)
+    assert [r["id"] for r in tail.read()] == ["a"]
+    with open(path, "a") as stream:
+        stream.write('}\n{"id": "c"}\n')
+    assert [r["id"] for r in tail.read()] == ["b", "c"]
+    assert tail.read() == []
+
+
+def test_sharded_stage_is_done_when_every_shard_is(tmp_path):
+    from extedit import llm
+    assert not llm.is_done(tmp_path)
+    llm.mark_done(tmp_path, "DONE.0-of-2")
+    assert not llm.is_done(tmp_path)
+    llm.mark_done(tmp_path, "DONE.1-of-2")
+    assert llm.is_done(tmp_path)
+
+
+def test_text_area_is_a_compact_region():
+    from extedit import segment as sg
+    strokes = np.zeros((100, 200), bool)
+    for x in range(40, 160, 12):  # letters: thin vertical strokes
+        strokes[40:60, x:x + 3] = True
+    hull = sg.convex_fill(strokes)
+    assert hull.sum() > 3 * strokes.sum() and (hull & strokes).sum() == strokes.sum()
+    assert sg.is_text_unit(pl.sl.to_spec(pl.sl.normalize_slots({
+        "operation": "attribute", "ref": "the sign", "scope": "sign",
+        "attributes": [{"property": "text", "value": "OPEN"}]})[0]))
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

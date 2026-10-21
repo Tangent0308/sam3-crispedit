@@ -8,6 +8,8 @@ failure modes (half-done replacements and recolors, broken add contact).  With s
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from PIL import Image
 
 from . import instruction_protocol as ip
@@ -32,7 +34,7 @@ Judge each point "pass" or "fail":
 4. outline: {outline_rule}
 5. noref: using the green outline as the selected region, the instruction without the reference asks for the same edit.
 6. wording: both instructions are clear, natural, concise English, with no word that neither identifies the target nor defines the result.
-7. result: AFTER shows the edit completely and cleanly: a replaced object is entirely the new object with no part of the old one left, a recolored or re-textured object is changed as a whole, a removed object leaves a plausible background, an added item looks natural and really rests on or is attached to S, and there are no artifacts, smears, seams or cut-off edges.
+7. result: AFTER shows the edit completely and cleanly: a replaced object is entirely the new object with no part of the old one left, a recolored or re-textured object is changed as a whole, a removed object leaves a plausible background, an added item looks natural and really rests on or is attached to S, written text is fully legible and spelled as real words, names or numbers (garbled, misspelled or run-together letters fail, even when the instruction asks for them), and there are no artifacts, smears, seams or cut-off edges.
 
 Return only JSON: {{"edit": "pass", "relation": "pass", "target": "pass", "outline": "pass", "noref": "pass", "wording": "pass", "result": "pass", "problems": "<at most 25 words; empty if everything passes>"}}"""
 AUDIT_RULES = {
@@ -111,30 +113,80 @@ def audit_parts(source, target, s_mask, exec_mask):
     return vw.chat_parts(views)
 
 
-async def audit_vote(client, parts, prompt, vote):
-    out = {"tokens": 0}
-    for attempt in range(ATTEMPTS):
-        response = await client.call(parts, prompt, "audit", seed=100 * vote + attempt)
-        out["tokens"] += response["tokens"]
-        try:
-            value = parse_json(response["text"])
-            verdicts = {k: ip.clean(value.get(k)).lower() for k in AUDIT_KEYS}
-            if any(v not in ("pass", "fail") for v in verdicts.values()):
-                raise ValueError(f"bad verdicts {verdicts}")
-            return {**out, **verdicts, "problems": ip.clean(value.get("problems")),
-                    "passed": all(v == "pass" for v in verdicts.values()), "attempts": attempt + 1}
-        except Exception as exc:  # noqa: BLE001 - next seed
-            out["error_text"] = f"{type(exc).__name__}: {exc}"[:300]
-    return {**out, "passed": None, "attempts": ATTEMPTS}
+def parse_vote(text):
+    """The seven verdicts and the problems of one answer, or None when it cannot be used."""
+    try:
+        value = parse_json(text)
+    except Exception:  # noqa: BLE001 - malformed or truncated answer
+        return None
+    verdicts = {k: ip.clean(value.get(k)).lower() for k in AUDIT_KEYS}
+    if any(v not in ("pass", "fail") for v in verdicts.values()):
+        return None
+    return {**verdicts, "problems": ip.clean(value.get("problems")),
+            "passed": all(v == "pass" for v in verdicts.values())}
+
+
+async def audit_votes(client, parts, prompt, votes):
+    """`votes` independent samples of one request (one prefill); a sample that cannot be parsed is asked again on
+    its own with new seeds."""
+    response = await client.call(parts, prompt, "audit", seed=0, n=votes)
+    choices = response["choices"] if votes > 1 else [response]
+    tokens, results = response["tokens"], []
+    for k, choice in enumerate(choices):
+        vote, attempts = parse_vote(choice["text"]), 1
+        while vote is None and attempts < ATTEMPTS:
+            again = await client.call(parts, prompt, "audit", seed=100 * (k + 1) + attempts)
+            tokens += again["tokens"]
+            vote, attempts = parse_vote(again["text"]), attempts + 1
+        results.append({**(vote or {"passed": None}), "attempts": attempts})
+    return results, tokens
+
+
+def audit_requests(run, row, plan, seg, gate):
+    """Per unit of one pair: content parts, prompt and sentences; a top-level function so that a process pool draws
+    the views off the event loop that sends the requests."""
+    from PIL import Image
+    run = Path(run)
+    source = Image.open(run / row["source_image"]).convert("RGB")
+    target = Image.open(run / gate["target_pasted"]).convert("RGB")
+    many = len(plan["units"]) > 1
+    out = []
+    for unit, s, g in zip(plan["units"], seg["units"], gate["units"]):
+        spec = unit["spec"]
+        whole = (spec["operation"] == "add" and unit["slots"].get("granularity") == "object"
+                 and not (s.get("localized") or {}).get("cut") and not s.get("site_spot"))
+        ref, noref, reason = sentences(spec)
+        exec_mask = mk.decode(g["execution_region"])
+        out.append({"parts": audit_parts(source, target, mk.decode(s["selection"]), exec_mask),
+                    "prompt": audit_prompt(spec, ref, noref, whole, True, many),
+                    "ref": ref, "noref": noref, "reason": reason})
+    return out
+
+
+async def audit_request(client, request, votes=2):
+    """The audit of one unit from audit_requests."""
+    results, tokens = await audit_votes(client, request["parts"], request["prompt"], votes)
+    merged = {"instruction_ref": request["ref"], "instruction_noref": request["noref"],
+              "noref_ineligible": request["reason"], "tokens": tokens, "votes": results}
+    return merge_votes(merged, results)
+
+
+def merge_votes(merged, results):
+    for k in AUDIT_KEYS:
+        values = [r.get(k) for r in results]
+        merged[k] = "fail" if "fail" in values else "pass" if all(v == "pass" for v in values) else None
+    merged["passed"] = None if any(r["passed"] is None for r in results) else all(r["passed"] for r in results)
+    merged["problems"] = " | ".join(r.get("problems") or "" for r in results if r.get("problems"))
+    return merged
 
 
 async def audit_unit(client, source, target, spec, s_mask, exec_mask, whole, others, votes=2):
     ref, noref, reason = sentences(spec)
     prompt = audit_prompt(spec, ref, noref, whole, exec_mask is not None, others)
     parts = audit_parts(source, target, s_mask, exec_mask)
-    results = [await audit_vote(client, parts, prompt, v) for v in range(votes)]
-    merged = {"instruction_ref": ref, "instruction_noref": noref, "noref_ineligible": reason,
-              "tokens": sum(r["tokens"] for r in results), "votes": results}
+    results, tokens = await audit_votes(client, parts, prompt, votes)
+    merged = {"instruction_ref": ref, "instruction_noref": noref, "noref_ineligible": reason, "tokens": tokens,
+              "votes": results}
     for k in AUDIT_KEYS:
         values = [r.get(k) for r in results]
         merged[k] = "fail" if "fail" in values else "pass" if all(v == "pass" for v in values) else None

@@ -37,15 +37,20 @@ def parse_json(text):
 
 
 class Client:
-    """OpenAI-compatible chat endpoint."""
+    """OpenAI-compatible chat endpoint.
+
+    The content is [prefix text] + parts + [prompt text]: a prefix shared by every request (the static rules) comes
+    before the images so that vLLM's prefix cache serves it once per engine instead of prefilling it per request."""
 
     def __init__(self, session, url, model="qwen38-27b"):
         self.session, self.url, self.model = session, url, model
 
-    async def call(self, parts, prompt, call, seed=0):
+    async def call(self, parts, prompt, call, seed=0, prefix=None, n=1):
+        """One request; with n > 1 several samples of the same prompt (one prefill), returned as "choices"."""
         thinking, effort, max_tokens = CALLS[call]
-        body = {"model": self.model, "max_tokens": max_tokens, "seed": seed,
-                "messages": [{"role": "user", "content": parts + [{"type": "text", "text": prompt}]}],
+        content = ([{"type": "text", "text": prefix}] if prefix else []) + parts + [{"type": "text", "text": prompt}]
+        body = {"model": self.model, "max_tokens": max_tokens, "seed": seed, "n": n,
+                "messages": [{"role": "user", "content": content}],
                 "chat_template_kwargs": {"enable_thinking": thinking, **({"reasoning_effort": effort} if effort else {})},
                 **THINKING}
         error = None
@@ -55,9 +60,12 @@ class Client:
                     data = await response.json(content_type=None)
                 if "choices" not in data:
                     raise RuntimeError(str(data)[:500])
-                choice = data["choices"][0]
-                return {"text": choice["message"].get("content") or "", "finish": choice.get("finish_reason"),
-                        "tokens": (data.get("usage") or {}).get("completion_tokens", 0)}
+                choices = [{"text": c["message"].get("content") or "", "finish": c.get("finish_reason")}
+                           for c in data["choices"]]
+                tokens = (data.get("usage") or {}).get("completion_tokens", 0)
+                if n == 1:
+                    return {**choices[0], "tokens": tokens}
+                return {"choices": choices, "tokens": tokens}
             except Exception as exc:  # noqa: BLE001 - retried, then raised below
                 error = f"{type(exc).__name__}: {exc}"
                 await asyncio.sleep(2 + 5 * attempt)
@@ -83,14 +91,63 @@ def read_records(path):
     return out
 
 
-async def run_jobs(jobs, worker, concurrency, out_path, progress_every=20):
-    """Run `worker(job)` over jobs with bounded concurrency, appending each result as one JSON line."""
+class Tail:
+    """New records of a stage's JSONL files since the last call, while other processes append to them.
+
+    Reading only what was added keeps a following stage cheap on runs of 100k rows; a half-written last line is kept
+    for the next call."""
+
+    def __init__(self, directory, pattern="records*.jsonl"):
+        self.dir, self.pattern = Path(directory), pattern
+        self.pos, self.partial = {}, {}
+
+    def read(self):
+        out = []
+        for path in sorted(self.dir.glob(self.pattern)):
+            pos = self.pos.get(path, 0)
+            with open(path, "rb") as stream:
+                stream.seek(pos)
+                data = stream.read()
+            if not data:
+                continue
+            self.pos[path] = pos + len(data)
+            lines = (self.partial.pop(path, b"") + data).split(b"\n")
+            if lines[-1]:
+                self.partial[path] = lines[-1]
+            for line in lines[:-1]:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return out
+
+
+def mark_done(directory, name="DONE"):
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    (Path(directory) / name).write_text("")
+
+
+def is_done(directory):
+    """A stage is done when its DONE marker exists, or, for a sharded stage, all of its DONE.<k>-of-<n> markers."""
+    directory = Path(directory)
+    if (directory / "DONE").exists():
+        return True
+    shards = list(directory.glob("DONE.*-of-*"))
+    if not shards:
+        return False
+    count = int(shards[0].name.rsplit("-of-", 1)[1])
+    return len({p.name for p in shards}) >= count
+
+
+async def stream_jobs(new_jobs, worker, concurrency, out_path, upstream_done=None, poll=15.0, progress_every=50):
+    """Run `worker(job)` with bounded concurrency over the jobs `new_jobs()` returns, appending each result as one
+    JSON line.  Without `upstream_done` the first batch is all there is; with it, new jobs are polled for until the
+    upstream stage is done and nothing is left (a following stage)."""
     semaphore = asyncio.Semaphore(concurrency)
     lock = asyncio.Lock()
-    done = 0
+    running, counter = set(), {"done": 0, "queued": 0}
     with open(out_path, "a") as stream:
         async def one(job):
-            nonlocal done
             async with semaphore:
                 try:
                     record = await worker(job)
@@ -99,7 +156,21 @@ async def run_jobs(jobs, worker, concurrency, out_path, progress_every=20):
             async with lock:
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
                 stream.flush()
-                done += 1
-                if done % progress_every == 0:
-                    print(f"  {done}/{len(jobs)}", flush=True)
-        await asyncio.gather(*(one(job) for job in jobs))
+                counter["done"] += 1
+                if counter["done"] % progress_every == 0:
+                    print(f"  {counter['done']}/{counter['queued']}", flush=True)
+        while True:
+            finished = upstream_done is None or upstream_done()
+            jobs = new_jobs()
+            for job in jobs:
+                task = asyncio.create_task(one(job))
+                running.add(task)
+                task.add_done_callback(running.discard)
+            counter["queued"] += len(jobs)
+            if finished and not jobs:
+                break
+            if upstream_done is None:
+                continue  # the next new_jobs() is empty and ends the loop
+            await asyncio.sleep(poll)
+        if running:
+            await asyncio.gather(*running)

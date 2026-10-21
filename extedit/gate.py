@@ -93,8 +93,8 @@ def unit_gates(spec, s_mask, item, region, stats, params=EDIT_GATES):
             hard.append("edited_region_misses_s")
         elif op == "replace" and stats["s_covered"] < params["replace_covered"]:
             hard.append("replace_incomplete")
-        elif op == "attribute" and stats["s_covered"] < params["attribute_covered"]:
-            hard.append("attribute_incomplete")
+        elif op == "attribute" and stats["s_covered"] < params["attribute_covered"] and not mk.is_text_change(spec):
+            hard.append("attribute_incomplete")  # a text area keeps the ground between its letters
         elif op in ("replace", "attribute") and stats["s_covered"] < params[f"{op}_review"]:
             flags.append("s_partly_changed")
     else:
