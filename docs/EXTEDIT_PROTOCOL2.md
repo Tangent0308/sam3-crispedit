@@ -197,6 +197,57 @@ $PY run --run $RUN --whole-shards --node 0/1 --crispedit add=0,remove=0,replace=
   - 收下行的原图和贴回后的 AFTER 复制到 `images/` 下。
 - **存储：**每个原始对解出的两张原图约 3 MB，贴回后的 PNG 约 4 MB。运行目录里的原图可以在发布后删除，需要时能从源分片重新解出。
 
+### 4.4 ARNOLD 四机（正式入口）
+- **作业：**4 个 worker × 8 卡 H100 80G。启动命令是下面的"运行设置"加上 `scripts/extedit_bootstrap_arnold.sh` 的全文，两段依次粘贴。
+- **每个 worker 做的事：**
+  1. 检查 ARNOLD 注入的变量；
+  2. 按固定 commit 把本分支和 SAMTokEdit v3 clone 到节点本地 `/tmp`；
+  3. 按锁定文件装 vLLM 和 worker 两个环境（`scripts/extedit_setup_env.sh`），检查 CUDA；
+  4. 把 27B 复制到本地盘；
+  5. 用 GPU 0–6 起 27B 服务；
+  6. 跑流式全流程：取自己那份分片，SAM3 + SAMTok 在 GPU 7。
+- **互相独立：**worker 之间没有通信，按打乱后的分片轮流分配，互不重叠。
+- **续跑：**worker 被重启时，用同一个 `EXTEDIT_RUN_ID` 自动续跑，已写的行都跳过。
+- **服务挂掉：**27B 服务中途退出，worker 立即报错退出，等重启后续跑。
+- **重试：**第二轮会把调用失败的行再跑一遍。
+
+运行设置（第一批 10 万个原始对，配额是每个 worker 的）：
+
+```bash
+# ===== 运行设置 =====
+export EXTEDIT_RUN_ID=extedit_protocol2_100k_20261021
+export EXTEDIT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs
+export EXTEDIT_COMMIT=<本分支要跑的 commit>
+export EXTEDIT_V3_COMMIT=31fb966
+export EXTEDIT_CRISPEDIT=replace=3750,color=2000,remove=1250,add=625
+export EXTEDIT_SCALEEDIT=object_surface_text_editing=3750,building_surface_text_editing=3750,object_replacement=3750,color_change=2000,material_change=0,object_removal=1250,object_addition=625
+```
+
+- **配额：**
+  - 每个 worker 约 2.5 万行，四台合计约 10 万；
+  - `material_change=0` 表示取尽自己那份分片里的全部改材质行，四台合计约 9 千。
+- **产出位置：**`$EXTEDIT_ROOT/$EXTEDIT_RUN_ID/`
+
+  | 路径 | 内容 |
+  |---|---|
+  | `node<k>/` | 各 worker 的运行目录，每步的记录、`final/`、`SUCCESS.json` |
+  | `bootstrap/node<k>.log` | 完整日志 |
+  | `node<k>/pipeline.log`、`node<k>/logs/*.log` | 各步日志 |
+  | `node<k>/vllm.attempt<N>.log` | 27B 服务日志 |
+  | `node<k>/phase` | 当前阶段 |
+  | `node<k>/failure.json` | 失败时写出，下一次尝试改名为 `failure.attempt<N>.json` |
+
+- **看进度：**`python scripts/extedit_pipeline.py status --runs $RUN/node0 $RUN/node1 $RUN/node2 $RUN/node3`
+- **失败处理：**用同一个 `EXTEDIT_RUN_ID` 重新提交（或只重启失败的 worker）即可续跑。已经写了 `SUCCESS.json` 的 worker 会直接退出。
+- **全部成功后：**抽查样本，再用 `publish` 合并到 `datasets/ExtEdit_Protocol2_<日期>/`。只有正式结果进 `datasets/`。
+- **预计：**
+  - 每个 worker 约 5–8 小时，外加装环境、拷模型约 15 分钟；
+  - 运行目录约 450 GB（解出的原图约 300 GB，贴回 PNG 约 140 GB）；原图在发布后可以删除。
+- **本机验证（2026-10-21）：**
+  - 用同一入口、本地仓库地址、每个 worker 约 38 行的配额，把 4 个 worker 依次模拟了一遍（脚本按 ARNOLD 的方式从标准输入喂给 bash）；
+  - 中途向 worker 1 发 SIGTERM：写出 `failure.json`，子进程和服务都被关掉；重启后从中断处续完，行与记录没有重复；
+  - 4 个 worker 的分片和行互不重叠，`publish` 合并正常。
+
 ## 5. 输出（`<RUN>/final/`）
 
 | 文件 | 内容 |
@@ -304,4 +355,4 @@ $PY run --run $RUN --whole-shards --node 0/1 --crispedit add=0,remove=0,replace=
 ## 7. 已知限制
 - **大片表面上的 add：**天空、墙面、水面上的 add，锚点被切成一块没有边界的区域，SAMTok 难以还原，往返 IoU 常 < 0.5，这些单元不收。D3 有同样的问题。add 产量 17%–36%。
 - **重新构图：**AFTER 被整张重画、换了构图的对配准不上，在预检丢弃。约占 11%–14%，主要是 ScaleEdit 删除类和 CrispEdit 部分分片。
-- **多机脚本未在 ARNOLD 上实测：**`scripts/extedit_node.sh` 已在本机做过单节点冒烟（10-21，配额共 24 行）：7 卡起服务、整片取数、流式全流程、导出、退出时关服务都正常。多机下的路径和环境要在 ARNOLD 上确认。
+- **ARNOLD 实测：**四机入口 `scripts/extedit_bootstrap_arnold.sh` 只在本机模拟过（§4.4），集群上的网络、凭据、本地盘要以第一次正式提交为准。`scripts/extedit_node.sh` 是不依赖 ARNOLD 变量的简化版本。
