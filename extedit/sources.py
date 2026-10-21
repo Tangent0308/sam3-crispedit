@@ -110,18 +110,21 @@ def read_rows(path, indices, columns):
     return {k: {c: table.column(c)[k].as_py() for c in columns} for k in indices}
 
 
-def whole_shard_jobs(crispedit_quota, scaleedit_quota, node=(0, 1)):
-    """Shard-by-shard plan for production: every row of a shard is read in one pass.  Shards are dealt to nodes
-    round-robin by their position in the sorted list; a type stops when its quota is met (0 = no limit)."""
+def whole_shard_jobs(crispedit_quota, scaleedit_quota, node=(0, 1), seed=20261020):
+    """Shard-by-shard plan for production: every row of a shard is read in one pass.  The shards are shuffled with a
+    fixed seed (the same order on every node) and dealt to nodes round-robin, so that a quota smaller than the pool
+    still samples all index ranges (CrispEdit's yield differs a lot between them); a type stops when its quota is
+    met (0 = no limit)."""
     k, n = node
     jobs = []
     shards = crispedit_shards()
     for kind in crispedit_quota:
-        for i, path in enumerate(shards.get(kind, [])):
-            if i % n == k:
-                jobs.append(("crispedit", kind, path))
+        paths = list(shards.get(kind, []))
+        random.Random(f"{seed}:{kind}").shuffle(paths)
+        jobs += [("crispedit", kind, path) for i, path in enumerate(paths) if i % n == k]
     if scaleedit_quota:
         paths = sorted(Path(SCALEEDIT).glob("expand-dl300k20261020*.parquet"))
+        random.Random(f"{seed}:scaleedit").shuffle(paths)
         jobs += [("scaleedit", None, path) for i, path in enumerate(paths) if i % n == k]
     return jobs
 
@@ -181,7 +184,7 @@ def ingest(run, crispedit_quota, scaleedit_quota, seed=20261020, per_source=3, b
         if Path(SCALEEDIT_USED).exists():
             used = set(pq.read_table(SCALEEDIT_USED, columns=["sample_id"]).column("sample_id").to_pylist())
         full = lambda dataset, kind: 0 < ({**crispedit_quota, **scaleedit_quota}.get(kind) or 0) <= kept[f"{dataset}/{kind}"]
-        for dataset, kind, path in whole_shard_jobs(crispedit_quota, scaleedit_quota, node):
+        for dataset, kind, path in whole_shard_jobs(crispedit_quota, scaleedit_quota, node, seed):
             if dataset == "crispedit":
                 if full("crispedit", kind):
                     continue
