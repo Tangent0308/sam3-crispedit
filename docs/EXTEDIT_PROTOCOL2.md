@@ -198,6 +198,8 @@ $PY run --run $RUN --whole-shards --node 0/1 --crispedit add=0,remove=0,replace=
 - **存储：**每个原始对解出的两张原图约 3 MB，贴回后的 PNG 约 4 MB。运行目录里的原图可以在发布后删除，需要时能从源分片重新解出。
 
 ### 4.4 ARNOLD 四机（正式入口）
+完整的提交说明（可直接粘贴的运行设置和入口脚本全文、冒烟、日志、失败处理、发布）见 [EXTEDIT_4NODE.md](EXTEDIT_4NODE.md)，下面是摘要。
+
 - **作业：**4 个 worker × 8 卡 H100 80G。启动命令是下面的"运行设置"加上 `scripts/extedit_bootstrap_arnold.sh` 的全文，两段依次粘贴。
 - **每个 worker 做的事：**
   1. 检查 ARNOLD 注入的变量；

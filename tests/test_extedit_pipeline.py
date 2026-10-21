@@ -193,5 +193,13 @@ def test_text_area_is_a_compact_region():
         "attributes": [{"property": "text", "value": "OPEN"}]})[0]))
 
 
+def test_four_node_doc_embeds_the_entry_script_verbatim():
+    repo = ROOT.parent
+    doc = (repo / "docs" / "EXTEDIT_4NODE.md").read_text()
+    block = doc.split("<!-- code: scripts/extedit_bootstrap_arnold.sh -->", 1)[1]
+    block = block.split("```bash\n", 1)[1].split("\n```", 1)[0]
+    assert block + "\n" == (repo / "scripts" / "extedit_bootstrap_arnold.sh").read_text()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

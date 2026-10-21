@@ -11,6 +11,7 @@
 本地仓库：`/opt/tiger/tanyue/sam3-extedit-protocol2-labeling`。
 
 - [方法、运行命令、输出格式、验证结果](docs/EXTEDIT_PROTOCOL2.md)
+- [ARNOLD 四机入口：可直接粘贴的启动命令、冒烟、日志与续跑](docs/EXTEDIT_4NODE.md)
 
 ```text
 extedit/
