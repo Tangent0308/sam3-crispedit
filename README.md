@@ -23,7 +23,8 @@ extedit/
   export.py       D3 / D4 记录、token 缓存、拒收清单、汇总、审阅图
   masks.py, slots.py, views.py, llm.py
   instruction_protocol.py, instruction_style.py   benchmark 2.6.0 原文件，逐字节复制（测试固定哈希）
-scripts/extedit_pipeline.py   命令行，每步一个子命令，可断点续跑
+scripts/extedit_pipeline.py   命令行，每步一个子命令，可断点续跑；run 让各步流式并行，publish 合并多机结果
+scripts/extedit_node.sh       多机时每台机器的入口（27B 服务 + 流式全流程）
 tests/test_extedit_pipeline.py
 requirements/extedit-worker.txt, extedit-vllm.txt
 ```
