@@ -201,5 +201,48 @@ def test_four_node_doc_embeds_the_entry_script_verbatim():
     assert block + "\n" == (repo / "scripts" / "extedit_bootstrap_arnold.sh").read_text()
 
 
+def test_text_check_decisions():
+    from extedit import textcheck as tc
+    assert tc.normalize("ELÉCTION!") == tc.normalize("election") == "election"
+    assert tc.normalize("Mc Sorley's") == "mcsorleys"
+    read = lambda before, after, legible=True, garbled=False: {"before": before, "after": after,
+                                                               "after_legible": legible, "after_garbled": garbled}
+    assert tc.decide("ELECCIÓN", read("RODRÍGUEZ", "ELÉCTION")) == (False, "ocr_mismatch")
+    assert tc.decide("HANDLE", read("HANDL", "ANDLE")) == (False, "ocr_mismatch")
+    assert tc.decide("PIZZAXPRESS", read("PIZZAEXPRESS", "PIZZA EXPRESS")) == (False, "ocr_mismatch")
+    assert tc.decide("VORTEX", read("VORTEX", "V O R T E X")) == (False, "no_text_change")
+    assert tc.decide("CENTER", read("BEACH", "BEACH CENTER")) == (False, "old_text_remains")
+    assert tc.decide("ALEXA", read("ALEX", "ALEXA")) == (True, None)  # the old text is part of the new one
+    assert tc.decide("Pirates", read("PIRATES", "Pirates")) == (True, None)  # a change of letter case
+    assert tc.decide("BALM", read("THE BEARD", "THE BALM")) == (True, None)  # a neighboring word read along
+    assert tc.decide("HOLLYWOOD", read("BLVD", "HOLLYWOOD", legible=False)) == (True, None)
+    assert tc.decide("Love Forever", read("Just Married", "LOVE FOREVER")) == (True, None)
+
+
+def test_text_check_parsing_and_units():
+    from extedit import textcheck as tc
+    value = tc.parse_reading('```json\n{"before": "BLVD", "after": "HOLLYWOOD", "after_legible": "true", '
+                             '"after_garbled": false}\n```')
+    assert value == {"before": "BLVD", "after": "HOLLYWOOD", "after_legible": True, "after_garbled": False}
+    with pytest.raises(ValueError):
+        tc.parse_reading('{"before": "", "after": "X"}')
+    plan, _ = pl.parse_plan(answer(operation="attribute", payload="", ref="the sign", scope="sign",
+                                   attributes=[{"property": "text", "value": "OPEN"}]), 1)
+    assert tc.text_units(plan) == [(0, "OPEN")]
+    assert tc.text_units(pl.parse_plan(answer(), 1)[0]) == []
+
+
+def test_text_close_ups_keep_the_area_and_enlarge_it():
+    from PIL import Image
+    from extedit import textcheck as tc
+    src = Image.new("RGB", (2000, 1000), "white")
+    s_mask = np.zeros((1000, 2000), bool)
+    s_mask[480:520, 900:1100] = True  # a line of text, 200 x 40 px
+    box = tc.crop_box(mk.box_1000(s_mask), src.size)
+    assert box[0] <= 900 - 0.5 * 200 and box[2] >= 1100 + 0.5 * 200 and box[2] - box[0] <= 2000
+    before, after = tc.close_ups(src, src, s_mask)
+    assert before.size == after.size and max(before.size) == 1024
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -8,6 +8,7 @@ Stages, each resumable (a stage skips ids it already wrote; failed records are r
   segment   --device cuda:0 [--shard 0/8]                                    SAM3 + SAMTok
   gate      --workers 32                                                     CPU
   audit     --url ... [--votes 2]                                            Qwen3.8-27B
+  textcheck --url ...                                                        Qwen3.8-27B reads back new text
   export                                                                     final/
   review    [--accept 40 --reject 40]                                        review sheets
   run       all of the above on one node, the stages running side by side (each one --follow)
@@ -265,6 +266,47 @@ def cmd_audit(args):
     llm.mark_done(run / "audit")
     log_config(run, "audit", args)
 
+def cmd_textcheck(args):
+    """Read back the written text of every text-change unit of the rows that passed the audit (extedit/textcheck)."""
+    import aiohttp
+    from extedit import textcheck as tc
+    run = Path(args.run)
+    (run / "textcheck").mkdir(exist_ok=True)
+    rows, plans, segs, gates, audits = (Rows(run), Stage(run, "plan"), Stage(run, "segment"), Stage(run, "gate"),
+                                        Stage(run, "audit"))
+    seen = set(ex.read_stage(run, "textcheck"))
+    pool = views_pool(args.view_workers)
+
+    def new_jobs():
+        rows.update()
+        for stage in (plans, segs, gates, audits):
+            stage.fresh()
+        jobs = [{"id": i} for i, a in audits.records.items()
+                if i not in seen and all(u.get("passed") is True for u in a["units"])
+                and i in plans.records and i in segs.records and i in gates.records
+                and tc.text_units(plans.records[i]["plan"])]
+        seen.update(j["id"] for j in jobs)
+        return jobs
+
+    async def main():
+        timeout = aiohttp.ClientTimeout(total=3600)
+        connector = aiohttp.TCPConnector(limit=args.concurrency + 8)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            client = llm.Client(session, args.url, args.model)
+
+            async def worker(job):
+                row_id = job["id"]
+                requests = await asyncio.get_running_loop().run_in_executor(
+                    pool, tc.text_requests, str(run), rows.rows[row_id], plans.records[row_id]["plan"],
+                    segs.records[row_id], gates.records[row_id])
+                units = list(await asyncio.gather(*(tc.check_unit(client, r) for r in requests)))
+                return {"id": row_id, "units": units, "passed": all(u["passed"] for u in units)}
+            await llm.stream_jobs(new_jobs, worker, args.concurrency, run / "textcheck" / "records.jsonl",
+                                  upstream_done=audits.done if args.follow else None, poll=POLL)
+    asyncio.run(main())
+    llm.mark_done(run / "textcheck")
+    log_config(run, "textcheck", args)
+
 # ---------------------------------------------------------------- segment
 
 
@@ -385,6 +427,7 @@ def cmd_run(args):
     start("gate", ["gate", "--run", str(run), "--workers", str(args.workers), "--follow"])
     start("audit", ["audit", "--run", str(run), "--url", args.url, "--concurrency", str(args.audit_concurrency),
                     "--votes", str(args.votes), "--follow"])
+    start("textcheck", ["textcheck", "--run", str(run), "--url", args.url, "--concurrency", "64", "--follow"])
     started = time.time()
     failed = []
     for name, proc in procs:
@@ -413,7 +456,7 @@ def cmd_status(args):
     total = {}
     for run in map(Path, args.runs):
         counts = {"ingest": len(ex.rows(run)) if (run / "ingest" / "rows.jsonl").exists() else 0}
-        for stage in ("precheck", "plan", "segment", "gate", "audit"):
+        for stage in ("precheck", "plan", "segment", "gate", "audit", "textcheck"):
             records = ex.read_stage(run, stage) if (run / stage).exists() else {}
             counts[stage] = len(records)
             if stage == "precheck":
@@ -422,6 +465,8 @@ def cmd_status(args):
                 counts["gate_passed"] = sum(r.get("status") == "passed" for r in records.values())
             if stage == "audit":
                 counts["audit_passed"] = sum(all(u.get("passed") is True for u in r["units"]) for r in records.values())
+            if stage == "textcheck":
+                counts["textcheck_passed"] = sum(r.get("passed") is True for r in records.values())
             if llm.is_done(run / stage):
                 counts[stage + "_done"] = True
         counts["finished"] = (run / "final" / "summary.json").exists()
@@ -466,7 +511,7 @@ def main():
     s.add_argument("--workers", type=int, default=32)
     s.add_argument("--follow", action="store_true")
     s.set_defaults(func=cmd_precheck)
-    for name, func in (("plan", cmd_plan), ("audit", cmd_audit)):
+    for name, func in (("plan", cmd_plan), ("audit", cmd_audit), ("textcheck", cmd_textcheck)):
         s = sub.add_parser(name)
         s.add_argument("--run", required=True)
         s.add_argument("--url", default="http://127.0.0.1:8000/v1/chat/completions")
@@ -476,7 +521,7 @@ def main():
         s.add_argument("--follow", action="store_true")
         if name == "plan":
             s.add_argument("--limit", type=int, default=0)
-        else:
+        elif name == "audit":
             s.add_argument("--votes", type=int, default=2)
         s.set_defaults(func=func)
     s = sub.add_parser("segment")
