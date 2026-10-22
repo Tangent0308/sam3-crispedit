@@ -270,8 +270,13 @@ def cmd_audit(args):
 
 def cmd_segment(args):
     import zlib
+    import cv2
+    import torch
     from PIL import Image
     from extedit import segment as sg
+    # Several workers may share one GPU and the CPU: each keeps to its own share of threads.
+    torch.set_num_threads(args.threads)
+    cv2.setNumThreads(args.threads)
     run = Path(args.run)
     (run / "segment").mkdir(exist_ok=True)
     index, count = (int(v) for v in args.shard.split("/"))
@@ -479,6 +484,7 @@ def main():
     s.add_argument("--device", default="cuda:0")
     s.add_argument("--shard", default="0/1")
     s.add_argument("--v3-repo", default="/opt/tiger/tanyue/samtok_edit_qwen-image-2.1-v3")
+    s.add_argument("--threads", type=int, default=16, help="CPU threads of this worker (torch and OpenCV)")
     s.add_argument("--follow", action="store_true")
     s.set_defaults(func=cmd_segment)
     s = sub.add_parser("gate")
@@ -497,7 +503,8 @@ def main():
     s.add_argument("--plan-concurrency", type=int, default=160)
     s.add_argument("--audit-concurrency", type=int, default=96)
     s.add_argument("--votes", type=int, default=2)
-    s.add_argument("--segment-devices", default="7", help="GPUs for SAM3 + SAMTok workers, e.g. 6,7")
+    s.add_argument("--segment-devices", default="7",
+                   help="one SAM3 + SAMTok worker per entry, e.g. 6,7 or 7,7,7 (three workers sharing GPU 7)")
     s.add_argument("--workers", type=int, default=32)
     s.add_argument("--v3-repo", default="/opt/tiger/tanyue/samtok_edit_qwen-image-2.1-v3")
     s.set_defaults(func=cmd_run)
