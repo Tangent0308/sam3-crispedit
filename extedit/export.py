@@ -7,6 +7,7 @@ caches v1_tokens.jsonl / d4_tokens.jsonl (span, decoded mask, round trip, size c
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from collections import Counter
@@ -18,11 +19,12 @@ from PIL import Image
 from . import PIPELINE_VERSION, PROTOCOL_SHA256
 from . import instruction_protocol as ip
 from . import masks as mk
+from . import natcheck as nc
 from . import views as vw
 from .gate import PASTE_BAND
-from .textcheck import text_units
+from .textcheck import has_text_payload, text_units
 
-STAGES = ("ingest", "precheck", "plan", "segment", "gate", "audit", "textcheck")
+STAGES = ("ingest", "precheck", "plan", "segment", "gate", "audit", "textcheck", "natcheck")
 
 
 def read_stage(run, stage):
@@ -107,7 +109,7 @@ def unit_record(row_id, unit, seg, gate_unit, audit, text_check=None):
             "instruction_protocol_version": ip.VERSION, "adapter_version": PIPELINE_VERSION,
             "instruction_noref": audit["instruction_noref"], "noref_ineligible": audit["noref_ineligible"],
             "protocol_v2_change": None, "comparable": unit.get("comparable", False),
-            "audit": {k: audit[k] for k in ("passed", "problems")},
+            "text_payload": has_text_payload(spec), "audit": {k: audit[k] for k in ("passed", "problems")},
             **({"text_check": {"read_after": text_check["after"], "read_before": text_check["before"]}}
                if text_check else {})}
 
@@ -115,10 +117,12 @@ def unit_record(row_id, unit, seg, gate_unit, audit, text_check=None):
 def export(run, out=None, workers=None):
     """Write final/ (or `out`): manifests, tokens, rejections and summary; return the summary.  The change of every
     accepted AFTER outside its edit is measured in `workers` processes (default: up to 48).  When the run has a
-    textcheck stage, a row with a text-change unit is kept only if its text check passed."""
+    textcheck stage, a row with a text-change unit is kept only if its text check passed; when it has a natcheck
+    stage, a CrispEdit add row only if its naturalness check passed."""
     import os
     run = Path(run)
     check_text = (run / "textcheck").is_dir()
+    check_natural = (run / "natcheck").is_dir()
     out = Path(out) if out else run / "final"
     out.mkdir(parents=True, exist_ok=True)
     data = {s: (rows(run) if s == "ingest" else read_stage(run, s)) for s in STAGES}
@@ -171,21 +175,33 @@ def export(run, out=None, workers=None):
                                                          for u in bad)})
                 continue
             checked = {u["unit"]: u for u in text["units"]}
+        natural = None
+        if check_natural and nc.needs_check(row):
+            nat = data["natcheck"].get(row_id)
+            if nat is None:
+                rejected.append({**base, "stage": "natcheck", "reason": "missing"})
+                continue
+            if not nat["passed"]:
+                rejected.append({**base, "stage": "natcheck", "reason": nat["reason"],
+                                 "problems": " || ".join(v["traces"] for v in nat["votes"] if not v["natural"])})
+                continue
+            natural = {"votes": len(nat["votes"]), "natural_votes": sum(v["natural"] for v in nat["votes"])}
         units = [unit_record(row_id, u, s, g, a, checked.get(k)) for k, (u, s, g, a) in
                  enumerate(zip(plan["plan"]["units"], seg["units"], gate["units"], audit["units"]))]
         regions = [{k: u[key][k] for k in ("rle_size", "rle_counts")} for u in units
                    for key in ("selection", "execution_region", "edited_region")]
         pastes = [({k: g["paste_region"][k] for k in ("rle_size", "rle_counts")}, u["spec"]["operation"])
                   for u, g in zip(plan["plan"]["units"], gate["units"])]
-        accepted.append((row_id, row, plan, seg, gate, units,
+        accepted.append((row_id, row, plan, seg, gate, units, natural,
                          (str(run), row["source_image"], gate["target_pasted"], regions, pastes)))
     workers = workers or min(48, os.cpu_count() or 1)
     measured = drifts([a[-1] for a in accepted], out / "drift_cache.jsonl", workers) if accepted else []
-    for (row_id, row, plan, seg, gate, units, _), drift in zip(accepted, measured):
+    for (row_id, row, plan, seg, gate, units, natural, _), drift in zip(accepted, measured):
         common = {"source_image": row["source_image"], "target_image": gate["target_pasted"], "id": row_id,
                   "dataset": row["dataset"], "type_before": row["native_type"], "instruction_before": row["instruction"],
                   "observed": plan["plan"]["observed"], "treatment": gate["treatment"], "provenance": row["provenance"],
-                  "instruction_protocol_version": ip.VERSION, "adapter_version": PIPELINE_VERSION}
+                  "instruction_protocol_version": ip.VERSION, "adapter_version": PIPELINE_VERSION,
+                  **({"naturalness_check": natural} if natural else {})}
         if len(units) == 1:
             u = units[0]
             singles.append({**common, **{k: v for k, v in u.items() if k not in ("id",)}, "host_view": None})
@@ -281,32 +297,96 @@ def review(run, out_dir, n_accept=40, n_reject=40, seed=0):
     return written
 
 
-def publish(runs, out, workers=32):
+def payload_key(spec):
+    """The new-object description of an add / replace unit, normalized for the repetition cap (lower case, single
+    spaces, no commas, no leading article); None for other operations."""
+    if spec["operation"] not in ("add", "replace"):
+        return None
+    text = " ".join(str(spec.get("payload") or "").lower().replace(",", " ").split())
+    for article in ("a ", "an ", "some ", "one "):
+        if text.startswith(article):
+            text = text[len(article):]
+            break
+    return text or None
+
+
+def payload_counts(folders):
+    """Payload uses (payload_key) in the manifests of published dataset folders."""
+    counts = Counter()
+    for folder in map(Path, folders):
+        for name in ("manifest_protocol_v2.jsonl", "manifest_multi_protocol_v2.jsonl"):
+            for record in map(json.loads, open(folder / name)):
+                for unit in record.get("units") or [record]:
+                    key = payload_key(unit["instruction_spec"])
+                    if key:
+                        counts[key] += 1
+    return counts
+
+
+def cap_payloads(singles, multis, counts, cap):
+    """Ids of the single-unit rows to drop so that no add / replace payload is used more than `cap` times, counting
+    `counts` (earlier batches) and the multi-unit rows first (they are never dropped), then the single rows in a fixed
+    pseudo-random order (by the hash of their id)."""
+    counts = Counter(counts)
+    for record in multis:
+        for unit in record["units"]:
+            key = payload_key(unit["instruction_spec"])
+            if key:
+                counts[key] += 1
+    dropped = set()
+    for record in sorted(singles, key=lambda r: hashlib.sha1(r["id"].encode()).hexdigest()):
+        key = payload_key(record["instruction_spec"])
+        if key is None:
+            continue
+        if counts[key] >= cap:
+            dropped.add(record["id"])
+        else:
+            counts[key] += 1
+    return dropped
+
+
+def publish(runs, out, workers=32, payload_cap=0, cap_reference=()):
     """Merge the final records of several runs (the nodes of a production run) into one dataset folder: the source
     images and the pasted AFTER copied (in `workers` threads) under images/<id[-2:]>/, paths relative to the folder,
-    manifests, token caches, rejections (with their run) and a summary."""
+    manifests, token caches, rejections (with their run) and a summary.  With payload_cap, single-unit add / replace
+    rows whose new-object description has already been used payload_cap times (in the cap_reference dataset folders,
+    then in this one) are left out and listed in rejections with stage "publish", reason "payload_cap"."""
     import shutil
     from concurrent.futures import ThreadPoolExecutor
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     names = ("manifest_protocol_v2.jsonl", "manifest_multi_protocol_v2.jsonl", "tokens.jsonl", "multi_tokens.jsonl",
              "rejected.jsonl")
-    merged = {name: [] for name in names}
-    summaries, copies = [], []
+    loaded = {name: [] for name in names}  # (run, record)
+    summaries = []
     for run in map(Path, runs):
         final = run / "final"
         summaries.append({"run": str(run), **json.loads((final / "summary.json").read_text())})
         for name in names:
-            for record in map(json.loads, open(final / name)):
-                if name.startswith("manifest"):
-                    for key, kind in (("source_image", "source"), ("target_image", "target")):
-                        src = run / record[key]
-                        dst = out / "images" / record["id"][-2:] / f"{record['id']}.{kind}{src.suffix}"
-                        copies.append((src, dst))
-                        record[key] = str(dst.relative_to(out))
-                elif name == "rejected.jsonl":
-                    record["run"] = run.name
-                merged[name].append(record)
+            loaded[name] += [(run, record) for record in map(json.loads, open(final / name))]
+    dropped = set()
+    if payload_cap:
+        dropped = cap_payloads([r for _, r in loaded["manifest_protocol_v2.jsonl"]],
+                               [r for _, r in loaded["manifest_multi_protocol_v2.jsonl"]],
+                               payload_counts(cap_reference), payload_cap)
+        loaded["rejected.jsonl"] += [(run, {"id": r["id"], "dataset": r["dataset"], "native_type": r["type_before"],
+                                            "stage": "publish", "reason": "payload_cap",
+                                            "problems": r["instruction_spec"]["payload"]})
+                                     for run, r in loaded["manifest_protocol_v2.jsonl"] if r["id"] in dropped]
+    merged, copies = {name: [] for name in names}, []
+    for name in names:
+        for run, record in loaded[name]:
+            if name in ("manifest_protocol_v2.jsonl", "tokens.jsonl") and record["id"] in dropped:
+                continue
+            if name.startswith("manifest"):
+                for key, kind in (("source_image", "source"), ("target_image", "target")):
+                    src = run / record[key]
+                    dst = out / "images" / record["id"][-2:] / f"{record['id']}.{kind}{src.suffix}"
+                    copies.append((src, dst))
+                    record[key] = str(dst.relative_to(out))
+            elif name == "rejected.jsonl":
+                record["run"] = run.name
+            merged[name].append(record)
 
     def copy(job):
         src, dst = job
@@ -325,6 +405,7 @@ def publish(runs, out, workers=32):
     total = {"runs": summaries, "rows": sum(s["rows"] for s in summaries),
              "accepted_single": len(merged["manifest_protocol_v2.jsonl"]),
              "accepted_multi": len(merged["manifest_multi_protocol_v2.jsonl"]),
-             "rejected": len(merged["rejected.jsonl"]), "images": len(copies), "pipeline_version": PIPELINE_VERSION}
+             "rejected": len(merged["rejected.jsonl"]), "payload_capped": len(dropped), "images": len(copies),
+             "pipeline_version": PIPELINE_VERSION}
     (out / "summary.json").write_text(json.dumps(total, indent=1, ensure_ascii=False))
     return total

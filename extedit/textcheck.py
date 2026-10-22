@@ -17,6 +17,7 @@ A unit is a text change when its spec is an attribute change of property "text".
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 from pathlib import Path
 
@@ -40,6 +41,17 @@ Then judge the text in the outlined area of image 2:
 - after_garbled: true when it is gibberish, a misspelling of real words, or has malformed letters; a real name, brand, number, or a cleanly written made-up word is not garbled.
 
 Return only JSON: {"before": "...", "after": "...", "after_legible": true, "after_garbled": false}"""
+
+
+# The new object of an add / replace carries written text: a quoted string or a word that introduces one.
+TEXT_PAYLOAD = re.compile(r'["\u201c\u201d]|\b(reading|reads|saying|says|labell?ed|lettered|inscribed|printed with|'
+                          r'with the (word|words|text|letters|number|numbers))\b', re.I)
+
+
+def has_text_payload(spec):
+    """True for an add or replace unit whose new object carries written text ('a sign reading "OPEN"'): the text
+    rendering of the benchmark, as opposed to changing text that is already there (text_units)."""
+    return spec["operation"] in ("add", "replace") and bool(TEXT_PAYLOAD.search(spec.get("payload") or ""))
 
 
 def text_units(plan):

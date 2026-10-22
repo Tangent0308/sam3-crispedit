@@ -166,6 +166,43 @@
   - 抽看 40 条通过的样本：37–38 条正确。
   - 记录在第一批运行目录的 `admin/textcheck_calibration/`。
 
+### 2.7 自然度复查（`natcheck.py`，2026-10-22 加入）
+- **为什么加：**
+  - CrispEdit 的添加对是从真实照片里抠掉一个物体做成的：照片是改动后，抠过的图是改动前；
+  - 第一批抽查的 6 条 CrispEdit 添加里有 2 条，改动前的图留有抠图痕迹，审核都放过了：女孩的裙子被抠掉后身体透出背景，拖拉机被抠掉只剩悬空的车轮；
+  - 用这样的数据训练，模型会学成"只在明显缺了东西的地方添加"。
+- **对象：**只查 CrispEdit 添加类（`dataset` 为 crispedit、原类型为 add）。其他来源类型的改动前都是真实照片。
+- **怎么看：**给 27B（thinking low，一次请求两个样本即两票）三张图：
+  - 改动前的整图，红线描出改动区域（各单元 `edited_region` 的并集，即新物体的位置）；
+  - 改动前这块区域的特写：区域框四边各外扩一半，至少占图像长边的四分之一，放大到长边 1024 像素（最多 3 倍）；
+  - 改动后同一位置的特写，只用来说明被抠掉的是什么。
+  - 问改动前的这块区域像不像一张未经处理的照片。提示里列出常见痕迹：
+    - 没有依附的残留部件（车轮、手脚、带子、影子）；
+    - 中空或透明的人和物；
+    - 抹平、模糊、扭曲或拼补的纹理；
+    - 不合场景的空缺。
+  - 同时说明：合乎场景的空地方（墙、地面、天空、桌面、草地）算自然。
+- **怎么判：**两票都说"不自然"才拒收（`REJECT_VOTES = 2`）。导出时拒收阶段记为 `natcheck`，原因 `before_unnatural`；收下的行记录 `naturalness_check`（票数和"自然"票数）。
+- **校准（10-22）：**第一批收下的全部 565 条 CrispEdit 添加：
+  - 判"不自然"的票数为 0、1、2 的分别是 349、127、89 条；
+  - 已知结论的 6 条：2 条坏的都是 2 票；4 条好的 3 条 0 票、1 条 1 票；
+  - 看图：2 票的 15 条里 12 条确有痕迹，3 条在边界；1 票的 10 条约 2 条有轻微痕迹；0 票的 5 条都自然；
+  - 所以 1 票不拒收。按此规则拒收约 16%，第一批的 565 条中 89 条应剔除；
+  - 记录在第二批运行目录的 `admin/natcheck_calibration/`（含 README）。
+
+### 2.8 分批生产（2026-10-22 加入）
+- **排除以前的批次：**`ingest --exclude-runs <以前各批的节点目录…>`（入口脚本里是 `EXTEDIT_EXCLUDE_RUNS`）。
+  - 读这些目录的 `ingest/rows.jsonl`；
+  - 取过的行不再取。整片都是旧行的 CrispEdit 分片不读图片字节，ScaleEdit 按 `sample_id` 跳过；
+  - 旧行的源图计入"同一源图最多 3 条"；
+  - 同一个种子打乱分片的顺序不变，所以必须靠这份排除清单，不能换种子了事。
+- **新物体带字：**添加、替换单元的新物体描述里有引号或 "reading / saying / labeled …" 时，记 `text_payload: true`。这类就是 benchmark 里的"新加或换成带字物体"，训练时可以加权。
+- **重复描述的上限：**`publish --payload-cap N --cap-reference <已发布的数据目录…>`。
+  - 先数已发布目录和本批多目标行里每个新物体描述的次数；
+  - 描述的归一化：小写、单空格、去逗号、去开头的冠词；
+  - 再按 id 的哈希顺序过本批单目标行，超过 N 次的不发布，记入 `rejected.jsonl`，阶段 `publish`、原因 `payload_cap`；
+  - 用途：CrispEdit 的模板句会大量重复，例如 "a wooden bench" 在第一批出现 113 次。
+
 ## 3. 环境
 - **27B 服务：**`requirements/extedit-vllm.txt`（vLLM 0.31.0+cu129，与 benchmark 2.6.0 评审相同）。启动命令：
 
@@ -282,7 +319,7 @@ export EXTEDIT_SCALEEDIT=object_surface_text_editing=3750,building_surface_text_
 
 | 文件 | 内容 |
 |---|---|
-| `manifest_protocol_v2.jsonl` | 单目标记录，字段同 D3：`instruction_spec`、`instruction_ref`、`instruction_noref`、`selection`、`execution_region`、`edited_region`、`mask_semantics`、`flags`；另有 `provenance`、`observed`、`comparable`、`audit`；改字单元另有 `text_check`（复查读到的改动前后的字） |
+| `manifest_protocol_v2.jsonl` | 单目标记录，字段同 D3：`instruction_spec`、`instruction_ref`、`instruction_noref`、`selection`、`execution_region`、`edited_region`、`mask_semantics`、`flags`；另有 `provenance`、`observed`、`comparable`、`audit`、`text_payload`（新物体带字）；改字单元另有 `text_check`（复查读到的改动前后的字）；CrispEdit 添加行另有 `naturalness_check` |
 | `manifest_multi_protocol_v2.jsonl` | 多目标记录，字段同 D4，`units` 逐单元同上 |
 | `tokens.jsonl`、`multi_tokens.jsonl` | 字段同 round-2 的 `v1_tokens.jsonl` / `d4_tokens.jsonl`：`span`、`dec`、`roundtrip`、`size_ok`、`out_diff`、`out_share8` |
 | `rejected.jsonl` | 每条被丢的行：阶段、原因、审核意见 |

@@ -16,6 +16,8 @@ export EXTEDIT_ROOT="${EXTEDIT_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/exp
 # Raw rows per type ON EACH WORKER (0 = every row of the worker's shards).
 export EXTEDIT_CRISPEDIT="${EXTEDIT_CRISPEDIT:-replace=3750,color=2000,remove=1250,add=625}"
 export EXTEDIT_SCALEEDIT="${EXTEDIT_SCALEEDIT:-object_surface_text_editing=3750,building_surface_text_editing=3750,object_replacement=3750,color_change=2000,material_change=0,object_removal=1250,object_addition=625}"
+# Node folders of earlier batches, space-separated: their rows are not taken again (empty: none).
+export EXTEDIT_EXCLUDE_RUNS="${EXTEDIT_EXCLUDE_RUNS:-}"
 # Code at exact commits: the labeling branch, and SAMTokEdit v3 for the SAMTok codec and the CUDA check.
 export EXTEDIT_REPO_URL="${EXTEDIT_REPO_URL:-https://github.com/Tangent0308/sam3-crispedit.git}"
 export EXTEDIT_BRANCH="${EXTEDIT_BRANCH:-extedit-protocol2-labeling}"
@@ -137,7 +139,7 @@ for pass in 1 2; do
   phase "pipeline pass $pass"
   setsid env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO" "$WORK/env-worker/bin/python" -B \
     "$REPO/scripts/extedit_pipeline.py" run --run "$NODE_RUN" --whole-shards --node "$NODE/$EXTEDIT_NNODES" \
-    --crispedit "$EXTEDIT_CRISPEDIT" --scaleedit "$EXTEDIT_SCALEEDIT" \
+    --crispedit "$EXTEDIT_CRISPEDIT" --scaleedit "$EXTEDIT_SCALEEDIT" ${EXTEDIT_EXCLUDE_RUNS:+--exclude-runs $EXTEDIT_EXCLUDE_RUNS} \
     --url "http://127.0.0.1:$PORT/v1/chat/completions" --plan-concurrency 168 --audit-concurrency 112 \
     --segment-devices "${EXTEDIT_SEGMENT_DEVICES:-7,7,7}" --workers 48 --v3-repo "$WORK/v3" \
     >> "$NODE_RUN/pipeline.log" 2>&1 &

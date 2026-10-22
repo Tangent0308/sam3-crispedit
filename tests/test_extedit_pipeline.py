@@ -246,3 +246,63 @@ def test_text_close_ups_keep_the_area_and_enlarge_it():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_text_payload_marks_new_objects_with_writing():
+    from extedit.textcheck import has_text_payload
+    assert has_text_payload({"operation": "add", "payload": 'a wooden sign reading "OPEN"'})
+    assert has_text_payload({"operation": "replace", "payload": "an oval sign reading “Ivy Room”"})
+    assert not has_text_payload({"operation": "replace", "payload": "a children's bicycle"})
+    assert not has_text_payload({"operation": "attribute", "payload": 'reading "X"'})
+
+
+def test_earlier_batches_are_excluded_with_their_source_images(tmp_path):
+    from extedit.sources import load_exclusions
+    (tmp_path / "ingest").mkdir()
+    rows = [{"id": "crispedit-add_00001-000", "source_sha1": "a"}, {"id": "crispedit-add_00001-001", "source_sha1": "a"},
+            {"id": "crispedit-add_00001-000", "source_sha1": "a"}]
+    (tmp_path / "ingest" / "rows.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows) + "{broken")
+    ids, per_image = load_exclusions([tmp_path])
+    assert ids == {"crispedit-add_00001-000", "crispedit-add_00001-001"} and per_image == {"a": 2}
+
+
+def test_naturalness_votes_and_parsing():
+    from extedit import natcheck as nc
+    natural, traces = {"natural": True, "traces": ""}, {"natural": False, "traces": "floating wheels"}
+    assert nc.decide([natural, natural]) == (True, None)
+    assert nc.decide([natural, traces], reject_votes=2) == (True, None)
+    assert nc.decide([natural, traces], reject_votes=1) == (False, "before_unnatural")
+    assert nc.decide([traces, traces]) == (False, "before_unnatural")
+    assert nc.decide([natural]) == (False, "unreadable_answer")
+    assert nc.parse_vote('{"traces": "x", "natural": "false"}') == {"natural": False, "traces": "x"}
+    with pytest.raises(ValueError):
+        nc.parse_vote('{"traces": "x"}')
+    assert nc.needs_check({"dataset": "crispedit", "native_type": "add"})
+    assert not nc.needs_check({"dataset": "scaleedit", "native_type": "object_addition"})
+
+
+def test_naturalness_views_keep_the_area_with_context():
+    from PIL import Image
+    from extedit import natcheck as nc
+    area = np.zeros((600, 800), bool)
+    area[300:340, 500:560] = True
+    box = nc.crop_box(area, (800, 600))
+    assert box[0] <= 500 and box[1] <= 300 and box[2] >= 560 and box[3] >= 340
+    assert box[2] - box[0] >= 200 and box[3] - box[1] >= 200  # at least a quarter of the long side
+    image = Image.new("RGB", (800, 600), (90, 90, 90))
+    full, before, after = nc.views(image, image, area)
+    assert before.size == after.size and max(before.size) <= 1024 and full.size == (800, 600)
+
+
+def test_payload_cap_counts_earlier_batches_and_multi_rows_first():
+    from collections import Counter
+    from extedit import export as ex
+    spec = lambda op, payload: {"operation": op, "payload": payload}
+    singles = [{"id": f"r{k}", "instruction_spec": spec("replace", "A wooden, bench")} for k in range(5)]
+    singles.append({"id": "c", "instruction_spec": spec("attribute", "")})
+    multis = [{"id": "m", "units": [{"instruction_spec": spec("add", "a wooden bench")}]}]
+    assert ex.payload_key(spec("replace", "An  Old, Red Car")) == "old red car"
+    assert ex.payload_key(spec("remove", "")) is None
+    dropped = ex.cap_payloads(singles, multis, Counter({"wooden bench": 1}), cap=3)
+    assert len(dropped) == 4 and "c" not in dropped  # 1 earlier + 1 multi + 1 single = 3
+    assert dropped == ex.cap_payloads(list(reversed(singles)), multis, Counter({"wooden bench": 1}), cap=3)
