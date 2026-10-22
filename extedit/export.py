@@ -47,6 +47,50 @@ def drift_stats(src, tgt, allowed):
             "in_diff": round(float(d[allowed].mean()), 2) if allowed.any() else 0.0}
 
 
+def row_drift(job):
+    """Change of one stored AFTER outside its edit (drift_stats), for a process pool.  job: (run, source image,
+    pasted AFTER, RLEs of S / execution / edited regions, [(paste region RLE, operation)])."""
+    run, source, target, regions, pastes = job
+    src = np.asarray(Image.open(Path(run) / source).convert("RGB"))
+    tgt = np.asarray(Image.open(Path(run) / target).convert("RGB"))
+    allowed = np.zeros(src.shape[:2], bool)
+    for rle in regions:
+        allowed |= mk.decode(rle)
+    for rle, op in pastes:  # the paste band and its soft edge belong to the edit
+        band = max(2, int(PASTE_BAND[op] * min(src.shape[:2]))) + 8
+        allowed |= mk.grow(mk.decode(rle), band)
+    return {"size_ok": tgt.shape == src.shape, **drift_stats(src, tgt, allowed)}
+
+
+def drift_key(job):
+    import hashlib
+    return hashlib.sha1(json.dumps(job[1:], sort_keys=True).encode()).hexdigest()
+
+
+def drifts(jobs, cache_path, workers):
+    """row_drift of every job, in parallel; results are cached by their inputs, so that a second export (the
+    pipeline's second pass) only computes new or changed rows."""
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+    cache = {}
+    if cache_path.exists():
+        for line in open(cache_path):
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            cache[entry["key"]] = entry["drift"]
+    keys = [drift_key(job) for job in jobs]
+    todo = [(k, job) for k, job in zip(keys, jobs) if k not in cache]
+    if todo:
+        with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("fork")) as pool, \
+                open(cache_path, "a") as stream:
+            for (key, _), drift in zip(todo, pool.map(row_drift, [job for _, job in todo], chunksize=16)):
+                cache[key] = drift
+                stream.write(json.dumps({"key": key, "drift": drift}) + "\n")
+    return [cache[k] for k in keys]
+
+
 def unit_record(row_id, unit, seg, gate_unit, audit):
     spec = unit["spec"]
     flags = list(gate_unit.get("flags", [])) + [f"fix:{f}" for f in unit.get("fixes", [])]
@@ -65,13 +109,16 @@ def unit_record(row_id, unit, seg, gate_unit, audit):
             "audit": {k: audit[k] for k in ("passed", "problems")}}
 
 
-def export(run, out=None):
-    """Write final/ (or `out`): manifests, tokens, rejections and summary; return the summary."""
+def export(run, out=None, workers=None):
+    """Write final/ (or `out`): manifests, tokens, rejections and summary; return the summary.  The change of every
+    accepted AFTER outside its edit is measured in `workers` processes (default: up to 48)."""
+    import os
     run = Path(run)
     out = Path(out) if out else run / "final"
     out.mkdir(parents=True, exist_ok=True)
     data = {s: (rows(run) if s == "ingest" else read_stage(run, s)) for s in STAGES}
     singles, multis, tokens, multi_tokens, rejected = [], [], [], [], []
+    accepted = []
     for row_id, row in data["ingest"].items():
         pre, plan = data["precheck"].get(row_id), data["plan"].get(row_id)
         seg, gate, audit = data["segment"].get(row_id), data["gate"].get(row_id), data["audit"].get(row_id)
@@ -108,16 +155,15 @@ def export(run, out=None):
             continue
         units = [unit_record(row_id, u, s, g, a) for u, s, g, a in
                  zip(plan["plan"]["units"], seg["units"], gate["units"], audit["units"])]
-        src = np.asarray(Image.open(run / row["source_image"]).convert("RGB"))
-        tgt = np.asarray(Image.open(run / gate["target_pasted"]).convert("RGB"))
-        allowed = np.zeros(src.shape[:2], bool)
-        for u in units:
-            for key in ("selection", "execution_region", "edited_region"):
-                allowed |= mk.decode(u[key])
-        for u, g in zip(plan["plan"]["units"], gate["units"]):  # the paste band and its soft edge belong to the edit
-            band = max(2, int(PASTE_BAND[u["spec"]["operation"]] * min(src.shape[:2]))) + 8
-            allowed |= mk.grow(mk.decode(g["paste_region"]), band)
-        drift = {"size_ok": tgt.shape == src.shape, **drift_stats(src, tgt, allowed)}
+        regions = [{k: u[key][k] for k in ("rle_size", "rle_counts")} for u in units
+                   for key in ("selection", "execution_region", "edited_region")]
+        pastes = [({k: g["paste_region"][k] for k in ("rle_size", "rle_counts")}, u["spec"]["operation"])
+                  for u, g in zip(plan["plan"]["units"], gate["units"])]
+        accepted.append((row_id, row, plan, seg, gate, units,
+                         (str(run), row["source_image"], gate["target_pasted"], regions, pastes)))
+    workers = workers or min(48, os.cpu_count() or 1)
+    measured = drifts([a[-1] for a in accepted], out / "drift_cache.jsonl", workers) if accepted else []
+    for (row_id, row, plan, seg, gate, units, _), drift in zip(accepted, measured):
         common = {"source_image": row["source_image"], "target_image": gate["target_pasted"], "id": row_id,
                   "dataset": row["dataset"], "type_before": row["native_type"], "instruction_before": row["instruction"],
                   "observed": plan["plan"]["observed"], "treatment": gate["treatment"], "provenance": row["provenance"],
