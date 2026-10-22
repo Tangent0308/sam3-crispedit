@@ -9,7 +9,7 @@
 ## 1. 一页摘要
 - **机器：**4 个 worker × 8 卡 H100 80G，互相独立，没有节点间通信。
   - 每个 worker 取打乱后分片的 1/4：每台的打乱顺序相同，轮流分配，互不重叠；
-  - GPU 0–6 跑 Qwen3.8-27B（vLLM 0.31，数据并行 7 份），GPU 7 跑 SAM3 + SAMTok；
+  - GPU 0–6 跑 Qwen3.8-27B（vLLM 0.31，数据并行 7 份），GPU 7 上跑 3 个 SAM3 + SAMTok 进程（`EXTEDIT_SEGMENT_DEVICES`，默认 `7,7,7`）；
   - 各步流式并行：取数 → 像素预检 → 27B 规划 → 分割与 token → 把关与贴回 → 27B 审核 → 导出。
 - **续跑：**用同一个 `EXTEDIT_RUN_ID` 重新提交（或只重启某个 worker）即可从中断处继续。已经完成的 worker 会直接退出。
 - **预计：**
@@ -80,8 +80,8 @@ export EXTEDIT_SCALEEDIT=object_surface_text_editing=3750,building_surface_text_
 # after editing the run settings; docs/EXTEDIT_PROTOCOL2.md section 4.4 has the ready-to-paste settings.
 #
 # Workers are independent: worker k takes every n-th shard of the shuffled shard lists (the same order on every
-# worker), labels its rows with the streaming pipeline (Qwen3.8-27B data parallel on GPUs 0-6, SAM3 + SAMTok on
-# GPU 7) and exports <run>/node<k>/final.  A restarted worker resumes where it stopped: every stage skips the rows it
+# worker), labels its rows with the streaming pipeline (Qwen3.8-27B data parallel on GPUs 0-6, SAM3 + SAMTok workers
+# on GPU 7) and exports <run>/node<k>/final.  A restarted worker resumes where it stopped: every stage skips the rows it
 # already wrote.  Merging the nodes and publishing to datasets/ is a separate step after review (publish).
 exec 2>&1  # ARNOLD's log page shows stdout; route every shell error there as well.
 
@@ -103,6 +103,9 @@ export EXTEDIT_V3_COMMIT="${EXTEDIT_V3_COMMIT:-31fb966}"
 export EXTEDIT_MODEL="${EXTEDIT_MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B}"
 # Number of workers; 1 runs the same pipeline on a single 8-GPU machine.
 export EXTEDIT_NNODES="${EXTEDIT_NNODES:-4}"
+# SAM3 + SAMTok workers, one per entry, all on GPU 7 by default: one worker is CPU-bound (12 cores, GPU 7 about 55 %
+# busy) and falls behind the 27B server; three share the GPU (about 19 GB each).
+export EXTEDIT_SEGMENT_DEVICES="${EXTEDIT_SEGMENT_DEVICES:-7,7,7}"
 
 # ===== ARNOLD checks =====
 : "${ARNOLD_WORKER_NUM:?ARNOLD must inject ARNOLD_WORKER_NUM}"
@@ -213,7 +216,8 @@ for pass in 1 2; do
     "$REPO/scripts/extedit_pipeline.py" run --run "$NODE_RUN" --whole-shards --node "$NODE/$EXTEDIT_NNODES" \
     --crispedit "$EXTEDIT_CRISPEDIT" --scaleedit "$EXTEDIT_SCALEEDIT" \
     --url "http://127.0.0.1:$PORT/v1/chat/completions" --plan-concurrency 168 --audit-concurrency 112 \
-    --segment-devices 7 --workers 48 --v3-repo "$WORK/v3" >> "$NODE_RUN/pipeline.log" 2>&1 &
+    --segment-devices "${EXTEDIT_SEGMENT_DEVICES:-7,7,7}" --workers 48 --v3-repo "$WORK/v3" \
+    >> "$NODE_RUN/pipeline.log" 2>&1 &
   PIPELINE=$!
   while kill -0 "$PIPELINE" 2>/dev/null; do  # the pipeline needs the server: stop at once if it dies
     if ! kill -0 "$SERVER" 2>/dev/null; then
@@ -330,6 +334,7 @@ PYTHONDONTWRITEBYTECODE=1 <worker env>/bin/python -B scripts/extedit_pipeline.py
 | 配额 | `EXTEDIT_CRISPEDIT`、`EXTEDIT_SCALEEDIT`，按每个 worker 计，0 表示取尽 |
 | 本地盘位置 | 工作目录固定在 `/tmp/extedit-<run id>-node<k>/`；`EXTEDIT_LOCAL_MODELS` 改模型目录，`UV_CACHE_DIR` 改 uv 缓存 |
 | 27B 模型 | `EXTEDIT_MODEL` |
+| 分割进程 | `EXTEDIT_SEGMENT_DEVICES`，每项一个进程，写 GPU 编号，默认 `7,7,7`；单个进程受 CPU 限制，GPU 7 只用到约 55%，跟不上 27B（本机 10-22 实测：规划每分钟 96 行，单个分割进程 55 行） |
 
 ## 8. 这份入口验证到了什么程度（2026-10-21，开发机）
 - **环境：**用全新的 uv 缓存，按与集群相同的源（bytedpypi、PyTorch cu129 源、GitHub release）从零装好两个环境并通过校验，分别用时 48 秒和 18 秒。

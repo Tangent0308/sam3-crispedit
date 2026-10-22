@@ -3,8 +3,8 @@
 # after editing the run settings; docs/EXTEDIT_PROTOCOL2.md section 4.4 has the ready-to-paste settings.
 #
 # Workers are independent: worker k takes every n-th shard of the shuffled shard lists (the same order on every
-# worker), labels its rows with the streaming pipeline (Qwen3.8-27B data parallel on GPUs 0-6, SAM3 + SAMTok on
-# GPU 7) and exports <run>/node<k>/final.  A restarted worker resumes where it stopped: every stage skips the rows it
+# worker), labels its rows with the streaming pipeline (Qwen3.8-27B data parallel on GPUs 0-6, SAM3 + SAMTok workers
+# on GPU 7) and exports <run>/node<k>/final.  A restarted worker resumes where it stopped: every stage skips the rows it
 # already wrote.  Merging the nodes and publishing to datasets/ is a separate step after review (publish).
 exec 2>&1  # ARNOLD's log page shows stdout; route every shell error there as well.
 
@@ -26,6 +26,9 @@ export EXTEDIT_V3_COMMIT="${EXTEDIT_V3_COMMIT:-31fb966}"
 export EXTEDIT_MODEL="${EXTEDIT_MODEL:-/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B}"
 # Number of workers; 1 runs the same pipeline on a single 8-GPU machine.
 export EXTEDIT_NNODES="${EXTEDIT_NNODES:-4}"
+# SAM3 + SAMTok workers, one per entry, all on GPU 7 by default: one worker is CPU-bound (12 cores, GPU 7 about 55 %
+# busy) and falls behind the 27B server; three share the GPU (about 19 GB each).
+export EXTEDIT_SEGMENT_DEVICES="${EXTEDIT_SEGMENT_DEVICES:-7,7,7}"
 
 # ===== ARNOLD checks =====
 : "${ARNOLD_WORKER_NUM:?ARNOLD must inject ARNOLD_WORKER_NUM}"
@@ -136,7 +139,8 @@ for pass in 1 2; do
     "$REPO/scripts/extedit_pipeline.py" run --run "$NODE_RUN" --whole-shards --node "$NODE/$EXTEDIT_NNODES" \
     --crispedit "$EXTEDIT_CRISPEDIT" --scaleedit "$EXTEDIT_SCALEEDIT" \
     --url "http://127.0.0.1:$PORT/v1/chat/completions" --plan-concurrency 168 --audit-concurrency 112 \
-    --segment-devices 7 --workers 48 --v3-repo "$WORK/v3" >> "$NODE_RUN/pipeline.log" 2>&1 &
+    --segment-devices "${EXTEDIT_SEGMENT_DEVICES:-7,7,7}" --workers 48 --v3-repo "$WORK/v3" \
+    >> "$NODE_RUN/pipeline.log" 2>&1 &
   PIPELINE=$!
   while kill -0 "$PIPELINE" 2>/dev/null; do  # the pipeline needs the server: stop at once if it dies
     if ! kill -0 "$SERVER" 2>/dev/null; then
