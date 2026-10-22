@@ -3,14 +3,14 @@
 把 CrispEdit-2M、ScaleEdit 的原始编辑对打标成协议 2.0 训练数据（格式同 D3 / D4）的正式四机入口。方法、规则与验证结果见 [EXTEDIT_PROTOCOL2.md](EXTEDIT_PROTOCOL2.md)。
 
 - **当前任务：**第一批 10 万个原始对（用户 2026-10-21 确认）。
-- **代码：**本分支 commit `061840a55d78c32dd3798855d7bbed25e45cc46d`（10-22 起分割改为 3 个进程、导出并行；之前的 `73cac43` 只有 1 个分割进程）；之后的提交只改了文档。
+- **代码：**本分支 commit `094164a2a434b7ea2da8d11c3b293f889df8e96f`。之前的版本：`061840a` 没有文字复查，`73cac43` 只有 1 个分割进程。之后的提交只改了文档。
 - **v3：**SAMTok codec 与 CUDA 检查用 SAMTokEdit v3 的 `31fb96605f68acb1254ec2e6b0e9ed22761093dd`。
 
 ## 1. 一页摘要
 - **机器：**4 个 worker × 8 卡 H100 80G，互相独立，没有节点间通信。
   - 每个 worker 取打乱后分片的 1/4：每台的打乱顺序相同，轮流分配，互不重叠；
   - GPU 0–6 跑 Qwen3.8-27B（vLLM 0.31，数据并行 7 份），GPU 7 上跑 3 个 SAM3 + SAMTok 进程（`EXTEDIT_SEGMENT_DEVICES`，默认 `7,7,7`）；
-  - 各步流式并行：取数 → 像素预检 → 27B 规划 → 分割与 token → 把关与贴回 → 27B 审核 → 导出。
+  - 各步流式并行：取数 → 像素预检 → 27B 规划 → 分割与 token → 把关与贴回 → 27B 审核 → 27B 文字复查（改字单元）→ 导出。
 - **续跑：**用同一个 `EXTEDIT_RUN_ID` 重新提交（或只重启某个 worker）即可从中断处继续。已经完成的 worker 会直接退出。
 - **预计：**
   - 每个 worker 约 2.5 万个原始对、5–8 小时，另加装环境和拷模型约 15 分钟；
@@ -41,7 +41,7 @@
 # ===== 运行设置 =====
 export EXTEDIT_RUN_ID=extedit_protocol2_100k_20261021
 export EXTEDIT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs
-export EXTEDIT_COMMIT=061840a55d78c32dd3798855d7bbed25e45cc46d
+export EXTEDIT_COMMIT=094164a2a434b7ea2da8d11c3b293f889df8e96f
 export EXTEDIT_V3_COMMIT=31fb96605f68acb1254ec2e6b0e9ed22761093dd
 export EXTEDIT_CRISPEDIT=replace=3750,color=2000,remove=1250,add=625
 export EXTEDIT_SCALEEDIT=object_surface_text_editing=3750,building_surface_text_editing=3750,object_replacement=3750,color_change=2000,material_change=0,object_removal=1250,object_addition=625
@@ -245,7 +245,7 @@ echo "[$(date -u +%FT%TZ)] node $NODE: done"
 # ===== 运行设置：四机冒烟 =====
 export EXTEDIT_RUN_ID=extedit_smoke_20261021
 export EXTEDIT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/04_current_validation
-export EXTEDIT_COMMIT=061840a55d78c32dd3798855d7bbed25e45cc46d
+export EXTEDIT_COMMIT=094164a2a434b7ea2da8d11c3b293f889df8e96f
 export EXTEDIT_V3_COMMIT=31fb96605f68acb1254ec2e6b0e9ed22761093dd
 export EXTEDIT_CRISPEDIT=replace=6,color=3,remove=3,add=2
 export EXTEDIT_SCALEEDIT=object_surface_text_editing=4,building_surface_text_editing=4,object_replacement=6,color_change=3,material_change=2,object_removal=3,object_addition=2
@@ -272,7 +272,7 @@ export EXTEDIT_SCALEEDIT=object_surface_text_editing=4,building_surface_text_edi
 | `node<k>/vllm.attempt<N>.log` | 27B 服务日志 |
 | `node<k>/pipeline.log` | 全流程汇总日志 |
 | `node<k>/logs/<步骤>.log` | 各步日志 |
-| `node<k>/ingest/`、`precheck/`、`plan/`、`segment/`、`gate/`、`audit/` | 各步记录；每步结束写 `DONE` |
+| `node<k>/ingest/`、`precheck/`、`plan/`、`segment/`、`gate/`、`audit/`、`textcheck/` | 各步记录；每步结束写 `DONE` |
 | `node<k>/images/`、`node<k>/pasted/` | 解出的原图、贴回后的 AFTER |
 | `node<k>/final/` | 导出结果（字段同 D3 / D4）、token 缓存、拒收清单、`summary.json` |
 | `node<k>/status.txt`、`node<k>/SUCCESS.json` | 完成时写出 |
@@ -297,7 +297,7 @@ PYTHONDONTWRITEBYTECODE=1 <worker env>/bin/python -B scripts/extedit_pipeline.py
 | `environment` | 装两个环境，检查 8 张卡 | bytedpypi、PyTorch 源、GitHub release 是否可达；`bootstrap/node<k>-cuda/` |
 | `model` | 把 27B 拷到本地盘（拷到一半重启时只补缺的文件） | 本地盘空间 |
 | `server` | 起 27B 服务，最多等 30 分钟 | `node<k>/vllm.attempt<N>.log` |
-| `pipeline pass 1` / `pipeline pass 2` | 流式全流程；第二轮重试调用失败的行 | `node<k>/pipeline.log`、`node<k>/logs/*.log` |
+| `pipeline pass 1` / `pipeline pass 2` | 流式全流程（含文字复查）；第二轮重试调用失败的行 | `node<k>/pipeline.log`、`node<k>/logs/*.log` |
 | `finished` | 写 `status.txt`、`SUCCESS.json`，关服务 | — |
 
 ### 5.4 失败与续跑
