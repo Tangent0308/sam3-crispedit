@@ -1,6 +1,8 @@
 # extedit：CrispEdit / ScaleEdit 协议 2.0 打标管线
 
-状态：**第一批量产完成并发布**（2026-10-22）：10 万个原始对，收下 38,435 条，发布在 `datasets/ExtEdit_Protocol2_20261021/`，见 §6.7。计划与旧流程的逐段核查见 SAMTokEdit v3 仓库 `docs/07_SAMTokEdit_Qwen21_外部编辑数据打标管线.md`。
+状态（2026-10-22）：
+- **第一批已发布：**10 万个原始对，加自然度复查后收下 38,346 条，在 `datasets/ExtEdit_Protocol2_20261021/`，见 §6.7；
+- **第二批在跑：**扩到约 20 万个单元，见 §6.8。计划与旧流程的逐段核查见 SAMTokEdit v3 仓库 `docs/07_SAMTokEdit_Qwen21_外部编辑数据打标管线.md`。
 
 路径记号：
 - `datasets/…` 指 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/…`；
@@ -440,12 +442,16 @@ export EXTEDIT_SCALEEDIT=object_surface_text_editing=3750,building_surface_text_
   - token 往返全部 ≥ 0.5，编辑区域外与原图逐像素相同。
 - **抽查：**按类型分层随机抽 100 条，93 条可用：
   - 写字 30 条里 4 条错：字和指令不一致，或没改；
-  - CrispEdit 添加 6 条里 2 条改动前的图不自然：这类数据是从真实照片里抠掉一个物体做成的，会留下透出背景的身体、悬空的车轮。用户 10-22 决定添加类不复查；
+  - CrispEdit 添加 6 条里 2 条改动前的图不自然：这类数据是从真实照片里抠掉一个物体做成的，会留下透出背景的身体、悬空的车轮。用户 10-22 先决定不复查，扩量时又确认加自然度复查（§2.7），第一批一并补上；
   - 替换 1 条目标外多改了一块。
 - **文字复查（§2.6）：**
   - 14,130 行（14,135 个改字单元）用时 6 分钟，拒收 1,887 行（13.4%）；
   - 拒收原因：字和指令不一致 1,765、没改动 109、旧字残留 12、模型回答无法解析 1。
 - **最终：**38,435 条（单目标 36,516、多目标 1,919，共 40,884 个单元），占原始对 38.4%；发布在 `datasets/ExtEdit_Protocol2_20261021/`（107 GB，含 README）。
+- **10-22 补自然度复查（§2.7）：**
+  - CrispEdit 添加 565 条剔除 89 条，重新导出并重新发布；
+  - 现为 38,346 条：单目标 36,430、多目标 1,916，共 40,791 个单元。其中添加 1,304 个、改属性 10,986 个、删除 3,858 个，其余不变；
+  - 下表是复查前的数字。
 
   | 类型 | 原始对 | 收下 | 产量 |
   |---|---:|---:|---:|
@@ -484,8 +490,25 @@ export EXTEDIT_SCALEEDIT=object_surface_text_editing=3750,building_surface_text_
 - **记录位置：**运行目录下：
   - `node0/final/`：最终导出；
   - `node0/final_before_textcheck_20261022/`：文字复查前的导出；
+  - `node0/natcheck/`、`node0/final_before_natcheck_20261022/`：自然度复查记录、复查前的导出；
   - `admin/qa_1022/`：抽查拼图；
   - `admin/textcheck_calibration/`：复查校准。
+
+### 6.8 第二批量产（扩到约 20 万个单元，本机 8 卡，2026-10-22 起）
+- **计划：**用户 10-22 确认配比，依据与估算见 SAMTokEdit v3 仓库文档 07 §12。
+  - 本地剩下的原始对全部用上：ScaleEdit 物体替换、删除、添加、改色，CrispEdit replace、remove、add；CrispEdit color 取 2.43 万；
+  - 写字不再加，改材质已用完；
+  - CrispEdit add 先补下上游剩下的 512 个分片：130,663 行，0 错误，10-22 18:26 下完。
+  - 合计约 54.5 万个原始对，预计约 3.3 天。
+- **代码：**`a3c9a4d`，新增自然度复查（§2.7）、排除第一批、新物体带字标记、发布时的重复描述上限（§2.8）。
+- **冒烟：**`VAL/smoke_batch2_20261022/`，1,250 个原始对，各类型配额按比例取。
+  - 收下 390 条；各类型产量与第一批相近：CrispEdit add 22%（复查拒收 8/74）、replace 35%，ScaleEdit 删除 48%、替换 43%；
+  - 与第一批没有重叠，同一源图累计不超过 3 条；
+  - 发布测试：在第一批基础上限 50 次，拒掉 3 条（"a modern glass skyscraper" 两条、"a red sports car" 一条）。
+- **运行：**
+  - 运行目录 `experiments2/SAMTokEdit/data_pipeline/02_production_runs/extedit_protocol2_batch2_local8_20261022/`，启动脚本 `launch_local8.sh`，见该目录 README；
+  - 10-22 18:38 UTC 启动，18:44 进入流水线；
+  - 监督：`admin/supervise.sh` 每 2 分钟一次，`admin/health.py` 每 2 小时一次。
 
 ## 7. 已知限制
 - **大片表面上的 add：**天空、墙面、水面上的 add，锚点被切成一块没有边界的区域，SAMTok 难以还原，往返 IoU 常 < 0.5，这些单元不收。D3 有同样的问题。add 产量 17%–36%。
