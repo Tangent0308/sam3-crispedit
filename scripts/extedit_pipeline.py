@@ -131,7 +131,7 @@ def cmd_ingest(args):
     bench = sources.benchmark_index() if not args.no_benchmark_check else None
     node = tuple(int(v) for v in args.node.split("/"))
     counts = sources.ingest(run, quota(args.crispedit), quota(args.scaleedit), seed=args.seed, benchmark=bench,
-                            whole_shards=args.whole_shards, node=node)
+                            whole_shards=args.whole_shards, node=node, exclude_runs=args.exclude_runs)
     log_config(run, "ingest", args)
     print(json.dumps(counts, indent=1))
 
@@ -307,6 +307,43 @@ def cmd_textcheck(args):
     llm.mark_done(run / "textcheck")
     log_config(run, "textcheck", args)
 
+def cmd_natcheck(args):
+    """Naturalness check of the BEFORE image of the CrispEdit add rows that passed the audit (extedit/natcheck)."""
+    import aiohttp
+    from extedit import natcheck as nc
+    run = Path(args.run)
+    (run / "natcheck").mkdir(exist_ok=True)
+    rows, gates, audits = Rows(run), Stage(run, "gate"), Stage(run, "audit")
+    seen = set(ex.read_stage(run, "natcheck"))
+    pool = views_pool(args.view_workers)
+
+    def new_jobs():
+        rows.update()
+        gates.fresh()
+        audits.fresh()
+        jobs = [{"id": i} for i, a in audits.records.items()
+                if i not in seen and all(u.get("passed") is True for u in a["units"])
+                and i in gates.records and i in rows.rows and nc.needs_check(rows.rows[i])]
+        seen.update(j["id"] for j in jobs)
+        return jobs
+
+    async def main():
+        timeout = aiohttp.ClientTimeout(total=3600)
+        connector = aiohttp.TCPConnector(limit=args.concurrency + 8)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            client = llm.Client(session, args.url, args.model)
+
+            async def worker(job):
+                row_id = job["id"]
+                parts = await asyncio.get_running_loop().run_in_executor(
+                    pool, nc.request, str(run), rows.rows[row_id], gates.records[row_id])
+                return await nc.check_row(client, row_id, parts)
+            await llm.stream_jobs(new_jobs, worker, args.concurrency, run / "natcheck" / "records.jsonl",
+                                  upstream_done=audits.done if args.follow else None, poll=POLL)
+    asyncio.run(main())
+    llm.mark_done(run / "natcheck")
+    log_config(run, "natcheck", args)
+
 # ---------------------------------------------------------------- segment
 
 
@@ -416,7 +453,8 @@ def cmd_run(args):
     if not llm.is_done(run / "ingest"):
         start("ingest", ["ingest", "--run", str(run), "--crispedit", args.crispedit, "--scaleedit", args.scaleedit,
                          "--seed", str(args.seed), "--node", args.node]
-              + (["--whole-shards"] if args.whole_shards else []))
+              + (["--whole-shards"] if args.whole_shards else [])
+              + (["--exclude-runs", *args.exclude_runs] if args.exclude_runs else []))
     start("precheck", ["precheck", "--run", str(run), "--workers", str(args.workers), "--follow"])
     start("plan", ["plan", "--run", str(run), "--url", args.url, "--concurrency", str(args.plan_concurrency),
                    "--follow"])
@@ -428,6 +466,7 @@ def cmd_run(args):
     start("audit", ["audit", "--run", str(run), "--url", args.url, "--concurrency", str(args.audit_concurrency),
                     "--votes", str(args.votes), "--follow"])
     start("textcheck", ["textcheck", "--run", str(run), "--url", args.url, "--concurrency", "64", "--follow"])
+    start("natcheck", ["natcheck", "--run", str(run), "--url", args.url, "--concurrency", "48", "--follow"])
     started = time.time()
     failed = []
     for name, proc in procs:
@@ -456,7 +495,7 @@ def cmd_status(args):
     total = {}
     for run in map(Path, args.runs):
         counts = {"ingest": len(ex.rows(run)) if (run / "ingest" / "rows.jsonl").exists() else 0}
-        for stage in ("precheck", "plan", "segment", "gate", "audit", "textcheck"):
+        for stage in ("precheck", "plan", "segment", "gate", "audit", "textcheck", "natcheck"):
             records = ex.read_stage(run, stage) if (run / stage).exists() else {}
             counts[stage] = len(records)
             if stage == "precheck":
@@ -465,8 +504,8 @@ def cmd_status(args):
                 counts["gate_passed"] = sum(r.get("status") == "passed" for r in records.values())
             if stage == "audit":
                 counts["audit_passed"] = sum(all(u.get("passed") is True for u in r["units"]) for r in records.values())
-            if stage == "textcheck":
-                counts["textcheck_passed"] = sum(r.get("passed") is True for r in records.values())
+            if stage in ("textcheck", "natcheck"):
+                counts[stage + "_passed"] = sum(r.get("passed") is True for r in records.values())
             if llm.is_done(run / stage):
                 counts[stage + "_done"] = True
         counts["finished"] = (run / "final" / "summary.json").exists()
@@ -479,7 +518,7 @@ def cmd_status(args):
 
 
 def cmd_publish(args):
-    total = ex.publish(args.runs, args.out)
+    total = ex.publish(args.runs, args.out, payload_cap=args.payload_cap, cap_reference=args.cap_reference)
     print(json.dumps({k: v for k, v in total.items() if k != "runs"}, indent=1))
 
 
@@ -505,13 +544,15 @@ def main():
     s.add_argument("--whole-shards", action="store_true", help="production: read whole shards in order")
     s.add_argument("--node", default="0/1", help="k/n: this node takes every n-th shard starting at k")
     s.add_argument("--no-benchmark-check", action="store_true")
+    s.add_argument("--exclude-runs", nargs="*", default=[], help="run folders of earlier batches: their rows are skipped")
     s.set_defaults(func=cmd_ingest)
     s = sub.add_parser("precheck")
     s.add_argument("--run", required=True)
     s.add_argument("--workers", type=int, default=32)
     s.add_argument("--follow", action="store_true")
     s.set_defaults(func=cmd_precheck)
-    for name, func in (("plan", cmd_plan), ("audit", cmd_audit), ("textcheck", cmd_textcheck)):
+    for name, func in (("plan", cmd_plan), ("audit", cmd_audit), ("textcheck", cmd_textcheck),
+                       ("natcheck", cmd_natcheck)):
         s = sub.add_parser(name)
         s.add_argument("--run", required=True)
         s.add_argument("--url", default="http://127.0.0.1:8000/v1/chat/completions")
@@ -544,6 +585,7 @@ def main():
     s.add_argument("--seed", type=int, default=20261020)
     s.add_argument("--whole-shards", action="store_true")
     s.add_argument("--node", default="0/1")
+    s.add_argument("--exclude-runs", nargs="*", default=[])
     s.add_argument("--url", default="http://127.0.0.1:8000/v1/chat/completions")
     s.add_argument("--plan-concurrency", type=int, default=160)
     s.add_argument("--audit-concurrency", type=int, default=96)
@@ -563,6 +605,9 @@ def main():
     s = sub.add_parser("publish", help="merge the final/ of several runs into one dataset folder")
     s.add_argument("--runs", nargs="+", required=True)
     s.add_argument("--out", required=True)
+    s.add_argument("--payload-cap", type=int, default=0,
+                   help="at most this many uses of one add / replace payload (0: no cap)")
+    s.add_argument("--cap-reference", nargs="*", default=[], help="published dataset folders counted first")
     s.set_defaults(func=cmd_publish)
     s = sub.add_parser("review")
     s.add_argument("--run", required=True)
