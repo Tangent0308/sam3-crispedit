@@ -3,7 +3,7 @@
 把 CrispEdit-2M、ScaleEdit 的原始编辑对打标成协议 2.0 训练数据（格式同 D3 / D4）的正式四机入口。方法、规则与验证结果见 [EXTEDIT_PROTOCOL2.md](EXTEDIT_PROTOCOL2.md)。
 
 - **当前任务：**第一批 10 万个原始对（用户 2026-10-21 确认）。
-- **代码：**本分支 commit `73cac437c37cc38198279e3bc6357b1b373b9847`；之后的提交只加了文档。
+- **代码：**本分支 commit `aad18e332075397f120a5255cfa3e37085e7a784`（10-22 起分割改为 3 个进程；之前的 `73cac43` 只有 1 个）；之后的提交只改了文档。
 - **v3：**SAMTok codec 与 CUDA 检查用 SAMTokEdit v3 的 `31fb96605f68acb1254ec2e6b0e9ed22761093dd`。
 
 ## 1. 一页摘要
@@ -41,7 +41,7 @@
 # ===== 运行设置 =====
 export EXTEDIT_RUN_ID=extedit_protocol2_100k_20261021
 export EXTEDIT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs
-export EXTEDIT_COMMIT=73cac437c37cc38198279e3bc6357b1b373b9847
+export EXTEDIT_COMMIT=aad18e332075397f120a5255cfa3e37085e7a784
 export EXTEDIT_V3_COMMIT=31fb96605f68acb1254ec2e6b0e9ed22761093dd
 export EXTEDIT_CRISPEDIT=replace=3750,color=2000,remove=1250,add=625
 export EXTEDIT_SCALEEDIT=object_surface_text_editing=3750,building_surface_text_editing=3750,object_replacement=3750,color_change=2000,material_change=0,object_removal=1250,object_addition=625
@@ -245,7 +245,7 @@ echo "[$(date -u +%FT%TZ)] node $NODE: done"
 # ===== 运行设置：四机冒烟 =====
 export EXTEDIT_RUN_ID=extedit_smoke_20261021
 export EXTEDIT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/04_current_validation
-export EXTEDIT_COMMIT=73cac437c37cc38198279e3bc6357b1b373b9847
+export EXTEDIT_COMMIT=aad18e332075397f120a5255cfa3e37085e7a784
 export EXTEDIT_V3_COMMIT=31fb96605f68acb1254ec2e6b0e9ed22761093dd
 export EXTEDIT_CRISPEDIT=replace=6,color=3,remove=3,add=2
 export EXTEDIT_SCALEEDIT=object_surface_text_editing=4,building_surface_text_editing=4,object_replacement=6,color_change=3,material_change=2,object_removal=3,object_addition=2
