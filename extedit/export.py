@@ -20,8 +20,9 @@ from . import instruction_protocol as ip
 from . import masks as mk
 from . import views as vw
 from .gate import PASTE_BAND
+from .textcheck import text_units
 
-STAGES = ("ingest", "precheck", "plan", "segment", "gate", "audit")
+STAGES = ("ingest", "precheck", "plan", "segment", "gate", "audit", "textcheck")
 
 
 def read_stage(run, stage):
@@ -91,7 +92,7 @@ def drifts(jobs, cache_path, workers):
     return [cache[k] for k in keys]
 
 
-def unit_record(row_id, unit, seg, gate_unit, audit):
+def unit_record(row_id, unit, seg, gate_unit, audit, text_check=None):
     spec = unit["spec"]
     flags = list(gate_unit.get("flags", [])) + [f"fix:{f}" for f in unit.get("fixes", [])]
     selection = {"source": seg.get("source", "sam3"), **seg["selection"],
@@ -106,14 +107,18 @@ def unit_record(row_id, unit, seg, gate_unit, audit):
             "instruction_protocol_version": ip.VERSION, "adapter_version": PIPELINE_VERSION,
             "instruction_noref": audit["instruction_noref"], "noref_ineligible": audit["noref_ineligible"],
             "protocol_v2_change": None, "comparable": unit.get("comparable", False),
-            "audit": {k: audit[k] for k in ("passed", "problems")}}
+            "audit": {k: audit[k] for k in ("passed", "problems")},
+            **({"text_check": {"read_after": text_check["after"], "read_before": text_check["before"]}}
+               if text_check else {})}
 
 
 def export(run, out=None, workers=None):
     """Write final/ (or `out`): manifests, tokens, rejections and summary; return the summary.  The change of every
-    accepted AFTER outside its edit is measured in `workers` processes (default: up to 48)."""
+    accepted AFTER outside its edit is measured in `workers` processes (default: up to 48).  When the run has a
+    textcheck stage, a row with a text-change unit is kept only if its text check passed."""
     import os
     run = Path(run)
+    check_text = (run / "textcheck").is_dir()
     out = Path(out) if out else run / "final"
     out.mkdir(parents=True, exist_ok=True)
     data = {s: (rows(run) if s == "ingest" else read_stage(run, s)) for s in STAGES}
@@ -153,8 +158,21 @@ def export(run, out=None, workers=None):
             rejected.append({**base, "stage": "audit", "reason": ",".join(keys),
                              "problems": " || ".join(a.get("problems", "") for a in failed)})
             continue
-        units = [unit_record(row_id, u, s, g, a) for u, s, g, a in
-                 zip(plan["plan"]["units"], seg["units"], gate["units"], audit["units"])]
+        checked = {}
+        if check_text and text_units(plan["plan"]):
+            text = data["textcheck"].get(row_id)
+            if text is None:
+                rejected.append({**base, "stage": "textcheck", "reason": "missing"})
+                continue
+            if not text["passed"]:
+                bad = [u for u in text["units"] if not u["passed"]]
+                rejected.append({**base, "stage": "textcheck", "reason": ",".join(sorted({u["reason"] for u in bad})),
+                                 "problems": " || ".join(f'asked "{u["expected"]}", read "{u.get("after", "")}"'
+                                                         for u in bad)})
+                continue
+            checked = {u["unit"]: u for u in text["units"]}
+        units = [unit_record(row_id, u, s, g, a, checked.get(k)) for k, (u, s, g, a) in
+                 enumerate(zip(plan["plan"]["units"], seg["units"], gate["units"], audit["units"]))]
         regions = [{k: u[key][k] for k in ("rle_size", "rle_counts")} for u in units
                    for key in ("selection", "execution_region", "edited_region")]
         pastes = [({k: g["paste_region"][k] for k in ("rle_size", "rle_counts")}, u["spec"]["operation"])

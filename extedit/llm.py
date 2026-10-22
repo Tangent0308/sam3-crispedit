@@ -12,8 +12,9 @@ from pathlib import Path
 
 MODEL = "/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B"
 THINKING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}
+GREEDY = {"temperature": 0.0}  # reading text back: the most likely reading, the same on every run
 # call: (thinking, reasoning effort, max output tokens)
-CALLS = {"plan": (True, "low", 12000), "audit": (True, "low", 8000)}
+CALLS = {"plan": (True, "low", 12000), "audit": (True, "low", 8000), "ocr": (False, None, 400)}
 TRANSPORT_ATTEMPTS = 6
 
 
@@ -52,7 +53,7 @@ class Client:
         body = {"model": self.model, "max_tokens": max_tokens, "seed": seed, "n": n,
                 "messages": [{"role": "user", "content": content}],
                 "chat_template_kwargs": {"enable_thinking": thinking, **({"reasoning_effort": effort} if effort else {})},
-                **THINKING}
+                **(THINKING if thinking else GREEDY)}
         error = None
         for attempt in range(TRANSPORT_ATTEMPTS):
             try:
