@@ -201,6 +201,16 @@ def test_four_node_doc_embeds_the_entry_script_verbatim():
     assert block + "\n" == (repo / "scripts" / "extedit_bootstrap_arnold.sh").read_text()
 
 
+def test_four_node_doc_current_task_block_is_settings_plus_the_entry_script():
+    repo = ROOT.parent
+    doc = (repo / "docs" / "EXTEDIT_4NODE.md").read_text()
+    block = doc.split("<!-- code: §0 settings + scripts/extedit_bootstrap_arnold.sh -->", 1)[1]
+    block = block.split("```bash\n", 1)[1].split("\n```", 1)[0]
+    settings, script = block.split("\n\n#!/usr/bin/env bash\n", 1)
+    assert settings.startswith("# ===== 运行设置 =====") and "EXTEDIT_RUN_ID=" in settings
+    assert "#!/usr/bin/env bash\n" + script + "\n" == (repo / "scripts" / "extedit_bootstrap_arnold.sh").read_text()
+
+
 def test_text_check_decisions():
     from extedit import textcheck as tc
     assert tc.normalize("ELÉCTION!") == tc.normalize("election") == "election"
