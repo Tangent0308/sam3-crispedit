@@ -21,10 +21,10 @@
   - ScaleEdit 物体替换、删除、添加、改色全部，约 19.9 万。
 - **预计：**约 34 万次规划调用，四台合计每分钟约 320 次，约 18 小时；另加装环境、拷模型、起服务约 30 分钟。
 - **怎么提交：**把下面整段（设置 + 入口脚本，到代码块结束）原样粘贴为 ARNOLD 的 worker 启动命令，不用再拼别的。四个 worker 相同，每个 8 卡。
-- **代码从共享盘取（10-23 改）：**
-  - 第一次提交时，四台都在拉代码这一步失败：`could not read Username for 'https://github.com'`。原因是两个仓库都是私有的，节点上没有 GitHub 凭据；
-  - 现在设置里的 `EXTEDIT_REPO_URL`、`EXTEDIT_V3_URL` 指向共享盘上的 git bundle，内含两个分支，入口照常按固定 commit 检出；
-  - 重新提交时，用同一个 `EXTEDIT_RUN_ID` 即可续跑。
+- **10-23 第一次提交失败：**
+  - 四台都在拉代码这一步失败：`could not read Username for 'https://github.com'`，因为当时两个仓库都是私有的；
+  - 用户随后把两个仓库改为公开。开发机上匿名 https clone 两个固定 commit 已验证可行；
+  - 入口仍从 GitHub 拉代码，用同一个 `EXTEDIT_RUN_ID` 重新提交即续跑。
 
 <!-- code: §0 settings + scripts/extedit_bootstrap_arnold.sh -->
 ```bash
@@ -33,8 +33,6 @@ export EXTEDIT_RUN_ID=extedit_protocol2_batch2_4n_20261023
 export EXTEDIT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs
 export EXTEDIT_COMMIT=7bd00f9486f9a0c7f1bf0c09cfe9b9ab6048bc20
 export EXTEDIT_V3_COMMIT=31fb96605f68acb1254ec2e6b0e9ed22761093dd
-export EXTEDIT_REPO_URL=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/03_deployments/extedit_code_bundles_20261023/sam3-crispedit_extedit-protocol2-labeling.bundle
-export EXTEDIT_V3_URL=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/03_deployments/extedit_code_bundles_20261023/samtok_edit_qwen-image-2.1-v3.bundle
 export EXTEDIT_CRISPEDIT=replace=0,remove=0,add=0,color=6075
 export EXTEDIT_SCALEEDIT=object_replacement=0,object_removal=0,object_addition=0,color_change=0
 export EXTEDIT_EXCLUDE_RUNS="$EXTEDIT_ROOT/extedit_protocol2_100k_local8_20261021/node0 $EXTEDIT_ROOT/extedit_protocol2_batch2_local8_20261022/node0/handoff/decided_rows.jsonl"
@@ -233,7 +231,7 @@ echo "[$(date -u +%FT%TZ)] node $NODE: done"
 | 节点本地盘 | `/tmp` 至少 100 GB：27B 模型 52 GB、两个环境约 20 GB、uv 缓存约 11 GB、vLLM 编译缓存 |
 | 共享盘 | `/mnt/bn/strategy-mllm-train` 已挂载；运行目录约 450 GB（解出的原图约 300 GB，贴回后的 PNG 约 140 GB） |
 | 网络 | GitHub（https clone，vLLM 0.31.0 的 release wheel）、bytedpypi、`download.pytorch.org/whl/cu129` |
-| 代码权限 | `sam3-crispedit` 和 `samtok_edit`（v3）都是私有仓库（10-23 核实：匿名访问 404），节点上没有凭据时从共享盘的 git bundle 取代码（§0 的设置） |
+| 代码权限 | `sam3-crispedit` 和 `samtok_edit`（v3）都要能匿名 https clone。两个仓库 10-23 起公开；私有时节点上没有凭据，拉代码会失败 |
 | 模型 | 27B：`/mnt/bn/strategy-mllm-train/user/tanyue/models/pretrained_models/Qwen3.8-27B` |
 | | SAM3：`/mnt/bn/strategy-mllm-train/common/models/sam3/sam3.pt` |
 | | SAMTok：`/mnt/bn/strategy-mllm-train/user/tanyue/models/SAMTok/Qwen3-VL-8B-SAMTok` |
@@ -552,5 +550,5 @@ PYTHONDONTWRITEBYTECODE=1 <worker env>/bin/python -B scripts/extedit_pipeline.py
   - 设置：用本入口（脚本从标准输入喂给 bash，与 ARNOLD 相同），仓库地址换成本地 clone，依次扮演 4 个 worker，每个约 38 行；
   - 结果：全部成功，各类型配额都准确取满，四个 worker 的行和分片互不重叠，`publish` 合并出 55 条记录，图片和 token 缓存齐全。
 - **中断续跑：**给 worker 1 发 SIGTERM，它写出 `failure.json`，子进程和服务都被关掉；重启后从中断处续完，行与各步记录没有重复。
-- **代码获取：**当时测得不带凭据也能 https clone，但 10-23 两个仓库都已是私有，集群上改为从共享盘的 git bundle 取代码（§0）。
+- **代码获取：**不带凭据从 GitHub 按 https clone 固定 commit。10-23 两个仓库一度是私有的，导致第一次提交失败；用户已改为公开，并已重新验证。
 - **未在集群上实测：**ARNOLD 节点的网络、`samtok_edit` 的凭据、本地盘空间。建议先跑 §4 冒烟。
