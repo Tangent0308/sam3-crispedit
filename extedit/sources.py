@@ -119,11 +119,12 @@ def scaleedit_id(sample_id):
 
 
 def load_exclusions(runs):
-    """Rows of earlier runs (earlier batches): their ids, which are not ingested again, and the uses of their source
-    images, which count against per_source; read from each run's ingest/rows.jsonl."""
+    """Rows of earlier runs (earlier batches, or the decided rows of a run handed over to other nodes): their ids,
+    which are not ingested again, and the uses of their source images, which count against per_source.  Each entry is
+    a run folder (its ingest/rows.jsonl) or a file of rows in that format (handoff/decided_rows.jsonl)."""
     ids, per_image = set(), Counter()
     for run in map(Path, runs):
-        for line in open(run / "ingest" / "rows.jsonl"):
+        for line in open(run if run.is_file() else run / "ingest" / "rows.jsonl"):
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:

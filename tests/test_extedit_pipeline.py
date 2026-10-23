@@ -306,3 +306,18 @@ def test_payload_cap_counts_earlier_batches_and_multi_rows_first():
     dropped = ex.cap_payloads(singles, multis, Counter({"wooden bench": 1}), cap=3)
     assert len(dropped) == 4 and "c" not in dropped  # 1 earlier + 1 multi + 1 single = 3
     assert dropped == ex.cap_payloads(list(reversed(singles)), multis, Counter({"wooden bench": 1}), cap=3)
+
+
+def test_exclusions_from_a_rows_file_and_decided_rows(tmp_path):
+    from extedit.export import decided_ids
+    from extedit.sources import load_exclusions
+    rows = tmp_path / "decided_rows.jsonl"
+    rows.write_text(json.dumps({"id": "a", "source_sha1": "x"}) + "\n" + json.dumps({"id": "b", "source_sha1": "x"}) + "\n")
+    assert load_exclusions([rows]) == ({"a", "b"}, {"x": 2})
+    final = tmp_path / "final"
+    final.mkdir()
+    (final / "manifest_protocol_v2.jsonl").write_text(json.dumps({"id": "a"}) + "\n")
+    (final / "manifest_multi_protocol_v2.jsonl").write_text("")
+    (final / "rejected.jsonl").write_text(json.dumps({"id": "b", "reason": "drop_no_change"}) + "\n"
+                                          + json.dumps({"id": "c", "reason": "missing"}) + "\n")
+    assert decided_ids(final) == {"a", "b"}
