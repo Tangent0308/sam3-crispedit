@@ -509,6 +509,16 @@ export EXTEDIT_SCALEEDIT=object_surface_text_editing=3750,building_surface_text_
   - 运行目录 `experiments2/SAMTokEdit/data_pipeline/02_production_runs/extedit_protocol2_batch2_local8_20261022/`，启动脚本 `launch_local8.sh`，见该目录 README；
   - 10-22 18:38 UTC 启动，18:44 进入流水线；
   - 监督：`admin/supervise.sh` 每 2 分钟一次，`admin/health.py` 每 2 小时一次。
+- **开发机上的运行：**11.5 小时，没有报错。
+  - 规划每分钟约 80 次，审核约 50 次；
+  - CrispEdit replace 的产量约 39%，第一批是 37%。
+- **转四机（10-23）：**用户嫌慢，要求改四机在现有进度上续跑。06:12 UTC 停下开发机，用 `handoff`（代码 `7bd00f9`）交接：
+  - 已取数 316,709 行；
+  - 已定 163,853 行，收下 27,866 条，留在开发机运行的 `final/`，清单 `node0/handoff/decided_rows.jsonl`；
+  - 待处理 152,856 行（CrispEdit remove 35,294、add 117,562），连同没取数的原始对交给四台；
+  - 四台的设置见 `EXTEDIT_4NODE.md` §0，运行目录 `02_production_runs/extedit_protocol2_batch2_4n_20261023/`。
+  - 按分片预算，每台约 9.5 万个原始对（94,182–96,719）；
+  - 交接测试：在截断的冒烟运行上，已定 999 行、待处理 251 行，导出没有"缺记录"的拒收。按节点取数时，排除项一行没漏，两节点之间也不重叠。
 
 ## 7. 已知限制
 - **大片表面上的 add：**天空、墙面、水面上的 add，锚点被切成一块没有边界的区域，SAMTok 难以还原，往返 IoU 常 < 0.5，这些单元不收。D3 有同样的问题。add 产量 17%–36%。

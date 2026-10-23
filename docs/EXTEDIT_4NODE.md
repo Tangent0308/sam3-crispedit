@@ -2,9 +2,47 @@
 
 把 CrispEdit-2M、ScaleEdit 的原始编辑对打标成协议 2.0 训练数据（格式同 D3 / D4）的正式四机入口。方法、规则与验证结果见 [EXTEDIT_PROTOCOL2.md](EXTEDIT_PROTOCOL2.md)。
 
-- **当前任务：**第一批 10 万个原始对（用户 2026-10-21 确认）。
-- **代码：**本分支 commit `094164a2a434b7ea2da8d11c3b293f889df8e96f`。之前的版本：`061840a` 没有文字复查，`73cac43` 只有 1 个分割进程。之后的提交只改了文档。
+- **当前任务：**第二批（扩到约 20 万个单元）转四机续跑，用户 2026-10-23 要求。设置见 §0；第一批的设置留在 §3.1 作参考。
+- **代码：**本分支 commit `7bd00f9486f9a0c7f1bf0c09cfe9b9ab6048bc20`：含自然度复查、排除以前批次、交接。之前的版本：
+  - `a3c9a4d`：第二批本机运行用的版本，没有交接；
+  - `094164a`：第一批，没有自然度复查。
 - **v3：**SAMTok codec 与 CUDA 检查用 SAMTokEdit v3 的 `31fb96605f68acb1254ec2e6b0e9ed22761093dd`。
+
+## 0. 当前任务：第二批四机续跑（2026-10-23）
+- **背景：**
+  - 第二批 10-22 18:44 UTC 起在开发机上跑，10-23 06:12 停下交接；
+  - 运行目录 `$EXTEDIT_ROOT/extedit_protocol2_batch2_local8_20261022/node0`，见 `EXTEDIT_PROTOCOL2.md` §6.8。
+- **交接时的状态：**
+  - 已取数 316,709 行；
+  - 其中 163,853 行已定，收下 27,866 条，留在开发机运行的 `final/`，清单在 `node0/handoff/decided_rows.jsonl`；
+  - 其余 152,856 行（CrispEdit remove 35,294、add 117,562）由四台接着做，还没取数的原始对也归四台。
+- **四台要做的：**约 38 万个原始对：
+  - CrispEdit remove、add 的剩余行，以及 color 2.43 万；
+  - ScaleEdit 物体替换、删除、添加、改色全部，约 19.9 万。
+- **预计：**约 34 万次规划调用，四台合计每分钟约 320 次，约 18 小时；另加装环境、拷模型、起服务约 30 分钟。
+- **怎么提交：**把下面这段设置和 §3.2 的入口脚本依次粘贴成 ARNOLD 的 worker 启动命令。四个 worker 相同，每个 8 卡。
+
+```bash
+# ===== 运行设置 =====
+export EXTEDIT_RUN_ID=extedit_protocol2_batch2_4n_20261023
+export EXTEDIT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs
+export EXTEDIT_COMMIT=7bd00f9486f9a0c7f1bf0c09cfe9b9ab6048bc20
+export EXTEDIT_V3_COMMIT=31fb96605f68acb1254ec2e6b0e9ed22761093dd
+export EXTEDIT_CRISPEDIT=replace=0,remove=0,add=0,color=6075
+export EXTEDIT_SCALEEDIT=object_replacement=0,object_removal=0,object_addition=0,color_change=0
+export EXTEDIT_EXCLUDE_RUNS="$EXTEDIT_ROOT/extedit_protocol2_100k_local8_20261021/node0 $EXTEDIT_ROOT/extedit_protocol2_batch2_local8_20261022/node0/handoff/decided_rows.jsonl"
+```
+
+- **配额：**按每个 worker 计，0 表示全部。CrispEdit color 四台合计 24,300，开发机没取到 color。
+- **排除：**两项都必须设，否则会重复：
+  - 第一批的节点目录；
+  - 开发机运行的已定行清单。
+- **监督：**开发机上的 `admin/supervise_4n.sh` 每 2 分钟经共享盘查看四台，出错即报警。另每 2 小时做一次健康检查。见运行目录 README。
+- **跑完以后：**两处一起发布（§6）：
+
+  `publish --runs <开发机 node0> <RUN>/node0 … node3 --payload-cap 50 --cap-reference datasets/ExtEdit_Protocol2_20261021`
+
+  同一行出现在两处时 `publish` 会报错。
 
 ## 1. 一页摘要
 - **机器：**4 个 worker × 8 卡 H100 80G，互相独立，没有节点间通信。
