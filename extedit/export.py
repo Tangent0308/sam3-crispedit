@@ -114,11 +114,12 @@ def unit_record(row_id, unit, seg, gate_unit, audit, text_check=None):
                if text_check else {})}
 
 
-def export(run, out=None, workers=None):
+def export(run, out=None, workers=None, only_ids=None):
     """Write final/ (or `out`): manifests, tokens, rejections and summary; return the summary.  The change of every
     accepted AFTER outside its edit is measured in `workers` processes (default: up to 48).  When the run has a
     textcheck stage, a row with a text-change unit is kept only if its text check passed; when it has a natcheck
-    stage, a CrispEdit add row only if its naturalness check passed."""
+    stage, a CrispEdit add row only if its naturalness check passed.  With only_ids, the other rows are left out
+    altogether (not rejected, not counted): the decided rows of a run whose other rows went to other nodes (handoff)."""
     import os
     run = Path(run)
     check_text = (run / "textcheck").is_dir()
@@ -126,6 +127,8 @@ def export(run, out=None, workers=None):
     out = Path(out) if out else run / "final"
     out.mkdir(parents=True, exist_ok=True)
     data = {s: (rows(run) if s == "ingest" else read_stage(run, s)) for s in STAGES}
+    if only_ids is not None:
+        data["ingest"] = {i: r for i, r in data["ingest"].items() if i in only_ids}
     singles, multis, tokens, multi_tokens, rejected = [], [], [], [], []
     accepted = []
     for row_id, row in data["ingest"].items():
@@ -227,6 +230,46 @@ def export(run, out=None, workers=None):
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
     summary = summarize(data, singles, multis, rejected)
     (out / "summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False))
+    return summary
+
+
+def decided_ids(final):
+    """Ids of the rows of an export whose outcome is known: accepted, or rejected for a reason other than a missing
+    stage record (a row still waiting for a stage, or whose call failed, is not decided)."""
+    final = Path(final)
+    out = set()
+    for name in ("manifest_protocol_v2.jsonl", "manifest_multi_protocol_v2.jsonl"):
+        out |= {json.loads(line)["id"] for line in open(final / name)}
+    for line in open(final / "rejected.jsonl"):
+        record = json.loads(line)
+        if record["reason"] != "missing":
+            out.add(record["id"])
+    return out
+
+
+def handoff(run, workers=None):
+    """Close a stopped run whose remaining rows go to other nodes: export it, write handoff/decided_rows.jsonl (the
+    ingest rows of its decided rows, an --exclude-runs entry for the nodes that continue) and handoff/summary.json,
+    then export again with only the decided rows, so that final/ holds no "missing" rejections.  Return the summary."""
+    run = Path(run)
+    probe = export(run, workers=workers)
+    decided = decided_ids(run / "final")
+    ingest = rows(run)
+    (run / "handoff").mkdir(exist_ok=True)
+    with open(run / "handoff" / "decided_rows.jsonl", "w") as stream:
+        for row_id, row in ingest.items():
+            if row_id in decided:
+                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    kind = lambda i: f"{ingest[i]['dataset']}/{ingest[i]['native_type']}"
+    final = export(run, workers=workers, only_ids=decided)
+    summary = {"ingested": len(ingest), "decided": len(decided), "pending": len(ingest) - len(decided),
+               "decided_by_type": dict(Counter(kind(i) for i in decided)),
+               "pending_by_type": dict(Counter(kind(i) for i in ingest if i not in decided)),
+               "accepted": final["accepted_single"] + final["accepted_multi"],
+               "missing_in_final": sum(1 for line in open(run / "final" / "rejected.jsonl")
+                                     if json.loads(line)["reason"] == "missing"),
+               "probe_rejected": probe["rejected"]}
+    (run / "handoff" / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary
 
 
@@ -364,6 +407,13 @@ def publish(runs, out, workers=32, payload_cap=0, cap_reference=()):
         summaries.append({"run": str(run), **json.loads((final / "summary.json").read_text())})
         for name in names:
             loaded[name] += [(run, record) for record in map(json.loads, open(final / name))]
+    # a row belongs to exactly one run: a handed-over run keeps only its decided rows (handoff), the nodes that
+    # continue exclude them
+    seen = Counter(record["id"] for name in ("manifest_protocol_v2.jsonl", "manifest_multi_protocol_v2.jsonl",
+                                              "rejected.jsonl") for _, record in loaded[name])
+    twice = [i for i, n in seen.items() if n > 1]
+    if twice:
+        raise ValueError(f"{len(twice)} rows appear in more than one run or file, e.g. {twice[:5]}")
     dropped = set()
     if payload_cap:
         dropped = cap_payloads([r for _, r in loaded["manifest_protocol_v2.jsonl"]],

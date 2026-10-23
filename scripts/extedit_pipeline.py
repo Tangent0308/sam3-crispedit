@@ -485,9 +485,18 @@ def cmd_run(args):
 
 
 def cmd_export(args):
-    summary = ex.export(args.run, args.out)
+    only = None
+    if args.only_ids:
+        only = {json.loads(line)["id"] for line in open(args.only_ids)}
+    summary = ex.export(args.run, args.out, only_ids=only)
     log_config(args.run, "export", args)
     print(json.dumps(summary, indent=1, ensure_ascii=False))
+
+
+def cmd_handoff(args):
+    summary = ex.handoff(args.run)
+    log_config(args.run, "handoff", args)
+    print(json.dumps(summary, indent=1))
 
 
 def cmd_status(args):
@@ -598,7 +607,11 @@ def main():
     s = sub.add_parser("export")
     s.add_argument("--run", required=True)
     s.add_argument("--out", default=None)
+    s.add_argument("--only-ids", default=None, help="rows file (JSONL with id): export only these rows")
     s.set_defaults(func=cmd_export)
+    s = sub.add_parser("handoff", help="close a stopped run whose remaining rows go to other nodes")
+    s.add_argument("--run", required=True)
+    s.set_defaults(func=cmd_handoff)
     s = sub.add_parser("status", help="rows per stage of one or more runs")
     s.add_argument("--runs", nargs="+", required=True)
     s.set_defaults(func=cmd_status)
