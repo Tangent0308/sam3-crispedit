@@ -15,7 +15,7 @@ THINKING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "prese
 GREEDY = {"temperature": 0.0}  # reading text back: the most likely reading, the same on every run
 # call: (thinking, reasoning effort, max output tokens)
 CALLS = {"plan": (True, "low", 12000), "audit": (True, "low", 8000), "ocr": (False, None, 400),
-         "natcheck": (True, "low", 8000)}
+         "natcheck": (True, "low", 8000), "request": (True, "low", 4000)}
 TRANSPORT_ATTEMPTS = 6
 
 

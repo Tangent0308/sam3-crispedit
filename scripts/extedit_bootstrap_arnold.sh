@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # extedit production run on ARNOLD.  Paste this whole file as the start command of every worker (4 workers x 8 GPUs)
 # after editing the run settings; docs/EXTEDIT_PROTOCOL2.md section 4.4 has the ready-to-paste settings.
+# EXTEDIT_JOB=textrecheck runs the unified text re-check instead (one worker; docs/EXTEDIT_TEXT_RECHECK.md).
 #
 # Workers are independent: worker k takes every n-th shard of the shuffled shard lists (the same order on every
 # worker), labels its rows with the streaming pipeline (Qwen3.8-27B data parallel on GPUs 0-6, SAM3 + SAMTok workers
@@ -31,13 +32,23 @@ export EXTEDIT_NNODES="${EXTEDIT_NNODES:-4}"
 # SAM3 + SAMTok workers, one per entry, all on GPU 7 by default: one worker is CPU-bound (12 cores, GPU 7 about 55 %
 # busy) and falls behind the 27B server; three share the GPU (about 19 GB each).
 export EXTEDIT_SEGMENT_DEVICES="${EXTEDIT_SEGMENT_DEVICES:-7,7,7}"
+# Job: "pipeline" labels raw pairs with the settings above; "textrecheck" re-checks the text-related units listed in
+# EXTEDIT_TEXT_UNITS (a file on the shared disk) and needs no SAM3, so its 27B server can take all 8 GPUs.
+export EXTEDIT_JOB="${EXTEDIT_JOB:-pipeline}"
+export EXTEDIT_TEXT_UNITS="${EXTEDIT_TEXT_UNITS:-}"
+# GPUs of the 27B server, one data-parallel engine each; the pipeline keeps GPU 7 for SAM3.
+export EXTEDIT_SERVER_GPUS="${EXTEDIT_SERVER_GPUS:-0,1,2,3,4,5,6}"
 
 # ===== ARNOLD checks =====
 : "${ARNOLD_WORKER_NUM:?ARNOLD must inject ARNOLD_WORKER_NUM}"
 : "${ARNOLD_WORKER_GPU:?ARNOLD must inject ARNOLD_WORKER_GPU}"
 : "${ARNOLD_ID:?ARNOLD must inject ARNOLD_ID for this worker}"
 [[ "$ARNOLD_WORKER_NUM" == "$EXTEDIT_NNODES" ]] || { echo "Expected $EXTEDIT_NNODES workers, ARNOLD reports $ARNOLD_WORKER_NUM"; exit 2; }
-[[ "$ARNOLD_WORKER_GPU" == 8 ]] || { echo "Each worker needs 8 GPUs (7 for the 27B server, 1 for SAM3), got $ARNOLD_WORKER_GPU"; exit 2; }
+[[ "$ARNOLD_WORKER_GPU" == 8 ]] || { echo "Each worker needs 8 GPUs, got $ARNOLD_WORKER_GPU"; exit 2; }
+[[ "$EXTEDIT_JOB" == pipeline || "$EXTEDIT_JOB" == textrecheck ]] || { echo "Unknown EXTEDIT_JOB=$EXTEDIT_JOB"; exit 2; }
+if [[ "$EXTEDIT_JOB" == textrecheck && ! -s "$EXTEDIT_TEXT_UNITS" ]]; then
+  echo "EXTEDIT_JOB=textrecheck needs EXTEDIT_TEXT_UNITS, the units file on the shared disk: '$EXTEDIT_TEXT_UNITS'"; exit 2
+fi
 [[ "$ARNOLD_ID" =~ ^[0-9]+$ && "$ARNOLD_ID" -lt "$EXTEDIT_NNODES" ]] || { echo "ARNOLD_ID must be 0..$((EXTEDIT_NNODES - 1))"; exit 2; }
 # torch launcher variables would make the vLLM engines join a foreign process group.
 unset PORT MASTER_ADDR MASTER_PORT NODE_RANK NNODES GPUS_PER_NODE RANK LOCAL_RANK WORLD_SIZE
@@ -119,10 +130,11 @@ PY
 # ===== 27B server =====
 phase server
 PORT=8011
-setsid env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+ENGINES=$(awk -F, '{print NF}' <<< "$EXTEDIT_SERVER_GPUS")
+setsid env CUDA_VISIBLE_DEVICES="$EXTEDIT_SERVER_GPUS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_NO_USAGE_STATS=1 DO_NOT_TRACK=1 VLLM_CACHE_ROOT="$WORK/vllm-cache" \
   PATH="$WORK/env-vllm/bin:$PATH" \
-  "$WORK/env-vllm/bin/vllm" serve "$MODEL" --served-model-name qwen38-27b --data-parallel-size 7 \
+  "$WORK/env-vllm/bin/vllm" serve "$MODEL" --served-model-name qwen38-27b --data-parallel-size "$ENGINES" \
   --max-model-len 20000 --gpu-memory-utilization 0.93 --max-num-seqs 64 --enable-prefix-caching \
   --reasoning-parser qwen3 --limit-mm-per-prompt '{"image": 6}' --host 127.0.0.1 --port "$PORT" \
   > "$NODE_RUN/vllm.attempt$ATTEMPT.log" 2>&1 &
@@ -134,15 +146,20 @@ for _ in $(seq 1 180); do
 done
 curl -s -m 5 "http://127.0.0.1:$PORT/v1/models" | grep -q qwen38 || { echo "vLLM server not ready after 30 minutes"; false; }
 
-# ===== pipeline: two passes, the second retries rows whose calls failed in the first =====
+# ===== job: two passes, the second retries rows (units) whose calls failed in the first =====
+if [[ "$EXTEDIT_JOB" == textrecheck ]]; then
+  JOB=(textrecheck --units "$EXTEDIT_TEXT_UNITS" --run "$NODE_RUN" --url "http://127.0.0.1:$PORT/v1/chat/completions"
+       --concurrency 256 --view-workers 32)
+else
+  JOB=(run --run "$NODE_RUN" --whole-shards --node "$NODE/$EXTEDIT_NNODES"
+       --crispedit "$EXTEDIT_CRISPEDIT" --scaleedit "$EXTEDIT_SCALEEDIT" ${EXTEDIT_EXCLUDE_RUNS:+--exclude-runs $EXTEDIT_EXCLUDE_RUNS}
+       --url "http://127.0.0.1:$PORT/v1/chat/completions" --plan-concurrency 168 --audit-concurrency 112
+       --segment-devices "${EXTEDIT_SEGMENT_DEVICES:-7,7,7}" --workers 48 --v3-repo "$WORK/v3")
+fi
 for pass in 1 2; do
-  phase "pipeline pass $pass"
+  if [[ "$EXTEDIT_JOB" == textrecheck ]]; then phase "textrecheck pass $pass"; else phase "pipeline pass $pass"; fi
   setsid env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO" "$WORK/env-worker/bin/python" -B \
-    "$REPO/scripts/extedit_pipeline.py" run --run "$NODE_RUN" --whole-shards --node "$NODE/$EXTEDIT_NNODES" \
-    --crispedit "$EXTEDIT_CRISPEDIT" --scaleedit "$EXTEDIT_SCALEEDIT" ${EXTEDIT_EXCLUDE_RUNS:+--exclude-runs $EXTEDIT_EXCLUDE_RUNS} \
-    --url "http://127.0.0.1:$PORT/v1/chat/completions" --plan-concurrency 168 --audit-concurrency 112 \
-    --segment-devices "${EXTEDIT_SEGMENT_DEVICES:-7,7,7}" --workers 48 --v3-repo "$WORK/v3" \
-    >> "$NODE_RUN/pipeline.log" 2>&1 &
+    "$REPO/scripts/extedit_pipeline.py" "${JOB[@]}" >> "$NODE_RUN/pipeline.log" 2>&1 &
   PIPELINE=$!
   while kill -0 "$PIPELINE" 2>/dev/null; do  # the pipeline needs the server: stop at once if it dies
     if ! kill -0 "$SERVER" 2>/dev/null; then
@@ -156,7 +173,12 @@ for pass in 1 2; do
 done
 
 phase finished
-"$WORK/env-worker/bin/python" -B "$REPO/scripts/extedit_pipeline.py" status --runs "$NODE_RUN" | tee "$NODE_RUN/status.txt"
-cp "$NODE_RUN/final/summary.json" "$NODE_RUN/SUCCESS.json"
+if [[ "$EXTEDIT_JOB" == textrecheck ]]; then
+  [[ -f "$NODE_RUN/textrecheck/DONE" ]] || { echo "Units still unchecked after two passes; see $NODE_RUN/pipeline.log"; false; }
+  cp "$NODE_RUN/textrecheck/summary.json" "$NODE_RUN/SUCCESS.json"
+else
+  "$WORK/env-worker/bin/python" -B "$REPO/scripts/extedit_pipeline.py" status --runs "$NODE_RUN" | tee "$NODE_RUN/status.txt"
+  cp "$NODE_RUN/final/summary.json" "$NODE_RUN/SUCCESS.json"
+fi
 stop_children
 echo "[$(date -u +%FT%TZ)] node $NODE: done"

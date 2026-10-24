@@ -331,3 +331,85 @@ def test_exclusions_from_a_rows_file_and_decided_rows(tmp_path):
     (final / "rejected.jsonl").write_text(json.dumps({"id": "b", "reason": "drop_no_change"}) + "\n"
                                           + json.dumps({"id": "c", "reason": "missing"}) + "\n")
     assert decided_ids(final) == {"a", "b"}
+
+
+def test_text_recheck_unit_kinds():
+    from extedit.textrecheck import text_kind
+    assert text_kind({"operation": "attribute", "attributes": [{"property": "text", "value": "OPEN"}]}) == "change"
+    assert text_kind({"operation": "attribute", "attributes": [{"property": "color", "value": "red"}]}) is None
+    assert text_kind({"operation": "add", "payload": "a 'LOVE' text"}) == "render"
+    assert text_kind({"operation": "replace", "payload": "a banner reading Festival of Lights"}) == "render"
+    assert text_kind({"operation": "add", "payload": "a man's straw hat"}) is None
+    assert text_kind({"operation": "remove", "payload": "", "scope": "lettering"}) is None
+
+
+def test_text_recheck_request_parsing_and_expected_text():
+    from extedit import textrecheck as tr
+    assert tr.parse_request('{"text": "OPEN", "garbled": "false"}') == {"text": "OPEN", "garbled": False}
+    with pytest.raises(ValueError):
+        tr.parse_request('{"text": "OPEN"}')
+    change = {"kind": "change", "expected": "SALE"}
+    render = {"kind": "render", "expected": None}
+    assert tr.expected_text(change, [{"text": "x", "garbled": False}]) == "SALE"
+    assert tr.expected_text(render, [{"text": "", "garbled": False}, {"text": "Poppy", "garbled": False}]) == "Poppy"
+    assert tr.expected_text(render, [{"text": "", "garbled": False}] * 2) == ""
+
+
+def test_text_recheck_units_from_both_formats(tmp_path):
+    from PIL import Image
+    from extedit import masks as mk
+    from extedit import textrecheck as tr
+    mask = np.zeros((40, 60), bool)
+    mask[10:20, 10:30] = True
+    (tmp_path / "rel").mkdir()
+    Image.fromarray(mask.astype(np.uint8) * 255).save(tmp_path / "rel" / "m.png")
+    rle = {k: v for k, v in mk.encode(mask).items() if k != "box_1000"}
+    release = {"sample_id": "s1", "instruction": "Change the text on the sign to \"OPEN\".", "mask": "m.png",
+               "source_image": "a.jpg", "edited_image": "b.png", "edited_region": rle,
+               "instruction_spec": {"operation": "attribute", "attributes": [{"property": "text", "value": "OPEN"}]}}
+    (tmp_path / "rel" / "r.jsonl").write_text(json.dumps(release) + "\n")
+    unit = {"instruction_spec": {"operation": "add", "payload": "a sign reading 'Hi'"}, "instruction_ref": "Add ...",
+            "selection": rle, "edited_region": rle}
+    pair = {"id": "p1", "source_image": "a.jpg", "target_image": "b.png", "units": [unit, {
+        "instruction_spec": {"operation": "remove", "payload": ""}, "selection": rle}]}
+    (tmp_path / "man").mkdir()
+    (tmp_path / "man" / "m.jsonl").write_text(json.dumps(pair) + "\n")
+    sources = {"A": {"kind": "release", "root": str(tmp_path / "rel"), "files": [("r.jsonl", False)]},
+               "B": {"kind": "manifest", "root": str(tmp_path / "man"), "files": [("m.jsonl", True)],
+                     "read_changes": False}}
+    counts = tr.build_units(sources, tmp_path / "units.jsonl")
+    units = [json.loads(line) for line in open(tmp_path / "units.jsonl")]
+    assert counts == {"A:change": 1, "B:render": 1}
+    assert units[0]["id"] == "A:s1#0" and units[0]["expected"] == "OPEN" and units[0]["area"]["png"].endswith("m.png")
+    assert units[1]["id"] == "B:p1#0" and units[1]["read"] and units[1]["area"]["rle_counts"] == rle["rle_counts"]
+    assert tr.area_mask(units[0]["area"], (40, 60)).sum() == mask.sum() == tr.area_mask(units[1]["area"], (40, 60)).sum()
+
+
+def test_text_recheck_checks_a_unit():
+    import asyncio
+    from extedit import textrecheck as tr
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, parts, prompt, call, seed=0, prefix=None, n=1):
+            self.calls.append(call)
+            if call == "request":
+                return {"choices": [{"text": '{"text": "OPEN", "garbled": false}'}] * n, "tokens": 4}
+            return {"text": '{"before": "CLOSED", "after": "OPEN NOW", "after_legible": true, "after_garbled": false}',
+                    "tokens": 3}
+
+    async def parts():
+        return [{"type": "text", "text": "x"}]
+    unit = {"id": "D3:r#0", "source": "D3", "unit": 0, "kind": "render", "instruction": "Add a sign reading OPEN.",
+            "payload": "a sign reading OPEN", "expected": None, "read": True}
+    client = Client()
+    record = asyncio.run(tr.check_unit(client, unit, parts))
+    assert client.calls == ["request", "ocr"] and record["expected"] == "OPEN"
+    assert record["read_passed"] is True and record["reading"]["after"] == "OPEN NOW" and len(record["votes"]) == 2
+    client = Client()
+    record = asyncio.run(tr.check_unit(client, {**unit, "kind": "change", "expected": "SALE", "read": False}, parts))
+    assert client.calls == ["request"] and record["reading"] is None and record["read_passed"] is None
+    summary = tr.summary_of([record])
+    assert summary["read"] == {"not_read": 1} and summary["garbled_votes"] == {0: 1}
