@@ -344,6 +344,55 @@ def cmd_natcheck(args):
     llm.mark_done(run / "natcheck")
     log_config(run, "natcheck", args)
 
+def cmd_textrecheck_units(args):
+    from extedit import textrecheck as tr
+    counts = tr.build_units(tr.DEFAULT_SOURCES, args.out)
+    print(json.dumps(counts, indent=1))
+
+
+def cmd_textrecheck(args):
+    """Unified text re-check of a units file (extedit/textrecheck) against the 27B server.  Units that already have
+    a record are skipped and failed ones retried, so a rerun resumes; DONE is written when every unit has one."""
+    import aiohttp
+    from extedit import textrecheck as tr
+    run = Path(args.run)
+    out = run / "textrecheck"
+    out.mkdir(parents=True, exist_ok=True)
+    units = [json.loads(line) for line in open(args.units)]
+    done = set(llm.read_records(out / "records.jsonl"))
+    todo = [u for u in units if u["id"] not in done][:args.limit or None]
+    by_id = {u["id"]: u for u in todo}
+    pool = views_pool(args.view_workers)
+    state = {"given": False}
+
+    def new_jobs():
+        if state["given"]:
+            return []
+        state["given"] = True
+        return [{"id": u["id"]} for u in todo]
+
+    async def main():
+        timeout = aiohttp.ClientTimeout(total=3600)
+        connector = aiohttp.TCPConnector(limit=args.concurrency + 8)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            client = llm.Client(session, args.url, args.model)
+
+            async def worker(job):
+                unit = by_id[job["id"]]
+
+                async def get_parts():
+                    return await asyncio.get_running_loop().run_in_executor(pool, tr.read_parts, unit)
+                return await tr.check_unit(client, unit, get_parts)
+            await llm.stream_jobs(new_jobs, worker, args.concurrency, out / "records.jsonl", poll=POLL)
+    print(f"{len(units)} units, {len(done)} already checked, {len(todo)} to check", flush=True)
+    asyncio.run(main())
+    records = llm.read_records(out / "records.jsonl")
+    if len(records) == len(units):
+        llm.mark_done(out)
+    (out / "summary.json").write_text(json.dumps(tr.summary_of(list(records.values())), indent=1))
+    log_config(run, "textrecheck", args)
+    print(f"{len(records)} of {len(units)} units checked", flush=True)
+
 # ---------------------------------------------------------------- segment
 
 
@@ -574,6 +623,18 @@ def main():
         elif name == "audit":
             s.add_argument("--votes", type=int, default=2)
         s.set_defaults(func=func)
+    s = sub.add_parser("textrecheck-units", help="list the text-related units of the five edit sources (CPU)")
+    s.add_argument("--out", required=True)
+    s.set_defaults(func=cmd_textrecheck_units)
+    s = sub.add_parser("textrecheck", help="unified text re-check of a units file against the 27B server")
+    s.add_argument("--units", required=True)
+    s.add_argument("--run", required=True)
+    s.add_argument("--url", default="http://127.0.0.1:8000/v1/chat/completions")
+    s.add_argument("--model", default="qwen38-27b")
+    s.add_argument("--concurrency", type=int, default=192)
+    s.add_argument("--view-workers", type=int, default=32)
+    s.add_argument("--limit", type=int, default=0, help="check at most this many units (smoke tests)")
+    s.set_defaults(func=cmd_textrecheck)
     s = sub.add_parser("segment")
     s.add_argument("--run", required=True)
     s.add_argument("--device", default="cuda:0")
