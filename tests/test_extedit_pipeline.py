@@ -413,3 +413,13 @@ def test_text_recheck_checks_a_unit():
     assert client.calls == ["request"] and record["reading"] is None and record["read_passed"] is None
     summary = tr.summary_of([record])
     assert summary["read"] == {"not_read": 1} and summary["garbled_votes"] == {0: 1}
+
+
+def test_text_recheck_doc_block_is_settings_plus_the_entry_script():
+    repo = ROOT.parent
+    doc = (repo / "docs" / "EXTEDIT_TEXT_RECHECK.md").read_text()
+    block = doc.split("<!-- code: text recheck settings + scripts/extedit_bootstrap_arnold.sh -->", 1)[1]
+    block = block.split("```bash\n", 1)[1].split("\n```", 1)[0]
+    settings, script = block.split("\n\n#!/usr/bin/env bash\n", 1)
+    assert "EXTEDIT_JOB=textrecheck" in settings and "EXTEDIT_NNODES=1" in settings
+    assert "#!/usr/bin/env bash\n" + script + "\n" == (repo / "scripts" / "extedit_bootstrap_arnold.sh").read_text()
