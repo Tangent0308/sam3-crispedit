@@ -119,8 +119,8 @@ def _check_counts(rows: list[dict[str, Any]], *, kind: str, expected: int) -> di
         else:
             units = row.get("units") or row.get("objects", [])
             n = len(units)
-            if n not in {2, 3, 4, 5} or not row.get("adjacent_pairs"):
-                raise ValueError(f"{kind}: invalid target count or missing adjacency for {gid}")
+            if n not in {2, 3, 4, 5}:
+                raise ValueError(f"{kind}: invalid target count for {gid}")
             if row.get("operations") and not row.get("units"):
                 ops = [str(op) for op in row["operations"]]
             else:

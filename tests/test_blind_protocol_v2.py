@@ -119,6 +119,8 @@ def test_multi_duplicates_and_cross_category_twins_keep_same_sentence():
     group['members'][1]['instruction_spec']['scope']='hat'
     assert blind_group_check(group)['pass']
     group['members'][1]['selector_granularity']='part'
+    assert blind_group_check(group)['pass']  # object/part labels do not constrain twins
+    group['members'][1]['area_fraction']=.4
     assert not blind_group_check(group)['pass']
     group['members'][1]['selector_granularity']='object'
     group['members'][1]['instruction_spec']['scope']='bag'
@@ -141,7 +143,7 @@ def test_difference_contact_has_priority_over_optional_segmenter(tmp_path):
         raise AssertionError('Reliable observed contact must not depend on text segmentation')
     assert resolve_source_region(member,paths['source'],paths['target'],tmp_path/'resolved',site_resolver=forbidden)
     assert member['source_region_resolution']['method']=='difference_dilation_intersect_host'
-    assert member['source_region_resolution']['resolution_version']=='difference-first-3'
+    assert member['source_region_resolution']['resolution_version']=='difference-first-5-contact-edges'
 
 
 def test_nearby_hanging_add_uses_segmentation_fallback_and_intersects_contact(tmp_path):
@@ -175,3 +177,45 @@ def test_segmenter_cannot_invent_contact_when_no_added_object(tmp_path):
     def forbidden(*args):
         raise AssertionError('Do not segment a contact with no difference evidence')
     assert not resolve_source_region(member, paths['source'], paths['target'], tmp_path/'resolved', site_resolver=forbidden)
+
+
+def test_small_add_contact_survives_scene_blur_without_lowering_contrast():
+    a=np.full((1500,1500,3),100,dtype=np.uint8);b=a.copy()
+    host=np.zeros((1500,1500),bool);host[480:514,492:508]=True
+    b[490:492,496:500]=180
+    site,info=localize_add_site(a,b,host)
+    assert site is not None and info['small_region_recovery']
+    assert info['delta_threshold']==24 and info['raw_overlap_pixels']>=8
+    assert 0<site.sum()<host.sum()/2 and not (site&~host).any()
+
+
+def test_small_add_fallback_does_not_promote_noise_or_detached_changes():
+    a=np.full((1000,1000,3),100,dtype=np.uint8)
+    host=np.zeros((1000,1000),bool);host[480:514,492:508]=True
+    variants=[a.copy(),np.clip(a.astype(int)+15,0,255).astype('uint8')]
+    speckles=a.copy();speckles[485:510:5,495:505:5]=255;variants.append(speckles)
+    detached=a.copy();detached[490:493,520:526]=180;variants.append(detached)
+    for b in variants:
+        site,info=localize_add_site(a,b,host)
+        assert site is None, info
+
+
+def test_small_outline_recovers_sides_even_when_corner_survives_scene_blur():
+    a=np.full((1000,1000,3),100,dtype=np.uint8);b=a.copy()
+    host=np.zeros((1000,1000),bool);host[480:520,480:520]=True
+    b[480:483,480:520]=140;b[517:520,480:520]=140
+    b[480:520,480:483]=140;b[480:520,517:520]=140
+    b[480:485,480:485]=240
+    site,info=localize_add_site(a,b,host,perimeter=True)
+    assert site is not None and site[518,500] and site[500,518]
+    assert not site[500,500] and site.sum()<host.sum()*.6
+    assert info['perimeter_site'] and info['small_region_recovery']
+
+
+def test_explicit_perimeter_never_invents_site_without_change_or_for_necklace():
+    from sa1b_pipeline.source_regions import explicit_perimeter
+    assert explicit_perimeter({'payload':'a thin gold border','placement':{'relation':'around','site':''}})
+    assert not explicit_perimeter({'payload':'a necklace','placement':{'relation':'around','site':'neck'}})
+    assert not explicit_perimeter({'payload':'a rim','placement':{'relation':'around','site':'window'}})
+    a=np.full((100,100,3),100,dtype=np.uint8);host=np.ones((100,100),bool)
+    assert localize_add_site(a,a,host,perimeter=True)[0] is None

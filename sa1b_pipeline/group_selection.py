@@ -365,7 +365,7 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
                            reserved_source_ids: set[str] | None = None,
                            strict_geometry: bool = False, member_count: int = 2,
                            category_relation: str = "any") -> list[dict[str, Any]]:
-    """Select comparable-granularity pairs/triples, allowing different categories.
+    """Select comparable-size pairs/triples, allowing different categories.
 
     This function is intentionally conservative: no operation fallback is
     performed after selection and no candidate is rejected for a textual
@@ -391,7 +391,7 @@ def select_twin_candidates(candidates: Iterable[Any], *, target: int, operation:
         for obj in c.get("objects", []):
             ok, _ = category_allowed(obj.get("category", ""))
             if ok:
-                key = (candidate_granularity(obj), candidate_category(obj) if category_relation == "same" else "all")
+                key = candidate_category(obj) if category_relation == "same" else "all"
                 groups[key].append(obj)
         # Same-host recovery only needs plausible enclosing masks. Keeping the
         # largest non-part boxes avoids scanning hundreds of tiny labels for
@@ -524,7 +524,7 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
                             reserved_source_ids: set[str] | None = None,
                             max_groups_per_source: int = 2,
                             strict_geometry: bool = True) -> list[dict[str, Any]]:
-    """Preselect 2-5 targets with at least one adjacent pair.
+    """Preselect 2-5 distinct targets, without a distance requirement.
 
     The MLLM still decides semantic feasibility and exact refs; this stage only
     enforces geometry, quotas, object uniqueness and operation availability.
@@ -549,10 +549,12 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
         objects = [o for o in c.get("objects", []) if category_allowed(o.get("category", ""))[0]]
         if len(objects) < 2:
             continue
-        # Shortlist near bbox pairs before decoding masks. Dense SA-1B scenes
-        # can contain hundreds of masks; use a sweep instead of materialising
-        # every O(n²) combination.
-        near_pairs = _near_bbox_pairs(objects, limit=8)
+        # Bound work on dense scenes without biasing selection toward nearby masks.
+        plausible_objects = [o for o in objects
+                             if any(multi_operation_allowed(o, op, size) for op in OPERATIONS)]
+        rng.shuffle(plausible_objects)
+        from itertools import combinations, islice
+        candidate_pairs = islice(combinations(plausible_objects[:32], 2), 64)
         feature_cache: dict[str, dict[str, Any]] = {}
         mask_cache: dict[str, Any] = {}
 
@@ -566,8 +568,6 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
                 mask = load_mask(obj, size)
                 mask_cache[key] = mask
             return mask
-        support_cache: dict[str, Any] = {}
-
         def cached_feature(obj: dict[str, Any]) -> dict[str, Any]:
             key = object_key(obj)
             feature = feature_cache.get(key)
@@ -575,16 +575,6 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
                 feature = object_features(obj, size)
                 feature_cache[key] = feature
             return feature
-
-        def cached_support(obj: dict[str, Any]):
-            key = object_key(obj)
-            support = support_cache.get(key)
-            if support is None:
-                # target_only support is exactly the source mask; avoid a
-                # second full-canvas copy for every adjacent pair.
-                support = cached_mask(obj)
-                support_cache[key] = support
-            return support
 
         def cached_operation_allowed(obj: dict[str, Any], operation: str) -> bool:
             if not multi_operation_allowed(obj, operation, size):
@@ -594,7 +584,7 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
                 # plausible from category/bbox metadata. Exact mask quality is
                 # enforced by the normal strict selection and group audit.
                 return True
-            # Operation quality is semantic rather than adjacency geometry.
+            # Operation quality is semantic rather than mask geometry.
             # The planner and 27B group audit are the authoritative gates; an
             # optional exact pre-gate is available for offline diagnostics but
             # is disabled in production selection because it decodes a dense
@@ -606,52 +596,20 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
             return bool(operation_quality_gate(quality, operation)["eligible"])
 
         pairs = []
-        for _, a, b in near_pairs:
+        for a, b in candidate_pairs:
             try:
-                short = min(_short_side(a), _short_side(b))
-                if not strict_geometry:
-                    # Fast capacity mode: the bbox lower bound is a safe
-                    # candidate filter; the group editor/auditor performs the
-                    # exact mask check before release.
-                    gap = bbox_gap(a, b)
-                    evidence = {
-                        "eligible": gap <= 0.1 * max(1, short),
-                        "gap_pixels": gap,
-                        "threshold_pixels": 0.1 * max(1, short),
-                        "support_a_over_source_b": None,
-                        "geometry_exact": False,
-                        "features": {"a": {"bbox": a.get("bbox")},
-                                      "b": {"bbox": b.get("bbox")}},
-                    }
-                else:
+                if strict_geometry:
                     ma, mb = cached_mask(a), cached_mask(b)
-                    sa, sb = _local_pair_view(a, b, cached_support(a), cached_support(b), short)
-                    gap = gap_pixels(sa, sb)
-                    overlap = float((sa & sb).sum()) / max(1, int(sb.sum()))
-                    evidence = {
-                        "eligible": gap <= 0.1 * max(1, short) and not (ma & mb).any(),
-                        "gap_pixels": gap,
-                        "threshold_pixels": 0.1 * max(1, short),
-                        "support_a_over_source_b": overlap,
-                        "geometry_exact": True,
-                        "features": {
-                            "a": {"bbox": a.get("bbox"), "area_px": int(ma.sum())},
-                            "b": {"bbox": b.get("bbox"), "area_px": int(mb.sum())},
-                        },
-                    }
-                if evidence["eligible"]:
-                    pairs.append((a, b, evidence))
-                    # A group needs one adjacent pair. Keep a few alternatives
-                    # for operation feasibility without retaining every dense
-                    # scene mask in memory.
+                    eligible = bool(ma.any() and mb.any() and not (ma & mb).any())
+                else:
+                    eligible = (_bbox_overlap_fraction(a, b) <= .10
+                                and _bbox_overlap_fraction(b, a) <= .10)
+                if eligible:
+                    pairs.append((a, b))
                     if len(pairs) >= 2:
                         break
                 else:
-                    # Failed pairs are not reused. Release their decoded masks
-                    # immediately; a few 4K SA-1B masks can otherwise retain
-                    # hundreds of MB across a high-density candidate.
                     mask_cache.clear()
-                    support_cache.clear()
             except (OSError, RuntimeError, TypeError, ValueError):
                 continue
         if not pairs:
@@ -660,22 +618,17 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
         for n in range(2, 6):
             if len(objects) < n:
                 continue
-            a, b, adjacency = pairs[0]
-            # Only nearby, operation-plausible objects are needed to fill the
-            # remaining target slots. This avoids decoding hundreds of dense
-            # scene masks merely to prove they conflict with the pair.
-            plausible = [o for o in objects if o not in (a, b)
-                         and any(multi_operation_allowed(o, op, size) for op in OPERATIONS)]
-            plausible.sort(key=lambda o: (min(bbox_gap(o, a), bbox_gap(o, b)),
-                                          str(o.get("object_id", ""))))
-            others = plausible[:32]
+            a, b = pairs[0]
+            others = [o for o in plausible_objects if o not in (a, b)][:32]
             rng.shuffle(others)
             chosen = [a, b]
             for obj in others:
+                if len(chosen) >= n:
+                    break
                 try:
                     if strict_geometry:
-                        # Exact RLE geometry is reserved for the required
-                        # adjacent pair above.  Additional target conflicts
+                        # Exact RLE geometry is checked for the seed pair.
+                        # Additional target conflicts
                         # are conservatively screened by bbox overlap here;
                         # generation/audit repeats the support-mask check on
                         # the chosen group before publication.
@@ -711,12 +664,16 @@ def select_multi_candidates(candidates: Iterable[Any], *, target: int, seed: int
                     continue
                 ops = found
             buckets[n].append({"candidate": c, "objects": chosen, "operations": ops,
-                               "adjacent_pairs": [{"object_ids": [a["object_id"], b["object_id"]], **adjacency}],
+                               "adjacent_pairs": [],
+                               "selection_geometry": {"distance_required": False,
+                                                      "seed_masks_exact": strict_geometry},
                                "image_size": size})
         if all(len(buckets[n]) >= pool_caps[n] for n in buckets):
             break
     selected, per_source = [], Counter()
     for n in range(2, 6):
+        if quotas[n] == 0:
+            continue
         rng.shuffle(buckets[n])
         for row in buckets[n]:
             sid = str(row["candidate"]["source_id"])

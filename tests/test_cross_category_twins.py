@@ -53,13 +53,13 @@ def test_probe_resume_uses_exact_request_and_never_repeats_completed_call(tmp_pa
     with pytest.raises(ValueError,match='inputs changed'):run_blind_probes([g],model,tmp_path/'probe')
 
 
-def test_independent_member_scopes_are_allowed_but_mixed_granularity_is_not():
+def test_independent_member_scopes_and_mixed_granularity_are_allowed():
     plan={'grounding_version':3,'operation':'remove','members':[
         {'scope':noun,'grounding':{'entity':noun,'kind':'object','distinction':noun,'edit_feasible':True}}
         for noun in ['lamp','chair']]}
     validate_twin_grounding(plan)
     plan['members'][1]['grounding']['kind']='part'
-    with pytest.raises(ValueError,match='granularity'):validate_twin_grounding(plan)
+    validate_twin_grounding(plan)
 
 
 def test_candidate_quota_keeps_thirty_percent_same_and_four_operations(monkeypatch):

@@ -100,7 +100,8 @@ def _render_member(source: str, unit: dict[str, Any], output: Path,
     contract = {"version": 1, "source_sha256": _source_digest(source), "unit": unit,
                 "seed": seed, "editor": getattr(editor, "config", {}),
                 "mask_hashes": {key: _source_digest(unit[key]) for key in
-                                ("mask_path", "execution_mask_path", "protected_mask_path")
+                                ("mask_path", "execution_mask_path", "protected_mask_path",
+                                 "dependency_overlap_mask_path", "dependency_interface_mask_path")
                                 if unit.get(key)}}
     fingerprint = hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
     if checkpoint.exists():
@@ -208,18 +209,22 @@ def generate_twin_group(group: dict[str, Any], output_dir: str | Path, editor: A
         unit = _unit_dict(member)
         unit_dir = output_dir / f"member_{member['unit_id']}"
         unit_dir.mkdir(parents=True, exist_ok=True)
-        output = unit_dir / "edited.png"
+        # A generation retry (twin_streaming) keeps members that passed and re-renders the
+        # others with their own seed; plain runs have neither field.
+        member_seed = int(member.get("retry_seed", seed))
+        kept = bool(member.get("retry_keep") and member.get("edited_image"))
+        output = Path(member["edited_image"]) if kept else unit_dir / "edited.png"
         state = unit_dir / "generation.json"
         started = time.perf_counter()
-        context = _render_member(source, unit, output, editor, seed)
+        context = member.get("generation_context") or {} if kept else _render_member(source, unit, output, editor, member_seed)
         support = member["support_mask"]
         resolve_source_region(member, source, str(output), unit_dir)
         row = _row(group, member, source, str(output), support,
                    generation_context=context)
-        row["seed"] = seed
-        check = deterministic_check(row)
+        row["seed"] = member_seed
+        check = deterministic_check(row, semantic_low_change=True)
         row["deterministic"] = check
-        member.update({"edited_image": str(output), "support_mask": support, "seed": seed,
+        member.update({"edited_image": str(output), "support_mask": support, "seed": member_seed,
                        "generation_context": row["generation_context"], "deterministic": check,
                        "generation_seconds": time.perf_counter() - started})
         outputs.append(row); supports.append(support)
@@ -269,12 +274,27 @@ def _outside_fraction(source: str, edited: str, allowed: np.ndarray) -> float:
 
 
 def multi_support_preflight(group: dict[str, Any], output_dir: str | Path) -> dict[str, Any]:
-    """Clip writable collars around other targets; source extents cannot overlap."""
+    """Protect other targets outside this selector; serialize shared source pixels.
+
+    Source overlap is a scheduling edge, not a reason to reject a group. Never
+    trim the public selectors to make them disjoint: their full extent remains
+    writable (except explicitly protected dropped targets), and the component
+    scheduler/joint audit resolve the resulting shared writes.
+    """
     size = Image.open(group["source_image"]).size
     members = group["units"]
     masks = [load_mask({"mask_path": m.get("mask_v1") or m["mask"]}, size) for m in members]
-    supports = [region_support_mask(mask, m["operation"], _unit_dict(m).get("support_policy"))
-                for mask, m in zip(masks, members)]
+    from .specialist_editors import writable_mask
+    supports = []
+    for member in members:
+        unit = member.setdefault("unit", {})
+        # Planning and generation both run preflight. Rebuild from the original
+        # execution request, never from an already clipped preflight output.
+        base = unit.setdefault("preflight_input", {
+            key: unit.get(key) for key in ("execution_mask_path", "protected_mask_path")})
+        requested = {**_unit_dict(member), **base}
+        supports.append(writable_mask(requested, size, require_add_placement=False))
+    extra_protected = [load_mask({'mask_path':p},size) for p in group.get('protected_source_masks',[])]
     pairs = []
     for i, support in enumerate(supports):
         for j, other in enumerate(masks):
@@ -284,18 +304,30 @@ def multi_support_preflight(group: dict[str, Any], output_dir: str | Path) -> di
             pairs.append({"unit_id": members[i]["unit_id"], "other": members[j]["unit_id"],
                           "support_coverage_of_other": fraction,
                           "source_overlap_pixels": int((masks[i] & other).sum()),
-                          "effective_support_coverage_of_other": None if (masks[i] & other).any() else 0.0,
-                          "pass": not (masks[i] & other).any()})
-    passed = all(p["pass"] for p in pairs)
-    if passed:
-        for i, member in enumerate(members):
-            protected = np.logical_or.reduce([m for j, m in enumerate(masks) if i != j])
-            directory = Path(output_dir) / "protection" / member["unit_id"]
-            execution = _write_mask(directory / "execution.png", supports[i] & ~protected)
-            protection = _write_mask(directory / "other_sources.png", protected)
-            member["unit"]["execution_mask_path"] = execution
-            member["unit"]["protected_mask_path"] = protection
-    return {"pass": passed, "pairs": pairs, "version": "multi-protection-2"}
+                          "requires_serial": bool((masks[i] & other).any()),
+                          "pass": True})
+    executions = []
+    for i, member in enumerate(members):
+        others = [m for j, m in enumerate(masks) if i != j]
+        protected = np.logical_or.reduce(others) & ~masks[i] if others else np.zeros_like(masks[i])
+        if extra_protected:
+            # Dropping an enclosing target does not revoke an explicitly kept
+            # subtarget's pixels. Its remainder stays protected.
+            protected |= np.logical_or.reduce(extra_protected) & ~masks[i]
+        original_protection = member["unit"]["preflight_input"].get("protected_mask_path")
+        if original_protection:
+            protected |= load_mask({"mask_path": original_protection}, size)
+        executions.append(supports[i] & ~protected)
+        directory = Path(output_dir) / "protection" / member["unit_id"]
+        execution = _write_mask(directory / "execution.png", executions[i])
+        protection = _write_mask(directory / "other_sources.png", protected)
+        member["unit"]["execution_mask_path"] = execution
+        member["unit"]["protected_mask_path"] = protection
+    by_id = {m['unit_id']: i for i, m in enumerate(members)}
+    for pair in pairs:
+        i, j = by_id[pair['unit_id']], by_id[pair['other']]
+        pair['effective_support_coverage_of_other'] = float((executions[i] & masks[j]).sum()/max(1, masks[j].sum()))
+    return {"pass": True, "pairs": pairs, "version": "multi-protection-4-kept-selector-priority"}
 
 
 def generate_multi_group(group: dict[str, Any], output_dir: str | Path, editor: Any, *, seed: int = 0,
@@ -313,7 +345,7 @@ def generate_multi_group(group: dict[str, Any], output_dir: str | Path, editor: 
         unit_dir.mkdir(parents=True, exist_ok=True)
         output = unit_dir / "edited.png"
         started = time.perf_counter()
-        if group.get("support_preflight", {}).get("version") in {"multi-protection-1", "multi-protection-2"}:
+        if group.get("support_preflight", {}).get("version") in {"multi-protection-1", "multi-protection-2", "multi-protection-3-serial-overlap"}:
             from .specialist_editors import writable_mask
             original = np.asarray(Image.open(source).convert("RGB"), dtype=np.int16)
             before = np.asarray(Image.open(current).convert("RGB"), dtype=np.int16)

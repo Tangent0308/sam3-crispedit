@@ -26,14 +26,29 @@ def edit_prompt(unit: dict[str, Any], *, target_hint: str | None = None,
         "to locate the target, never copy the boundary or any annotation into the result."
         if guided else ""
     )
+    from .multi_execution_contract import dependency_prompt
+    guide += " " + dependency_prompt(unit.get("dependency_context", [])) if unit.get("dependency_context") else ""
     operation = unit["operation"]
     spec = unit.get('instruction_spec') or {}
     if spec:
         from .instruction_protocol import validate_pair
         validate_pair(spec, unit['instruction_ref'], unit['instruction_noref'])
     instruction = unit['instruction_noref'] if crop_instruction else unit['instruction_ref']
+    if unit.get('generation_reference_frame') == 'crop-entity-v1':
+        # Internal generator wording only. Published ref/no-ref remain the
+        # validated protocol pair. Scene ordinals do not survive cropping.
+        scope = str(spec.get('scope') or unit.get('scope') or '').strip()
+        if not scope or not spec or unit['instruction_noref'].count('the selected region') != 1:
+            raise ValueError('local generation requires a grounded protocol source scope')
+        from .instruction_protocol import render, noun
+        instruction = render({**spec, 'ref':noun(scope)}, has_ref=True)
     if crop_instruction and not instruction:
         raise ValueError('crop instruction requires an existing protocol No-ref instruction')
+    if operation in ('add','replace') and spec.get('payload'):
+        # Source landmarks may contain "with". Explicit content slots prevent
+        # their accidental reinterpretation as additional replacement objects.
+        instruction += (' Requested NEW content only: '+spec['payload']+'. '
+                        'Other objects or landmarks in the source description are not requested new content.')
     relative_add = spec.get('placement', {}).get('anchor_mode') == 'reference'
     if operation == "add":
         return (
@@ -82,6 +97,8 @@ def edit_prompt(unit: dict[str, Any], *, target_hint: str | None = None,
             "with the requested replacement and count, keeping its position, scale, viewpoint, contact "
             "with the scene and surrounding occlusion consistent. The replacement must fit the available space "
             "and existing support without redesigning the scene. Remove the old identity completely and do "
+            "realize the requested physical form/construction, not just repaint the old silhouette. "
+            "Apply the replacement to the entire named selected entity, not only its easiest accessory. Do "
             "not leave fragments or create a duplicate beside it. Keep every other object, instance, boundary, "
             "lighting cue and background unchanged."
             + locator + guide
@@ -91,6 +108,8 @@ def edit_prompt(unit: dict[str, Any], *, target_hint: str | None = None,
             f"{instruction} Render a natural photographic result. Change only the requested visible "
             "properties of the named object or part. Preserve its identity, silhouette, geometry, "
             "pose, edges, unrequested text, unrequested printed markings and all surrounding objects. "
+            "Keep the exact original instance count and component layout: two sticks remain exactly two, "
+            "not multiple parallel rods. Preserve foreground occluders and carried objects even inside the target bounding box. "
             "For text/pattern edits perform the requested content change; tint preserves transparency, "
             "while an explicit opacity edit must realize the requested transparency. Preserve illumination direction "
             "and shading structure; for a material edit, allow only physically appropriate local texture "
@@ -111,7 +130,7 @@ class DiffusersQwenImageEditor:
     """Lazy diffusers adapter; generation is isolated so it can resume per unit."""
 
     def __init__(self, model_id: str, *, device: str = "cuda", dtype: str = "bf16", steps: int = 40,
-                 tensor_parallel_size: int = 1, crop_instruction: bool = False):
+                 tensor_parallel_size: int = 1, crop_instruction: bool = False, finish: dict | None = None):
         import torch
         from utils.qwen_pipeline_loader import load_qwen21_omni_pipeline
         self.torch = torch
@@ -120,10 +139,120 @@ class DiffusersQwenImageEditor:
                        "fp32": torch.float32, "float32": torch.float32}[dtype]
         self.pipe = load_qwen21_omni_pipeline(model_id, tensor_parallel_size=tensor_parallel_size)
         self.steps = steps
-        self.config = dict(backend="qwen-omni", model_id=model_id, steps=steps, dtype=dtype, tensor_parallel_size=tensor_parallel_size, compositor_version=3, prompt_version="region-edit-5-contextual-removal")
+        self.config = dict(backend="qwen-omni", model_id=model_id, steps=steps, dtype=dtype, tensor_parallel_size=tensor_parallel_size, compositor_version=3, prompt_version="region-edit-8-explicit-content")
         self.crop_instruction = crop_instruction
         if crop_instruction:
             self.config['instruction_frame'] = 'experimental-crop-noref-v1'
+        self.finish = None
+        if finish:
+            self.configure_finish(finish)
+
+    FINISH_OPTIONS = {'removal_effects', 'regrain', 'tone_match', 'add_cleanup', 'prompt_rules', 'min_context',
+                      'defocus_match', 'focus_match', 'material_rule', 'lighting_rule', 'detail_restore'}
+
+    def configure_finish(self, finish: dict[str, Any]) -> None:
+        """Opt-in finishing (edit_finish / removal_effects); never active by default."""
+        unknown = set(finish) - self.FINISH_OPTIONS
+        if unknown:
+            raise ValueError(f'unknown finish options: {sorted(unknown)}')
+        if finish.get('defocus_match') and finish.get('focus_match'):
+            raise ValueError('defocus_match and focus_match both blur new content; enable one')
+        from .edit_finish import VERSION as finish_version
+        self.finish = dict(finish)
+        self.effect_finder = None
+        self._effect_cache = {}
+        if self.finish.get('removal_effects'):
+            from .removal_effects import EffectFinder
+            self.effect_finder = EffectFinder(self.finish['removal_effects'])
+        config = {'version': finish_version, **self.finish}
+        if self.effect_finder is not None:
+            config['removal_effects'] = self.effect_finder.config()
+        self.config = {**self.config, 'finish': config}
+
+    def compute_removal_effect(self, image: Image.Image, unit: dict[str, Any]):
+        """(effect support or None, info) for a whole-object removal; cached per image and mask."""
+        if getattr(self, 'effect_finder', None) is None or unit['operation'] != 'remove':
+            return None, None
+        spec = unit.get('instruction_spec') or {}
+        if spec.get('remove_mode', 'whole') != 'whole' or spec.get('target_part'):
+            return None, None
+        key = (hashlib.sha1(np.asarray(image).tobytes()).hexdigest(), str(unit['mask_path']),
+               str(unit.get('protected_mask_path') or ''))
+        if key not in self._effect_cache:
+            from .removal_effects import effect_support
+            target = load_mask({"mask_path": unit["mask_path"]}, image.size)
+            protected = (load_mask({"mask_path": unit["protected_mask_path"]}, image.size)
+                         if unit.get('protected_mask_path') else None)
+            effect, info = self.effect_finder(image, target, protected)
+            support = effect_support(effect, target) if effect.any() else None
+            if support is not None and protected is not None:
+                support &= ~protected
+            self._effect_cache[key] = (support, info)
+        return self._effect_cache[key]
+
+    def _removal_effect(self, image: Image.Image, unit: dict[str, Any]):
+        """Effect support for this unit and whether it is already inside the unit's execution mask."""
+        if not getattr(self, 'finish', None):
+            return None, None, False
+        if unit.get('removal_effect_mask_path'):
+            # Resolved before generation (multi orchestrator) and already part of the execution mask.
+            effect = load_mask({"mask_path": unit['removal_effect_mask_path']}, image.size)
+            return effect, unit.get('removal_effects'), True
+        if unit.get('execution_mask_path'):
+            return None, None, False
+        effect, info = self.compute_removal_effect(image, unit)
+        return effect, info, False
+
+    def support_mask(self, image: Image.Image, unit: dict[str, Any]) -> np.ndarray:
+        """Writable support; identical to writable_mask unless removal effects are enabled."""
+        from .specialist_editors import writable_mask
+        support = writable_mask(unit, image.size, require_add_placement=False)
+        effect, _, included = self._removal_effect(image, unit)
+        if effect is not None and not included:
+            support = support | effect
+        return support
+
+    def _finish_rules(self, unit: dict[str, Any], effect: bool) -> str:
+        # prompt_rules: removal sentences only. The add/replace material sentence is a
+        # separate opt-in (material_rule): neutral for add and slightly negative for
+        # replace in the 2026-10-23 paired A/B.
+        from . import edit_finish as ef
+        operation = unit['operation']
+        if operation in ('add', 'replace'):
+            rule = ef.MATERIAL_RULE if self.finish.get('material_rule') else ''
+            if self.finish.get('lighting_rule'):
+                # Needs the planning lighting label on the unit (site_lighting); see edit_finish.lighting_rule.
+                rule += ef.lighting_rule(unit)
+            return rule
+        if operation == 'remove' and self.finish.get('prompt_rules'):
+            return ef.REMOVE_RULE + (ef.EFFECT_RULE if effect else '')
+        return ''
+
+    def _finish_crop(self, image, crop, edited_crop, local, local_support, alpha, unit, seed, local_effect):
+        from . import edit_finish as ef
+        finish, operation = self.finish, unit['operation']
+        spec = unit.get('instruction_spec') or {}
+        source = np.asarray(crop.convert('RGB'))
+        out = np.asarray(edited_crop.convert('RGB')).copy()
+        info = {'version': ef.VERSION}
+        payload = str(spec.get('payload') or unit.get('payload') or '')
+        if operation == 'add' and finish.get('add_cleanup') and not ef.PLURAL.search(payload):
+            out, info['add_cleanup'] = ef.add_cleanup(source, out, alpha)
+        if operation == 'remove' and finish.get('tone_match'):
+            out, info['tone_match'] = ef.tone_match(source, out, local, local_support, alpha, local_effect)
+        if operation in ('add', 'replace') and finish.get('defocus_match'):
+            out, info['defocus_match'] = ef.defocus_match(source, out, alpha, local)
+        if operation in ('add', 'replace') and finish.get('focus_match'):
+            out, info['focus_match'] = ef.focus_match(source, out, alpha, local, operation)
+        if operation == 'add' and finish.get('detail_restore'):
+            # Diagnostic, not in the --edit-finish preset: a 24-pair blind A/B preferred it 10:9
+            # (5 same). Additions only: around a removal or replacement the generator also cleans thin
+            # remnants of the old object (twigs outside the mask) that a coarse test cannot tell from blur.
+            out, info['detail_restore'] = ef.detail_restore(source, out, alpha)
+        if finish.get('regrain'):
+            weight = ef.changed_weight(source, out, alpha)
+            out, info['regrain'] = ef.regrain(source, out, weight, seed=seed, untouched=alpha <= 0)
+        return Image.fromarray(out), info
 
     def prompt(self, unit: dict[str, Any]) -> str:
         return edit_prompt(unit, crop_instruction=getattr(self, 'crop_instruction', False))
@@ -131,14 +260,22 @@ class DiffusersQwenImageEditor:
     def generate(self, image_path: str, unit: dict[str, Any], seed: int = 0) -> Image.Image:
         image = Image.open(image_path).convert("RGB")
         mask = load_mask({"mask_path": unit["mask_path"]}, image.size)
-        from .specialist_editors import writable_mask
-        support = writable_mask(unit, image.size, require_add_placement=False)
-        ys, xs = support.nonzero()
+        finish = getattr(self, 'finish', None) or {}
+        # Identical to writable_mask(...) unless opt-in removal effects widen it.
+        support = self.support_mask(image, unit)
+        effect, effect_info, _ = self._removal_effect(image, unit) if finish else (None, None, False)
+        # Read enough host context even when the writable patch is local.
+        ys, xs = (support | mask).nonzero()
         x0, x1 = int(xs.min()), int(xs.max() + 1)
         y0, y1 = int(ys.min()), int(ys.max() + 1)
         margin = max(16, round(max(x1 - x0, y1 - y0) * 0.45))
         x0, y0 = max(0, x0 - margin), max(0, y0 - margin)
         x1, y1 = min(image.width, x1 + margin), min(image.height, y1 + margin)
+        if finish.get('min_context'):
+            # More surrounding photo at the same ~1MP generation size: a small
+            # target is no longer upsampled 4-15x, so texture keeps photo scale.
+            x0, x1 = _grow_span(x0, x1, image.width, int(finish['min_context']))
+            y0, y1 = _grow_span(y0, y1, image.height, int(finish['min_context']))
         crop = image.crop((x0, y0, x1, y1))
         local = mask[y0:y1, x0:x1]
         local_support = support[y0:y1, x0:x1]
@@ -151,6 +288,25 @@ class DiffusersQwenImageEditor:
         # so keep the condition image to the clean source crop.
         prompt = edit_prompt(unit, target_hint=target_hint, guided=False,
                              crop_instruction=getattr(self, 'crop_instruction', False))
+        # Only set by the opt-in text-verification wrapper (exact wording / no lettering).
+        prompt += unit.get('generator_text_rule', '')
+        if finish:
+            prompt += self._finish_rules(unit, effect is not None)
+        contact = unit.get('generation_contact')
+        if contact and unit['operation'] == 'add':
+            px, py = contact['point']
+            sy, sx = np.nonzero(local_support)
+            prompt += (f" The new item's actual contact point is x={(px-x0)/crop.width:.1%}, "
+                       f"y={(py-y0)/crop.height:.1%} in this crop, on the selected host. "
+                       f"Its entire silhouette must fit inside x={sx.min()/crop.width:.1%}..{(sx.max()+1)/crop.width:.1%}, "
+                       f"y={sy.min()/crop.height:.1%}..{(sy.max()+1)/crop.height:.1%}. "
+                       "Keep it compact, fully visible, and attached at that point; do not move it to a similar nearby part. "
+                       "Match the original local blur and scale; a distant accessory must not look like a sharp foreground object.")
+        observations = unit.get('execution_observations') or {}
+        if observations.get('required_change'):
+            prompt += ' Visible completion: ' + str(observations['required_change']) + '.'
+        if observations.get('preserve'):
+            prompt += ' Preserve these visible source details: ' + '; '.join(observations['preserve']) + '.'
         self.last_generation_context = {'model_prompt': prompt, 'crop_bbox': [x0, y0, x1, y1],
                                         'target_hint_in_crop': target_hint}
         call_kwargs = dict(
@@ -188,19 +344,43 @@ class DiffusersQwenImageEditor:
         radius = _support_radius(local, unit["operation"], unit.get("support_policy"))
         expanded = local_support
         alpha = Image.fromarray((_feather(expanded, max(2, radius // 3)) * 255).astype("uint8"), mode="L")
+        if unit['operation'] == 'add':
+            from .edit_quality import paste_diagnostics
+            self.last_generation_context['paste_diagnostics'] = paste_diagnostics(crop, edited_crop, expanded)
+        finished_crop = edited_crop
+        if finish:
+            local_effect = effect[y0:y1, x0:x1] if effect is not None else None
+            finished_crop, finish_info = self._finish_crop(
+                image, crop, edited_crop, local, local_support,
+                np.asarray(alpha, dtype=np.float32) / 255., unit, seed, local_effect)
+            self.last_generation_context['finish'] = finish_info
+            if effect_info is not None:
+                self.last_generation_context['removal_effects'] = effect_info
         if unit.get("diagnostic_dir"):
             directory = Path(unit["diagnostic_dir"])
             directory.mkdir(parents=True, exist_ok=True)
             evidence = {}
-            for name, picture in (("source_crop", crop), ("raw_crop", raw),
-                                  ("resized_crop", edited_crop), ("alpha", alpha)):
+            pictures = [("source_crop", crop), ("raw_crop", raw), ("resized_crop", edited_crop), ("alpha", alpha)]
+            if finished_crop is not edited_crop:
+                pictures.append(("finished_crop", finished_crop))
+            for name, picture in pictures:
                 path = directory / (name + ".png")
                 picture.save(path)
                 evidence[name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
             self.last_generation_context["crop_evidence"] = evidence
         output = image.copy()
-        output.paste(edited_crop, (x0, y0), alpha)
+        output.paste(finished_crop, (x0, y0), alpha)
         return output
+
+
+def _grow_span(a: int, b: int, limit: int, side: int) -> tuple[int, int]:
+    """Widen [a, b) to ``side`` pixels (clamped to the frame) while still containing it."""
+    side = min(side, limit)
+    if b - a >= side:
+        return a, b
+    start = int(round((a + b) / 2 - side / 2))
+    start = max(0, min(start, limit - side))
+    return start, start + side
 
 
 def _target_hint(mask: np.ndarray) -> str:

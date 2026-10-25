@@ -66,14 +66,14 @@ def test_group_views_and_twin_record_contract(tmp_path):
     assert record["members"][0]["instruction_noref"] == record["members"][1]["instruction_noref"]
 
 
-def test_pair_gates_allow_cross_category_but_require_comparable_granularity(tmp_path):
+def test_pair_gates_allow_cross_category_and_mixed_object_part(tmp_path):
     image, objects = _source(tmp_path)
     gate = twin_pair_gate(objects[0], objects[1], image_size=(128, 96))
     assert gate["eligible"]
     objects[1]["category"] = "chair"
     assert twin_pair_gate(objects[0], objects[1], image_size=(128, 96))["eligible"]
     objects[1]["category"] = "sleeve"
-    assert not twin_pair_gate(objects[0], objects[1], image_size=(128, 96))["eligible"]
+    assert twin_pair_gate(objects[0], objects[1], image_size=(128, 96))["eligible"]
 
 
 def test_three_member_twin_selection_keeps_distinct_instances(tmp_path):
@@ -109,7 +109,7 @@ def test_multi_selection_supports_fast_capacity_and_strict_modes(tmp_path):
     image = tmp_path / "multi.jpg"
     Image.new("RGB", (128, 96), (130, 130, 130)).save(image)
     objects = []
-    for i, (x0, x1) in enumerate(((16, 36), (36, 56), (78, 102))):
+    for i, (x0, x1) in enumerate(((4, 24), (48, 68), (100, 120))):
         mask = np.zeros((96, 128), dtype=np.uint8)
         mask[30:50, x0:x1] = 255
         path = tmp_path / f"multi_mask{i}.png"
@@ -120,8 +120,15 @@ def test_multi_selection_supports_fast_capacity_and_strict_modes(tmp_path):
     fast = select_multi_candidates([candidate], target=1, seed=7, strict_geometry=False)
     strict = select_multi_candidates([candidate], target=1, seed=7, strict_geometry=True)
     assert len(fast) == len(strict) == 1
-    assert fast[0]["adjacent_pairs"][0]["geometry_exact"] is False
-    assert strict[0]["adjacent_pairs"][0]["geometry_exact"] is True
+    assert fast[0]["adjacent_pairs"] == strict[0]["adjacent_pairs"] == []
+    assert fast[0]["selection_geometry"]["seed_masks_exact"] is False
+    assert strict[0]["selection_geometry"]["seed_masks_exact"] is True
+    from scripts.recheck_multi_selection import _exact_geometry
+    assert _exact_geometry(strict[0])['eligible']
+    # Two-target quota must also fill when the scene has more than two objects.
+    pool = select_multi_candidates([candidate], target=5, seed=7, strict_geometry=True)
+    assert sorted(len(row['objects']) for row in pool) == [2, 3]
+
 
 
 def test_multi_attribute_rejects_value_repeated_in_source_selector(tmp_path):
@@ -326,6 +333,9 @@ def test_multi_step_audit_compares_each_actual_input_and_output(tmp_path):
                     assert job["images"][:2] == [units[i]["step_input_image"], units[i]["step_output_image"]]
                     audit = dict(decision="pass", target_done=True, non_target_preserved=True,
                                  natural=True, operation_correct=True, host_integrity=True)
+                    audit.update(observed_operation='attribute', source_state='old bag', result_state='blue bag',
+                                 changed_structure='color only', observed_location='bag', issue='none',
+                                 ref_matches_mask=True, location_correct=True)
                 else:
                     audit = {"decision": "pass", **dict.fromkeys(MULTI_REQUIRED_AUDIT_FIELDS, True),
                              "units": [{"unit_id": u["unit_id"], "source_entity": "bag",

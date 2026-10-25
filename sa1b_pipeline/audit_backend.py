@@ -7,12 +7,13 @@ from PIL import Image
 from .mllm import parse_json
 
 
-def audit_images(paths):
+def audit_images(paths, max_edge=1536):
     images = []
     for path in paths:
         with Image.open(path) as source:
             image = source.convert('RGB')
-        image.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
+        if max_edge:
+            image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
         images.append(image)
     return images
 
@@ -46,6 +47,7 @@ class VLLMAuditor:
             enforce_eager=True, trust_remote_code=True,
             limit_mm_per_prompt={'image': 3, 'video': 0},
             mm_encoder_attn_backend='TORCH_SDPA', enable_prefix_caching=cache_inputs,
+            reasoning_parser='qwen3',
             **cache_options)
         extra_sampling = {}
         if check_operation:
@@ -61,19 +63,23 @@ class VLLMAuditor:
             raise ValueError('audit batch outside configured capacity')
         requests = []
         for job in jobs:
-            images = audit_images(job['images'])
+            images = audit_images(job['images'], max_edge=job.get('image_max_edge', 1536))
             content = [{'type': 'image', 'image': im} for im in images]
             content.append({'type': 'text', 'text': job['prompt']})
             prompt = self.processor.apply_chat_template(
                 [{'role': 'user', 'content': content}], tokenize=False,
-                add_generation_prompt=True, enable_thinking=False)
+                add_generation_prompt=True, enable_thinking=job.get('enable_thinking', False))
             requests.append({'prompt': prompt, 'multi_modal_data': {'image': images}})
         params = self.params
-        if any(job.get('output_schema') for job in jobs):
+        if any(job.get('output_schema') or job.get('max_tokens') for job in jobs):
             from vllm.sampling_params import StructuredOutputsParams
             params = []
             for job in jobs:
                 item = deepcopy(self.params)
+                if job.get('max_tokens'):
+                    item.max_tokens = int(job['max_tokens'])
+                if job.get('enable_thinking') and job.get('thinking_token_budget') is not None:
+                    item.thinking_token_budget = int(job['thinking_token_budget'])
                 if job.get('output_schema'):
                     item.structured_outputs = StructuredOutputsParams(json=job['output_schema'])
                 params.append(item)
@@ -85,7 +91,7 @@ class VLLMAuditor:
         for job, output in zip(jobs, outputs):
             completion = output.outputs[0]
             raw = completion.text
-            audit = parse_audit(raw)
+            audit = parse_audit(raw.rsplit('</think>',1)[-1] if job.get('enable_thinking') else raw)
             if completion.finish_reason == 'length':
                 audit = {**audit, 'decision': 'fail', 'failure_reasons':
                          list(audit.get('failure_reasons', [])) + ['truncated_audit']}
@@ -97,9 +103,8 @@ class VLLMAuditor:
         return result
 
     def close(self):
-        shutdown = getattr(getattr(self.llm, 'llm_engine', None), 'shutdown', None)
-        if callable(shutdown):
-            shutdown()
+        from .mllm_runtime import close_engine
+        close_engine(getattr(self, 'llm', None))
 
 
 class TransformersAuditor:

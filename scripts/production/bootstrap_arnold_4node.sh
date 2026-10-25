@@ -5,7 +5,7 @@ set -euo pipefail
 : "${ARNOLD_WORKER_GPU:?Arnold topology missing}"
 : "${ARNOLD_ID:?Arnold rank missing}"
 [[ "$ARNOLD_WORKER_NUM" == 4 && "$ARNOLD_WORKER_GPU" == 8 && "$ARNOLD_ID" =~ ^[0-3]$ ]] || { echo 'Requires 4 workers x 8 GPUs' >&2; exit 2; }
-export SA1B_RUN_ROOT="${SA1B_RUN_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014}"
+export SA1B_RUN_ROOT="${SA1B_RUN_ROOT:-/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014}"
 export SA1B_RUNTIME_ROOT="${SA1B_RUNTIME_ROOT:-/opt/tiger/sa1b-production-runtime}"
 export WANDB_MODE=disabled WANDB_DISABLED=true PYTHONUNBUFFERED=1 CUDA_MODULE_LOADING=LAZY
 mkdir -p "$SA1B_RUN_ROOT/logs" "$SA1B_RUN_ROOT/control"

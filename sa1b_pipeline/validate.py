@@ -79,7 +79,7 @@ def _fraction(a: np.ndarray, mask: np.ndarray) -> float:
     return float(np.mean(a[mask])) if mask.any() else 0.0
 
 
-def deterministic_check(row: dict[str, Any]) -> dict[str, Any]:
+def deterministic_check(row: dict[str, Any], *, semantic_low_change: bool = False) -> dict[str, Any]:
     source = np.asarray(Image.open(row["source_image"]).convert("RGB"), dtype=np.int16)
     edited = np.asarray(Image.open(row["edited_image"]).convert("RGB"), dtype=np.int16)
     if source.shape != edited.shape:
@@ -110,6 +110,13 @@ def deterministic_check(row: dict[str, Any]) -> dict[str, Any]:
         execution = load_mask({'mask_path': row['execution_mask_path']}, (source.shape[1], source.shape[0]))
         change_fraction = _fraction(delta, execution)
     reasons = []
+    text_check = (row.get('generation_context') or {}).get('text_verification') or {}
+    if text_check.get('decision') == 'fail':
+        # Exact wording missing, old wording left, or unrequested glyphs (OCR evidence).
+        reasons.append('text_verification_failed')
+    paste = (row.get('generation_context') or {}).get('paste_diagnostics') or {}
+    if row['operation'] == 'add' and paste.get('dominant_change_clipped') is True:
+        reasons.append('dominant_addition_clipped_by_support')
     # Add may leave almost the entire host unchanged. Use an absolute, very
     # small noise floor within its writable support, never a host-area ratio.
     # A one-pixel numerical difference is not evidence of a new object.
@@ -118,10 +125,25 @@ def deterministic_check(row: dict[str, Any]) -> dict[str, Any]:
         reasons.append("no_visible_addition")
     if partial and change_fraction == 0:
         reasons.append('no_visible_target_change')
+    warnings = []
     if row["operation"] == "remove" and not partial and change_fraction < 0.50:
-        reasons.append("remove_mask_change_too_weak")
+        # Pixel contrast is not semantic presence. In group pipelines an
+        # existing mandatory audit can judge low-contrast removals; never mark
+        # them accepted here, and still reject near-empty/no-change results.
+        if semantic_low_change and change_fraction >= .05 and np.count_nonzero(delta & mask) >= 4:
+            warnings.append('low_contrast_remove_requires_semantic_confirmation')
+        else:
+            reasons.append("remove_mask_change_too_weak")
     if row["operation"] in {"attribute", "replace"} and change_fraction < 0.05:
         reasons.append("no_visible_target_change")
+    spec=row.get('instruction_spec') or {}
+    if (semantic_low_change and row['operation']=='attribute' and not partial
+            and not spec.get('qualifier') and not spec.get('target_part')
+            and any(a.get('property')=='color' for a in spec.get('attributes',[]))):
+        subtle_delta=np.max(np.abs(source-edited),axis=2)>6
+        subtle_fraction=_fraction(subtle_delta,mask)
+        if change_fraction < .10 and subtle_fraction < .20:
+            reasons.append('global_color_change_confined_to_small_fragment')
     # A few anti-aliased pixels can cross the support boundary, but a broad
     # edit outside the explicit support is a hard localization failure.
     if support_outside is not None and support_outside > 0.02:
@@ -134,7 +156,7 @@ def deterministic_check(row: dict[str, Any]) -> dict[str, Any]:
             "support_changed_fraction": support_inside,
             "outside_support_changed_fraction": support_outside,
         })
-    return {"deterministic": deterministic,
+    return {"deterministic": deterministic, "warnings": warnings,
             "decision": "fail" if reasons else "pending_semantic_audit", "failure_reasons": reasons}
 
 

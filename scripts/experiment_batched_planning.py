@@ -96,7 +96,7 @@ def main():
  from vllm.sampling_params import StructuredOutputsParams
  from sa1b_pipeline.planning_schema import typed_compact_schema
  from sa1b_pipeline.planning_options import options_schema,options_prompt,select_option
- base=a.priority_replay_root or Path('/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_edit_work/per_mask_paired_v2_4_20261012')
+ base=a.priority_replay_root or Path('/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/05_history/legacy/sa1b_edit_work/per_mask_paired_v2_4_20261012')
  replay={(r['source_id'],r['object_id']):r['operation_priority'] for r in map(json.loads,(base/'run/audit.jsonl').read_text().splitlines()) if r['stage']=='single_call_plan'} if a.priority_policy=='replay' else {}
  rows=[json.loads(l) for l in a.manifest.read_text().splitlines()];jobs=[]
  # Flat one-mask rows can repeat a source.  Preserve all supplied peers rather

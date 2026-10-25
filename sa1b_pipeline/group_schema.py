@@ -24,19 +24,21 @@ class TwinGroup:
     source_image: str
     source_provenance: dict[str, Any]
     operation: str
-    instruction_spec: dict[str, Any]
-    instruction_noref: str
+    instruction_spec: dict[str, Any] | None
+    instruction_noref: str | None
     scope_level: str
     members: list[dict[str, Any]]
     split: str
     group_checks: dict[str, Any]
     merged_target: dict[str, Any] | None = None
     schema_version: str = GROUP_SCHEMA_VERSION
+    twin_contract_version: str = "blind-size-matched-2"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "twin_id": self.twin_id,
+            "twin_contract_version": self.twin_contract_version,
             "source_id": self.source_id,
             "source_image": self.source_image,
             "source_provenance": self.source_provenance,
@@ -90,7 +92,7 @@ def _require_file(value: Any, name: str) -> None:
         raise ValueError(f"{name} must be a non-empty path")
 
 
-def _validate_member(member: dict[str, Any], *, twin: bool = False) -> None:
+def _validate_member(member: dict[str, Any], *, twin: bool = False, require_resolved_regions: bool = True) -> None:
     required = ("unit_id", "object_id", "ref", "instruction", "instruction_noref",
                 "instruction_spec", "mask", "bbox", "point", "support_mask",
                 "area_fraction")
@@ -110,7 +112,7 @@ def _validate_member(member: dict[str, Any], *, twin: bool = False) -> None:
     if member["instruction_spec"].get("version") == "2.0":
         from .instruction_protocol import validate_pair
         validate_pair(member["instruction_spec"], member["instruction"], member["instruction_noref"])
-        if member.get("blind_eligible") is not True:
+        if require_resolved_regions and member.get("blind_eligible") is not True:
             raise ValueError("unresolved protocol 2.0 source region")
     if twin and member["instruction"] == member["instruction_noref"]:
         # Ref and no-ref may coincide only if the source ref is genuinely the
@@ -140,26 +142,29 @@ def validate_twin_record(record: dict[str, Any], *, expected_split: str | None =
         raise ValueError("twin exact mask area ratio exceeds 3")
     if len({m.get("object_id") for m in members}) != len(members):
         raise ValueError("twin members must be distinct objects")
-    if record.get("instruction_noref") != members[0].get("instruction_noref"):
+    from .twin_contract import adapted
+    independent = adapted(record)
+    if independent and (record.get('instruction_noref') is not None or record.get('instruction_spec') is not None):
+        raise ValueError('adapted twins store instructions on members, not a shared group instruction')
+    if not independent and record.get("instruction_noref") != members[0].get("instruction_noref"):
         raise ValueError("group no-ref instruction mismatch")
     for member in members:
         _validate_member(member, twin=True)
-        if member["instruction_noref"] != record["instruction_noref"]:
+        if not independent and member["instruction_noref"] != record["instruction_noref"]:
             raise ValueError("twin no-ref instructions are not identical")
         if member["instruction_spec"].get("operation") != record["operation"]:
             raise ValueError("twin operation mismatch")
     if not isinstance(record.get("group_checks"), dict):
         raise ValueError("group_checks must be an object")
-    if record.get('twin_contract_version') == 'blind-cross-category-1':
-        kinds = {m.get('selector_granularity', m.get('granularity')) for m in members}
-        if len(kinds) != 1 or not kinds <= {'object', 'part'}:
-            raise ValueError('twin selector granularity mismatch')
+    if record.get('twin_contract_version') in {'blind-cross-category-1', 'blind-size-matched-2'}:
         if record['group_checks'].get('blind_disambiguation', {}).get('pass') is not True:
             raise ValueError('missing or failed independent blind disambiguation check')
 
 
 
-def validate_multi_record(record: dict[str, Any], *, expected_split: str | None = None) -> None:
+def validate_multi_record(record: dict[str, Any], *, expected_split: str | None = None,
+                          require_resolved_regions: bool = True) -> None:
+    """Validate the group; only pre-generation planning may defer source-site resolution."""
     if record.get("schema_version") != GROUP_SCHEMA_VERSION:
         raise ValueError("unsupported multi schema")
     if not record.get("multi_id") or not record.get("source_id"):
@@ -174,10 +179,8 @@ def validate_multi_record(record: dict[str, Any], *, expected_split: str | None 
     operations = record.get("operations")
     if not isinstance(operations, list) or len(operations) != n or any(o not in OPERATIONS for o in operations):
         raise ValueError("invalid operations")
-    if n <= 4 and len(set(operations)) != n:
-        raise ValueError("2-4 target groups require distinct operation types")
-    if n == 5 and len(set(operations)) != 4:
-        raise ValueError("five target groups require all four operation types")
+    # Operation balance belongs to selection/quota scheduling, not acceptance.
+    # Retained groups may repeat an operation; at least two valid targets suffice.
     order = record.get("generation_order")
     ids = [u.get("unit_id") for u in units]
     if not isinstance(order, list) or set(order) != set(ids) or len(set(order)) != n:
@@ -187,20 +190,12 @@ def validate_multi_record(record: dict[str, Any], *, expected_split: str | None 
     if len({u.get("object_id") for u in units}) != n:
         raise ValueError("multi targets must be distinct objects")
     for unit in units:
-        _validate_member(unit)
+        _validate_member(unit, require_resolved_regions=require_resolved_regions)
     if operations != [u["instruction_spec"].get("operation") for u in units]:
         raise ValueError("operations do not match retained instructions")
     if len(set(ids)) != n:
         raise ValueError("duplicate multi unit IDs")
-    adjacent = record.get("adjacent_pairs")
-    if not isinstance(adjacent, list) or not adjacent:
-        raise ValueError("multi group requires an adjacent pair")
-    objects = {str(u["object_id"]) for u in units}
-    if any(not isinstance(pair, dict) or pair.get("eligible") is not True
-           or len(pair.get("object_ids", [])) != 2
-           or len(set(map(str, pair["object_ids"]))) != 2
-           or not set(map(str, pair["object_ids"])).issubset(objects) for pair in adjacent):
-        raise ValueError("adjacency references removed or ineligible targets")
+    # Legacy adjacency metadata is optional; distance is not an acceptance gate.
     if not isinstance(record.get("joint_audit"), dict):
         raise ValueError("joint_audit must be an object")
 

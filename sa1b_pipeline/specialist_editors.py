@@ -15,12 +15,12 @@ from PIL import Image, ImageColor
 from .editor import edit_prompt, region_support_mask, _feather
 
 
-def read_binary_mask(path: str, size: tuple[int, int]) -> np.ndarray:
+def read_binary_mask(path: str, size: tuple[int, int], *, allow_empty=False) -> np.ndarray:
     with Image.open(path) as image:
         if image.size != size:
             raise ValueError(f'mask is not aligned to source: {path}')
         mask = np.asarray(image.convert('L')) > 127
-    if not mask.any():
+    if not mask.any() and not allow_empty:
         raise ValueError(f'empty mask: {path}')
     return mask
 
@@ -37,7 +37,11 @@ def writable_mask(unit: dict[str, Any], size: tuple[int, int], *, require_add_pl
         raise ValueError('this protocol task requires a resolved execution_mask_path')
     if operation == 'add' and require_add_placement and not path:
         raise ValueError('add requires an explicit execution_mask_path for item, contact and shadow; host is only an anchor')
-    support = read_binary_mask(path, size) if path else region_support_mask(source, operation, unit.get('support_policy'))
+    if not path and operation == 'add' and unit.get('generation_contact'):
+        from .edit_quality import contact_support
+        support = contact_support(source, unit['generation_contact'])
+    else:
+        support = read_binary_mask(path, size) if path else region_support_mask(source, operation, unit.get('support_policy'))
     if operation == 'attribute' and (support & ~source).any():
         raise ValueError('attribute execution mask must be within the selected source region')
     if operation in {'remove', 'replace'} and not partial and (source & ~support).any():
@@ -47,7 +51,7 @@ def writable_mask(unit: dict[str, Any], size: tuple[int, int], *, require_add_pl
     if operation == 'add' and not relative_add and not (source & support).any():
         raise ValueError('add placement must contact the selected host')
     if unit.get('protected_mask_path'):
-        protected = read_binary_mask(unit['protected_mask_path'], size)
+        protected = read_binary_mask(unit['protected_mask_path'], size, allow_empty=True)
         if (support & protected).any():
             raise ValueError('execution mask overlaps an explicitly protected region')
     return support

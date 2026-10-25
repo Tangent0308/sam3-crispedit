@@ -44,6 +44,11 @@ class Auditor:
                          target_done=ok, non_target_preserved=True, natural=True,
                          host_integrity=True, observed_change='visible changed surface',
                          failure_reasons=[] if ok else ['wrong edit'], evidence='visible')
+            if 'observed_operation' in (j.get('output_schema') or {}).get('properties', {}):
+                audit.update(observed_operation='replace' if uid == 'U2' else 'attribute',
+                             source_state='old cup', result_state='new cup', changed_structure='visible change',
+                             observed_location='selected cup', issue='none', ref_matches_mask=True,
+                             location_correct=True)
             if '::' not in j['job_id']:
                 audit.update(decision='fail' if self.joint_fail else 'pass', unique_refs=True,
                              operations_correct=True, all_targets_done=not self.joint_fail,
@@ -93,7 +98,7 @@ def test_failed_middle_edit_is_absent_from_later_input_and_final(plan, tmp_path)
     assert tuple(final[20,50])==(100,100,100)
     assert tuple(final[50,20])==(0,0,240)
     assert len(auditor.calls)==5 and editor.calls==4
-    assert len(group['adjacent_pairs'])>0
+    assert group['adjacent_pairs']==[]
     assert all('1' not in p['object_ids'] for p in group['adjacent_pairs'])
     validate_multi_record(group)
     assert cell(group,'multi')=='3:add+attribute+remove'
@@ -132,14 +137,14 @@ def test_joint_failure_is_not_overridden_by_step_passes(plan,tmp_path):
     assert g['n_targets']==4 and not g['joint_audit']['pass']
 
 
-def test_lost_adjacency_cannot_reuse_dropped_target_pair(plan,tmp_path):
-    # Move U4 far from U1; only U1/U4 survive, so old adjacent evidence is invalid.
+def test_distant_survivors_remain_valid_after_failed_edits(plan,tmp_path):
+    # Move U4 far from U1; two quality-passing targets still form a valid group.
     mask=np.zeros((128,128),np.uint8);mask[95:120,95:120]=255
     Image.fromarray(mask).save(plan['units'][3]['mask'])
     auditor=Auditor(fail=['U2','U3'])
     g=generate_committed_multi_group(plan,tmp_path/'run',Editor(),auditor)
-    assert g['n_targets']==2 and not g['adjacent_pairs'] and not g['joint_audit']['pass']
-    assert 'multi-test' not in auditor.calls
+    assert g['n_targets']==2 and not g['adjacent_pairs'] and g['joint_audit']['pass']
+    assert 'multi-test' in auditor.calls
 
 
 def test_changed_plan_refuses_resume(plan,tmp_path):
@@ -219,3 +224,26 @@ def test_zero_survivor_preview_shows_original_and_dropped_attempts(plan,tmp_path
     canvas=page(g,'multi',1,1,tmp_path)
     expanded=append_retention_evidence(canvas,g,'/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
     assert expanded.height>canvas.height
+
+
+def test_completed_cli_wave_does_not_start_gpu_services(tmp_path, monkeypatch):
+    from scripts import run_multi_transactional as cli
+    import sa1b_pipeline.multi_parallel as parallel
+    from sa1b_pipeline.production_state import write_rows, atomic_json
+    root=tmp_path/'run';plans=tmp_path/'plans.jsonl'
+    write_rows(plans,[{'multi_id':'done','units':[]}])
+    atomic_json(root/'generated/done/committed.json',{'sentinel':'validated by group loader'})
+    calls=[]
+    class Pool:
+        def __init__(self,**kw):self.model=kw['model'];self.batch_size=kw.get('batch_size',4)
+        def start(self):raise AssertionError('completed wave must not load GPU models')
+        def close(self):pass
+    monkeypatch.setattr(cli,'ServicePool',Pool)
+    monkeypatch.setattr(cli,'RemoteAuditor',lambda p:object())
+    def replay(g,*args,**kw):
+        calls.append(g['multi_id'])
+        return {**g,'n_targets':0,'operations':[],'joint_audit':{'pass':False,'status':'retained_contract_rejected'}}
+    monkeypatch.setattr(parallel,'generate_parallel_multi_group',replay)
+    cli.main(['--planned-manifest',str(plans),'--output-root',str(root),'--editor-model','editor',
+              '--audit-model','audit','--editor-python','python','--audit-python','python'])
+    assert calls==['done']  # Replay is still delegated to the validating group loader.

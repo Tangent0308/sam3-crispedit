@@ -37,6 +37,10 @@ def target(member):
 
 def status(group, kind):
     checks = group.get("group_checks", {}) if kind == "twins" else group.get("joint_audit", {})
+    if kind == 'multi' and str(group.get('parallel', {}).get('audit_policy', '')).startswith('component-final-'):
+        ok = checks.get('pass') is True
+        return ("COMPONENT AUDIT + FUSION CHECK: " + ("PASS" if ok else "FAIL")
+                + " | EXPERIMENTAL, UNPUBLISHED", "#16754a" if ok else "#a63838")
     if checks.get("group_pass") is True or checks.get("pass") is True:
         return "AUTOMATIC GROUP AUDIT: PASS | EXPERIMENTAL, UNPUBLISHED", "#16754a"
     if kind == "multi" and (checks.get("blind_protocol", {}).get("pass") is False
@@ -88,7 +92,8 @@ def page(group, kind, number, total, base):
     if kind == "multi":
         by_id = {m["unit_id"]: m for m in members}
         members = [by_id[uid] for uid in group["generation_order"]]
-    empty_committed = kind == "multi" and group.get("commit_policy") in {"keep-passed-v1", "parallel-components-v1"} and not members
+    component_final = kind == 'multi' and str(group.get('parallel', {}).get('audit_policy', '')).startswith('component-final-')
+    empty_committed = kind == "multi" and bool(group.get("commit_policy")) and bool(group.get('joint_target')) and not members
     if (not members and not empty_committed) or any(not target(m) for m in members):
         raise ValueError("preview requires every generated target in the group")
     width, gap, margin = 3300, 24, 52
@@ -106,7 +111,9 @@ def page(group, kind, number, total, base):
     draw.text((margin, 187), "Planner: " + Path(model).name + "  |  Real generation; no manual retouching",
               font=font(23), fill="#5a6779")
     if kind == "twins":
-        text = "Shared no-ref: " + group.get("instruction_noref", "")
+        from sa1b_pipeline.twin_contract import adapted
+        text = ("Same operation; each member has its own edit and no-ref instruction."
+                if adapted(group) else "Shared no-ref: " + (group.get("instruction_noref") or ""))
     elif group.get("parallel"):
         text = "Parallel from original: " + " | ".join(" -> ".join(c) for c in group["parallel"]["components"]) + " ; fuse accepted regions"
     else:
@@ -148,6 +155,8 @@ def page(group, kind, number, total, base):
             draw.text((margin + 365, y + 17 + 29 * ref_lines + 8),
                       "No-ref: " + m["instruction_noref"], font=font(20), fill="#5a6779")
         input_path = m.get("step_input_image") if kind == "multi" else group["source_image"]
+        if component_final:
+            input_path = group['source_image']
         with Image.open(resolve(m["mask"], base)) as raw:
             mask = raw.convert("L")
         bbox = mask.getbbox()
@@ -159,6 +168,9 @@ def page(group, kind, number, total, base):
         tiles = [("SRC CROP" if kind == "twins" else "SRC / THIS STEP INPUT CROP", input_path),
                  ("MASK / WHITE = SOURCE SELECTOR", m["mask"]),
                  ("TAR CROP" if kind == "twins" else "TAR / THIS STEP OUTPUT CROP", target(m))]
+        if component_final:
+            tiles = [('SRC / ORIGINAL CROP', input_path), ('MASK / WHITE = SOURCE SELECTOR', m['mask']),
+                     ('TAR / FINAL FUSED CROP', group['joint_target'])]
         for j, (title, path) in enumerate(tiles):
             x = margin + j * (col_width + gap)
             draw.text((x + 20, y + 106), title, font=font(21, True), fill="#5a6779")

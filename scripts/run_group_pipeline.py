@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Build resumable twin or adjacent multi-target data in an isolated root.
+"""Build resumable twin or multi-target data in an isolated root.
 
 Examples (planner-only smoke):
   python scripts/run_group_pipeline.py --kind twins --manifest candidates.jsonl \
       --output-root /mnt/.../twins_first5000 --target 8 --plan-only \
-      --planner-model /path/to/Qwen3.8-Flash-Next-FP8
+      --planner-model /path/to/Qwen3.8-27B --planner-tp 1
 
 The script never writes to the frozen 50k run. Final publication requires a
 semantic audit model and the explicit ``--publish`` flag.
@@ -39,7 +39,7 @@ from sa1b_pipeline.production_state import atomic_json, immutable_json, portable
 from sa1b_pipeline.source_isolation import assert_no_eval_leakage, load_reservation
 
 
-FROZEN_ROOT = Path("/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014")
+FROZEN_ROOT = Path("/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014")
 _AREA_CACHE: dict[tuple[str, str], float] = {}
 
 
@@ -96,7 +96,10 @@ def _planner(args):
                           device_map=args.planner_device_map)
     from sa1b_pipeline.mllm import VLLMSelector
     model = VLLMSelector(args.planner_model, tensor_parallel_size=args.planner_tp,
-                        max_new_tokens=args.max_new_tokens, batch_size=args.planner_batch_size)
+                        max_new_tokens=args.max_new_tokens, batch_size=args.planner_batch_size,
+                        enable_thinking=(not getattr(args,"planner_disable_thinking",False)) and (getattr(args,"multi_plan_style","legacy") in ("grounded-thinking-v8", "grounded-thinking-v9", "lean-v1", "minimal-v1", "scene-v1", "content-v1")
+                                         or (getattr(args,"twin_planning_style","legacy") in ("minimal-v1", "scene-v1", "content-v1") and args.planner_thinking_budget is not None)),
+                        thinking_token_budget=None if getattr(args,"planner_disable_thinking",False) else getattr(args,"planner_thinking_budget",None))
     if args.structured_planning_json:
         if model.params is None:
             model.close()
@@ -104,9 +107,26 @@ def _planner(args):
         from vllm.sampling_params import StructuredOutputsParams
         if getattr(args, "kind", None) == "multi" and getattr(args, "multi_grounding_mode", "legacy") == "legacy":
             from sa1b_pipeline.multi_plan_schema import multi_plan_schema
-            model.params.structured_outputs = StructuredOutputsParams(json=multi_plan_schema())
+            if getattr(args, "multi_plan_style", "legacy") in ("grounded-thinking-v8", "grounded-thinking-v9", "lean-v1", "minimal-v1", "scene-v1", "content-v1"):
+                from sa1b_pipeline.multi_compact_target import group_schema
+                schema = group_schema()
+            else:
+                schema = multi_plan_schema(execution_contract=getattr(args,"multi_execution_contract",False))
+            model.params.structured_outputs = StructuredOutputsParams(json=schema)
+        elif getattr(args, 'kind', None) == 'twins' and getattr(args, 'twin_planning_style', 'legacy') in ('concise-27b-v5', 'concise-27b-v8', 'lean-v1', 'minimal-v1', 'scene-v1', 'content-v1'):
+            from sa1b_pipeline.twin_planning import output_schema
+            model.params.structured_outputs = StructuredOutputsParams(json=output_schema())
         else:
             model.params.structured_outputs = StructuredOutputsParams(json_object=True)
+    if getattr(args, 'lean_planning', False):
+        from sa1b_pipeline.lean_planning import schema
+        if args.minimal_planning:
+            from sa1b_pipeline.minimal_planning import schema
+        if getattr(args, "scene_planning", False):
+            from sa1b_pipeline.scene_planning import schema
+        if getattr(args, "content_planning", False):
+            from sa1b_pipeline.content_planning import schema
+        model.params.structured_outputs = StructuredOutputsParams(json=schema(args.kind))
     return model
 
 
@@ -264,15 +284,8 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
             for row in op_rows:
                 row["_selection_area_bucket"] = _row_area_bucket(row)
 
-        # Select jointly across operation/member cells so the distribution is
-        # an actual invariant, rather than a side effect of concatenating and
-        # truncating operation-specific pools.  The scope targets mirror the
-        # data specification: >=40% part-level, about 10% same-host parts.
-        scope_targets = {
-            "part_on_same_host": int(round(args.target * 0.10)),
-            "part_on_different_hosts": int(math.ceil(args.target * 0.30)),
-        }
-        scope_targets["object"] = args.target - sum(scope_targets.values())
+        # Balance operation/member/area cells. Object/part scope is reporting
+        # metadata only; mixed object/part pairs are eligible by size.
         scope_counts: Counter[str] = Counter()
         area_targets = {
             "lt0.5%": int(round(args.target * 0.30)),
@@ -317,15 +330,13 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
                 if seen_sources[sid] >= 2 or group_key in seen_groups:
                     continue
                 scope = str(row.get("scope_level", "object"))
-                if scope_counts[scope] >= scope_targets.get(scope, 0):
-                    continue
                 area_bucket = str(row.get("_selection_area_bucket", "lt0.5%"))
                 if area_counts[area_bucket] >= area_targets[area_bucket]:
                     continue
                 category = normalized_category(row["objects"][0].get("category", "object")).split(",", 1)[0].strip()
                 if category_counts[category] >= category_cap:
                     continue
-                deficit = scope_targets.get(scope, 0) - scope_counts[scope]
+                deficit = 0  # no object/part preference
                 area_deficit = area_targets[area_bucket] - area_counts[area_bucket]
                 candidates_for_cell.append((area_deficit, deficit, category_counts[category], sid, row))
             if not candidates_for_cell:
@@ -348,10 +359,9 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
                     scope = str(row.get("scope_level", "object"))
                     area_bucket = str(row.get("_selection_area_bucket", "lt0.5%"))
                     category = normalized_category(row["objects"][0].get("category", "object")).split(",", 1)[0].strip()
-                    violation = (int(scope_counts[scope] >= scope_targets.get(scope, 0))
-                                 + int(area_counts[area_bucket] >= area_targets[area_bucket])
+                    violation = (int(area_counts[area_bucket] >= area_targets[area_bucket])
                                  + int(category_counts[category] >= category_cap))
-                    fallback.append((violation, scope_counts[scope], area_counts[area_bucket],
+                    fallback.append((violation, 0, area_counts[area_bucket],
                                      category_counts[category], sid, row))
                 if not fallback:
                     shortages[f"{op}:{member_count}"] += 1
@@ -359,7 +369,7 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
                 _, _, _, _, sid, row = min(fallback, key=lambda x: x[:-1])
                 relaxed_quota_count += 1
             else:
-                # Prefer scopes and area buckets furthest below their targets,
+                # Prefer area buckets furthest below their targets,
                 # then underused categories; source ID makes the final choice
                 # deterministic.
                 _, _, _, sid, row = max(candidates_for_cell, key=lambda x: (
@@ -392,7 +402,7 @@ def _select(args, candidates: list[dict[str, Any]], reservation_ids: set[str]) -
     )
 
 
-def main(argv=None):
+def main(argv=None, *, planner_override=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--kind", choices=["twins", "multi"], required=True)
     p.add_argument("--manifest", type=Path, required=True)
@@ -402,12 +412,20 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=20261014)
     p.add_argument("--reservation", type=Path, help="source isolation reservation JSON")
     p.add_argument("--planner-model")
+    p.add_argument('--twin-planning-style', choices=['legacy','concise-27b-v5','concise-27b-v8','lean-v1','minimal-v1','scene-v1','content-v1'], default='legacy')
+    p.add_argument('--planning-view-style', choices=['aligned', 'clean-contours', 'twin-crops'], default='aligned',
+                   help='content-v1: clean-contours uses two full frames; twin-crops uses a clean scene plus two labelled crops')
+    p.add_argument('--planning-source-hints', choices=['none', 'category', 'annotation'], default='none',
+                   help='content-v1: optional source category hints bound to the displayed masks')
+    p.add_argument('--instruction-content-policy', choices=['baseline', 'ranked', 'scene'], default='baseline',
+                   help='multi planner content policy; scene uses image-grounded rules without examples; ranked is a compatibility alias')
     p.add_argument("--structured-planning-json", action="store_true",
                    help="use vLLM JSON-constrained output in the same planning request")
     p.add_argument("--planner-backend", choices=["hf", "vllm"], default="vllm")
     p.add_argument("--planner-device-map", default="auto",
                    help="Transformers device map for the HF planner; auto shards large MoE models across visible GPUs")
     p.add_argument("--planner-tp", type=int, default=1)
+    p.add_argument("--planner-disable-thinking", action="store_true", help="use a non-thinking Instruct planner; included in resume configuration")
     p.add_argument("--max-new-tokens", type=int, default=1600)
     p.add_argument("--planner-batch-size", type=int, default=8,
                    help="number of multimodal planning requests submitted per vLLM batch")
@@ -425,8 +443,14 @@ def main(argv=None):
                    help="JSONL ledger with explicit human decisions; required for --publish")
     p.add_argument("--outline-planning-crops", action="store_true",
                    help="append an outside-contour locator column beside clean crop and binary mask")
+    p.add_argument("--skip-unused-planning-views", action="store_true",
+                   help="omit diagnostic images that are never sent to the planner; model inputs stay identical")
     p.add_argument("--locate-planning-scene", action="store_true",
                    help="experimental full-scene outside contours and unit tags for crop-to-scene grounding")
+    p.add_argument("--planner-thinking-budget", type=int, default=None, help="Optional internal thinking token limit for grounded-thinking-v9 (v8 is a compatibility alias).")
+    p.add_argument("--multi-plan-style", choices=["legacy", "grounded-thinking-v8", "grounded-thinking-v9", "lean-v1", "minimal-v1", "scene-v1", "content-v1"], default="legacy")
+    p.add_argument("--multi-execution-contract", action="store_true",
+                   help="Experimental v4 observations/partial planning; not enabled by default after quality regression.")
     p.add_argument("--multi-grounding-mode", choices=["legacy", "selected-only", "context-cutout"], default="legacy",
                    help="ground all regions before edits; selected-only omits local context, context-cutout retains paired crops")
     p.add_argument("--plan-only", action="store_true")
@@ -452,7 +476,92 @@ def main(argv=None):
                    help="target fraction of three-member twin groups")
     p.add_argument("--fast-selection", action="store_true",
                    help="use bbox-only multi-target capacity selection; exact geometry remains a release gate")
+    p.add_argument('--planning-operation-retry', type=int, choices=[0, 1], default=0,
+                   help='lean-v1 only: at most one operation-change retry on explicit model infeasibility')
+    p.add_argument('--planning-operation-counts', type=Path,
+                   help='JSON counts of FINAL accepted operations; read-only quota priority for retries')
+    p.add_argument('--planning-view-workers', type=int, default=1,
+                   help='with --per-mask-planning: prepare planning views and mask geometry in this many processes '
+                        'before planning (same files and results; 1 keeps the serial loop)')
+    p.add_argument('--per-mask-planning', action='store_true',
+                   help='content-v1: two images and one stateless request per mask; twins share operation only')
+    p.add_argument('--group-mask-planning', action='store_true',
+                   help='content-v1: original + all mask contours, one call per group; object-adapted edits')
+    p.add_argument('--evidence-gates', action='store_true',
+                   help='per-mask only: after program checks, drop targets failing the independent reader '
+                        '(clean photo + Ref -> boxes), companion-category identity and replace payload checks; '
+                        'twins keep two passing members when selection over-generated a third')
+    p.add_argument('--evidence-gate-iou', type=float, default=.5)
+    p.add_argument('--replace-retry', action='store_true',
+                   help='Opt-in with --evidence-gates: one re-plan for replace targets dropped as appearance-only')
+    p.add_argument('--evidence-gate-lighting', action='store_true',
+                   help='Opt-in: colour edits of parts in shade or backlit (lit/shade/silhouette judgement '
+                        'without reasoning) are dropped')
+    p.add_argument('--evidence-gate-medium', action='store_true',
+                   help='Opt-in: additions whose anchor is inside a printed, painted or displayed picture, or part of a '
+                        'statue or relief, are dropped (real/depicted/sculpted judgement without reasoning)')
+    p.add_argument('--reader-retry', action='store_true',
+                   help='Opt-in with --evidence-gates: one re-plan, with the reader\'s finding, for targets whose only '
+                        'gate failure was reader=wrong/none')
+    p.add_argument('--evidence-gate-viewpoint', action='store_true',
+                   help='Opt-in with --evidence-gates: drop additions in photos taken from high above (aerial)')
+    p.add_argument('--evidence-gate-add-site', action='store_true',
+                   help='Opt-in: an add Ref may name the attachment site on its anchor (reader containment, '
+                        'identity "part"); add twins keep the most similar anchors')
+    p.add_argument('--explicit-text', action='store_true',
+                   help='per-mask only: text-bearing additions/replacements carry exact wording in a text slot '
+                        '(rendered as reading "..."), text attribute values are short English wording')
+    p.add_argument('--twin-single-add', action='store_true',
+                   help='per-mask twins: an add member adds exactly one compact item (comparable twin regions)')
+    p.add_argument('--garment-extent-check', action='store_true',
+                   help='per-mask: drop replacements of shorts/short skirts by long trousers, leggings or long '
+                        'dresses (content_guard.garment_extent)')
     args = p.parse_args(argv)
+    args.minimal_planning = (args.twin_planning_style if args.kind == 'twins' else args.multi_plan_style) in ('minimal-v1', 'scene-v1', 'content-v1')
+    args.scene_planning = (args.twin_planning_style if args.kind == 'twins' else args.multi_plan_style) in ('scene-v1', 'content-v1')
+    args.content_planning = (args.twin_planning_style if args.kind == 'twins' else args.multi_plan_style) == 'content-v1'
+    if args.per_mask_planning and args.group_mask_planning:
+        p.error('choose per-mask-planning OR group-mask-planning')
+    if (args.evidence_gate_add_site or args.evidence_gate_lighting or args.evidence_gate_medium or args.evidence_gate_viewpoint
+            or args.replace_retry or args.reader_retry) and not args.evidence_gates:
+        p.error('--evidence-gate-add-site / --evidence-gate-lighting / --evidence-gate-medium / --evidence-gate-viewpoint / '
+                '--replace-retry require --evidence-gates')
+    if args.evidence_gates and not args.per_mask_planning:
+        p.error('--evidence-gates requires --per-mask-planning')
+    if (args.explicit_text or args.twin_single_add or args.garment_extent_check) and not args.per_mask_planning:
+        p.error('--explicit-text/--twin-single-add/--garment-extent-check require --per-mask-planning')
+    if not 0 < args.evidence_gate_iou < 1:
+        p.error('--evidence-gate-iou must be within (0, 1)')
+    if (args.per_mask_planning or args.group_mask_planning) and (not args.content_planning or args.planning_operation_retry or args.planning_view_style != 'aligned'):
+        p.error('mask planning requires content-v1, default view style, and retry=0')
+    if args.planning_view_style != 'aligned' and not args.content_planning:
+        p.error('clean-contours and twin-crops require content-v1 planning')
+    if args.planning_view_style == 'twin-crops' and args.kind != 'twins':
+        p.error('twin-crops requires twins planning with exactly two members')
+    if args.planning_source_hints != 'none' and not args.content_planning:
+        p.error('source category hints require content-v1 planning')
+    args.lean_planning = args.minimal_planning or (args.twin_planning_style if args.kind == 'twins' else args.multi_plan_style) == 'lean-v1'
+    if args.planning_operation_retry and not args.lean_planning:
+        p.error('operation retry requires lean-v1 or minimal-v1')
+    if args.lean_planning:
+        if not args.structured_planning_json or args.planner_backend != 'vllm':
+            p.error('lean-v1 requires structured vLLM planning')
+        if args.multi_grounding_mode != 'legacy' or args.multi_execution_contract:
+            p.error('lean-v1 cannot mix older grounding contracts')
+        args.locate_planning_scene = True
+    if args.multi_plan_style in ('grounded-thinking-v8', 'grounded-thinking-v9', 'lean-v1', 'minimal-v1', 'scene-v1', 'content-v1'):
+        if args.kind != 'multi' or not args.structured_planning_json:
+            p.error('grounded-thinking-v8/v9 requires --kind multi and --structured-planning-json')
+        if args.planner_thinking_budget is None:
+            args.planner_thinking_budget = 1024
+        if args.planner_thinking_budget < 0:
+            p.error('--planner-thinking-budget must be non-negative')
+        args.locate_planning_scene = True
+    elif args.kind == "twins" and args.minimal_planning and args.planner_thinking_budget is not None:
+        if args.planner_thinking_budget < 0:
+            p.error("--planner-thinking-budget must be non-negative")
+    elif args.planner_thinking_budget is not None:
+        p.error('--planner-thinking-budget requires --multi-plan-style grounded-thinking-v8/v9')
     if sum((args.plan_only, args.selection_only, args.generate_only, args.audit_only)) > 1:
         p.error("selection/plan/generate/audit-only modes are mutually exclusive")
     if args.defer_blind and not args.plan_only:
@@ -473,16 +582,52 @@ def main(argv=None):
     if root == FROZEN_ROOT or FROZEN_ROOT in root.parents or root in FROZEN_ROOT.parents:
         raise RuntimeError("refusing to write inside the protected 50k run root")
     reservation_ids, reservation_hashes = load_reservation(args.reservation) if args.reservation else (set(), set())
+    from sa1b_pipeline.instruction_diversity import VERSION as planning_content_version
+    from sa1b_pipeline.lean_planning import VERSION as lean_planning_version
+    if args.minimal_planning:
+        from sa1b_pipeline.minimal_planning import VERSION as lean_planning_version
+    if args.scene_planning:
+        from sa1b_pipeline.scene_planning import VERSION as lean_planning_version
+    if args.content_planning:
+        from sa1b_pipeline.content_planning import VERSION as lean_planning_version
     immutable_json(root / "config.json", {"kind": args.kind, "target": args.target, "split": args.split,
                                            "seed": args.seed, "manifest": str(args.manifest.resolve()),
                                            "reservation": str(args.reservation.resolve()) if args.reservation else None,
+                                           **({'per_mask_planning': __import__('sa1b_pipeline.per_mask_planning', fromlist=['VERSION']).VERSION} if args.per_mask_planning else {}),
+                                           **({'evidence_gates': {'version': __import__('sa1b_pipeline.evidence_gates', fromlist=['VERSION']).VERSION,
+                                                                  'iou_threshold': args.evidence_gate_iou,
+                                                                  **({'add_site': True} if args.evidence_gate_add_site else {}),
+                                                                  **({'lighting': True} if args.evidence_gate_lighting else {}),
+                                                                  **({'medium': True} if args.evidence_gate_medium else {}),
+                                                                  **({'viewpoint': True} if args.evidence_gate_viewpoint else {})}} if args.evidence_gates else {}),
+                                           **({'planning_options': {k: True for k, v in (('explicit_text', args.explicit_text),
+                                                                                        ('twin_single_add', args.twin_single_add),
+                                                                                        ('replace_retry', args.replace_retry),
+                                                                                        ('garment_extent', args.garment_extent_check),
+                                                                                        ('reader_retry', args.reader_retry)) if v},
+                                               'text_edits_version': __import__('sa1b_pipeline.text_edits', fromlist=['VERSION']).VERSION}
+                                              if args.explicit_text or args.twin_single_add or args.replace_retry
+                                              or args.garment_extent_check or args.reader_retry else {}),
+                                           **({'group_mask_planning': __import__('sa1b_pipeline.group_mask_planning', fromlist=['VERSION']).VERSION} if args.group_mask_planning else {}),
                                            "protocol": "2.0", "mask_semantics": "2.0",
+                                           **({'planning_source_hints': args.planning_source_hints,
+                                               'planning_source_hints_version': __import__('sa1b_pipeline.content_planning', fromlist=['SOURCE_HINT_VERSION']).SOURCE_HINT_VERSION}
+                                              if args.planning_source_hints != 'none' else {}),
+                                           **({'planning_view_style': args.planning_view_style,
+                                               'planning_view_version': __import__('sa1b_pipeline.' + ('twin_crop_views' if args.planning_view_style == 'twin-crops' else 'full_contour_views'), fromlist=['VERSION']).VERSION}
+                                              if args.planning_view_style in ('clean-contours', 'twin-crops') else {}),
+                                           **({"planner_disable_thinking": True} if args.planner_disable_thinking else {}),
+                                           "planning_content_version": planning_content_version,
+                                           **({"lean_planning": lean_planning_version, "planning_operation_retry": args.planning_operation_retry,
+                                               "operation_count_basis": json.loads(args.planning_operation_counts.read_text()) if args.planning_operation_counts else {}} if args.lean_planning else {}),
                                            "instruction_style": "benchmark-concise-3-blind-1", "steps": 40,
-                                           **({"twin_contract": "blind-cross-category-1",
+                                           **({"twin_contract": "same-operation-adapted-3" if (args.per_mask_planning or args.group_mask_planning) else "blind-size-matched-2",
                                                "twin_same_category_fraction": args.twin_same_category_fraction,
                                                **({"quota_from_selection": True} if args.quota_from_selection else {})} if args.kind == "twins" else {}),
                                            **({"dynamic_operation_quotas": True} if args.dynamic_operation_quotas else {}),
                                            **({"structured_planning_json": True} if args.structured_planning_json else {}),
+                                           **({'twin_planning_style':args.twin_planning_style} if args.twin_planning_style != 'legacy' else {}),
+                                           **({'twin_thinking_budget': args.planner_thinking_budget} if args.kind == 'twins' and args.minimal_planning and args.planner_thinking_budget is not None else {}),
                                            **({"site_model": str(Path(args.site_model).resolve())} if args.site_model else {})})
     candidates = _candidate_rows(args, reservation_ids)
     selected_path = root / "inputs/selected.jsonl"
@@ -540,12 +685,50 @@ def main(argv=None):
             raise ValueError("new grounding mode requires a fresh experiment root; existing plans are not upgraded")
         immutable_json(contract, {"multi_plan_version": MULTI_PLAN_VERSION,
                                   "multi_grounding_mode": args.multi_grounding_mode,
-                                  "locate_planning_scene": args.locate_planning_scene})
+                                  "multi_execution_contract": args.multi_execution_contract,
+                                  **({"multi_plan_style": args.multi_plan_style, "thinking_token_budget": args.planner_thinking_budget} if args.multi_plan_style != "legacy" else {}),
+                                  "locate_planning_scene": args.locate_planning_scene,
+                                  "instruction_content_policy": args.instruction_content_policy})
     needs_planning = any(not (plans_dir / f"{_group_id(args.kind, row)}.json").exists()
                          and not (root / "rejected" / f"{_group_id(args.kind, row)}.json").exists()
                          for row in selected)
-    planner = _planner(args) if needs_planning else None
+    import time
+    planner_started = time.monotonic()
+    planner = (planner_override if planner_override is not None else _planner(args)) if needs_planning else None
+    if planner is not None and args.evidence_gates:
+        from sa1b_pipeline.evidence_gates import EvidenceGates
+        planner.evidence_gates = EvidenceGates(iou_threshold=args.evidence_gate_iou,
+                                               add_site=args.evidence_gate_add_site,
+                                               lighting=args.evidence_gate_lighting,
+                                               medium=args.evidence_gate_medium,
+                                               viewpoint=args.evidence_gate_viewpoint)
+    elif planner is not None and getattr(planner, 'evidence_gates', None) is not None:
+        planner.evidence_gates = None  # A shared planner must not leak gates into an ungated run.
+    if planner is not None:
+        # Same rule for planning options: set them per run, never inherit.
+        planner.planning_options = {k: True for k, v in (('explicit_text', args.explicit_text),
+                                                         ('twin_single_add', args.twin_single_add),
+                                                         ('replace_retry', args.replace_retry),
+                                                         ('garment_extent', args.garment_extent_check),
+                                                         ('reader_retry', args.reader_retry)) if v}
+    planner_initialized = time.monotonic()
     planned = []
+    prepared = {}
+    if planner is not None and args.per_mask_planning and args.planning_view_workers > 1:
+        # Serial view preparation left the loaded planners idle for minutes on large waves
+        # (smoke wave of 239 twin groups: 422 s); spawn, not fork, from this multi-threaded process.
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+        from sa1b_pipeline.per_mask_planning import views_with_geometry
+        todo = [(index, selection) for index, selection in enumerate(selected)
+                if not (plans_dir / f"{_group_id(args.kind, selection)}.json").exists()
+                and not (root / "rejected" / f"{_group_id(args.kind, selection)}.json").exists()]
+        if todo:
+            with ProcessPoolExecutor(min(args.planning_view_workers, len(todo)),
+                                     mp_context=multiprocessing.get_context('spawn')) as pool:
+                tasks = [(selection['candidate'], selection['objects'], str(root / 'planning_views')) for _, selection in todo]
+                for (index, _), result in zip(todo, pool.map(views_with_geometry, tasks, chunksize=2)):
+                    prepared[index] = result
     try:
         pending = []
         for index, selection in enumerate(selected):
@@ -560,13 +743,31 @@ def main(argv=None):
                 continue
             objects = selection["objects"]
             grounding_first = args.kind == "multi" and args.multi_grounding_mode != "legacy"
-            views, mask_paths, view_digest = group_views(selection["candidate"], objects, root / "planning_views",
-                                                          locator_outline=args.outline_planning_crops,
-                                                          locate_in_scene=args.locate_planning_scene,
-                                                          locator_cutout=args.kind == "multi",
-                                                          selected_only=grounding_first,
-                                                          context_cutout=args.kind == "multi" and args.multi_grounding_mode == "context-cutout")
-            geometries = _geometry(mask_paths)
+            per_mask_views = None
+            if args.group_mask_planning:
+                from sa1b_pipeline.group_mask_planning import views as all_views
+                views, mask_paths, view_digest = all_views(selection['candidate'], objects, root/'planning_views')
+            elif args.per_mask_planning and index in prepared:
+                per_mask_views, mask_paths, view_digest, _ = prepared[index]
+                views = per_mask_views[0]  # legacy group metadata only; actual requests use per_mask_views.
+            elif args.per_mask_planning:
+                from sa1b_pipeline.per_mask_planning import views as single_views
+                per_mask_views, mask_paths, view_digest = single_views(selection['candidate'], objects, root/'planning_views')
+                views = per_mask_views[0]  # legacy group metadata only; actual requests use per_mask_views.
+            else:
+                views, mask_paths, view_digest = group_views(selection["candidate"], objects, root / "planning_views",
+                                                              locator_outline=args.outline_planning_crops,
+                                                              locate_in_scene=args.locate_planning_scene,
+                                                              locator_cutout=args.kind == "multi" or args.twin_planning_style in ('concise-27b-v5','concise-27b-v8','lean-v1', 'minimal-v1', 'scene-v1', 'content-v1'),
+                                                              selected_only=grounding_first,
+                                                              context_cutout=args.kind == "multi" and args.multi_grounding_mode == "context-cutout",
+                                                              save_debug_views=not args.skip_unused_planning_views,
+                                                              grounded_zoom=args.kind == "multi" and args.multi_plan_style in ("grounded-thinking-v8", "grounded-thinking-v9", "lean-v1", "minimal-v1", "scene-v1", "content-v1"),
+                                                              aligned_outline=args.scene_planning,
+                                                              clean_contours=args.planning_view_style == 'clean-contours',
+                                                              twin_crops=args.planning_view_style == 'twin-crops',
+                                                              grounded_binary=args.multi_plan_style in ("grounded-thinking-v8", "grounded-thinking-v9", "lean-v1", "minimal-v1", "scene-v1", "content-v1"))
+            geometries = prepared[index][3] if index in prepared else _geometry(mask_paths)
             if planner is None:
                 # Generation-only resume is allowed: selections rejected by a
                 # prior planning batch have no plan file and must simply be
@@ -574,20 +775,6 @@ def main(argv=None):
                 if args.plan_only:
                     raise RuntimeError("planner model is required to create new group plans")
                 continue
-            if args.kind == "multi":
-                # Source overlap is knowable before a costly visual planning
-                # call. Expanded collars are clipped, not a rejection reason.
-                probe = {"source_image": selection["candidate"]["image_path"], "units": [
-                    {"unit_id": f"U{i+1}", "mask": mask, "operation": op,
-                     "unit": {"operation": op, "mask_path": mask}}
-                    for i, (mask, op) in enumerate(zip(mask_paths, selection["operations"]))]}
-                precheck = multi_support_preflight(probe, root / "preflight" / gid)
-                if not precheck["pass"]:
-                    atomic_json(rejected_path, {"group_id": gid, "status": "preplan_rejected",
-                        "reason": "multi source masks overlap; cannot preserve both complete targets",
-                        "geometry": precheck, "selection": selection})
-                    print(json.dumps({"id": gid, "status": "preplan_rejected"}), flush=True)
-                    continue
             if args.kind == "twins":
                 areas = [g["area_fraction"] for g in geometries]
                 if min(areas) <= 0 or max(areas) > 3 * min(areas):
@@ -599,15 +786,22 @@ def main(argv=None):
                                       "reason": rejection["reason"]}), flush=True)
                     continue
                 op = selection["operation"]
-                prompt = twin_prompt(op, objects)
-                if args.outline_planning_crops:
+                prompt = '' if args.lean_planning else twin_prompt(op, objects, style=args.twin_planning_style)
+                if args.outline_planning_crops and args.twin_planning_style == 'legacy':
                     prompt += "\nImage 2 has THREE aligned columns per row: clean source, binary mask, and source with a yellow contour OUTSIDE the mask. Use the contour to identify the exact object, but read colors from column 1 only. Do not confuse an arch with a light inside it or a whole wheel with its rim. When front/rear or body-left/right is uncertain, prefer concise image-left/image-right references. A placement site must be a subregion (e.g. top edge), not repeat the host noun; use site=\"\" (the empty JSON string, never the literal word empty) for on/in the host itself. A green stripe changed to a red stripe is attribute, not replace; reject if no genuine new design fits."
 
             else:
                 assignments = {str(obj["object_id"]): op for obj, op in zip(objects, selection["operations"])}
                 order = [f"U{i+1}" for i in sorted(range(len(objects)), key=lambda i: ("remove", "replace", "attribute", "add").index(selection["operations"][i]))]
                 prompt = multi_prompt(assignments, objects, order, grounding_first=grounding_first,
-                                      context_cutout=args.multi_grounding_mode == "context-cutout")
+                                      context_cutout=args.multi_grounding_mode == "context-cutout",
+                                      content_policy=args.instruction_content_policy,
+                                      execution_contract=args.multi_execution_contract)
+                if args.multi_plan_style in ("grounded-thinking-v8", "grounded-thinking-v9", "lean-v1", "minimal-v1", "scene-v1", "content-v1"):
+                    if grounding_first or args.multi_execution_contract:
+                        raise ValueError("grounded-thinking-v8 is a separate protocol; do not mix grounding/contract flags")
+                    from sa1b_pipeline.multi_compact_target import group_prompt
+                    prompt = group_prompt(assignments,objects,order)
             if args.locate_planning_scene or grounding_first:
                 if args.locate_planning_scene:
                     appearance_rule = (
@@ -628,12 +822,37 @@ def main(argv=None):
                            + f"\nMatch each crop to its {location_kind} location before writing refs. Left/right refer to the ORIGINAL image, "
                            "never to the crop or row order. Distinguish the target from ALL similar instances in the full scene, "
                            "not just the selected members. If multiple similar objects share one side, use a verified ordinal "
-                           "or a short unique host relation. Do not output coordinates, unit IDs or annotation terms.")
+                           "or a short unique host relation. Never put coordinates, unit IDs or annotation terms in ref phrases or rendered instructions. "
+                           "Internal contact_xy is required for add: normalized original-image coordinates in [0,1], not the percent scale of the boxes above.")
+            source_hints = None
+            if args.content_planning and args.planning_source_hints == 'category':
+                from sa1b_pipeline.content_planning import category_hints
+                source_hints = category_hints(objects)
+            elif args.content_planning and args.planning_source_hints == 'annotation':
+                from sa1b_pipeline.content_planning import annotation_hints
+                source_hints = annotation_hints(objects)
+            if args.lean_planning:
+                from sa1b_pipeline.lean_planning import prompt as lean_prompt
+                if args.minimal_planning:
+                    from sa1b_pipeline.minimal_planning import prompt as lean_prompt
+                if args.scene_planning:
+                    from sa1b_pipeline.scene_planning import prompt as lean_prompt
+                if args.content_planning:
+                    from sa1b_pipeline.content_planning import prompt as lean_prompt
+                lean_assignments = {f'U{i+1}': (selection['operation'] if args.kind == 'twins' else selection['operations'][i]) for i in range(len(objects))}
+                prompt = lean_prompt(args.kind, lean_assignments, locations=None if args.scene_planning else locations,
+                                     **({'view_style': args.planning_view_style, 'source_hints': source_hints} if args.content_planning else {}))
             pending.append({"index": index, "selection": selection, "gid": gid, "path": path,
                             "objects": objects, "views": views, "mask_paths": mask_paths,
                             "geometries": geometries, "view_digest": view_digest,
                             "prompt": prompt, "assignments": assignments if args.kind == "multi" else None})
+            pending[-1]['per_mask_views'] = per_mask_views
+            pending[-1]['planning_view_style'] = args.planning_view_style
+            pending[-1]['planning_source_hints'] = source_hints
         if pending:
+            print(json.dumps({'planning_preparation': {'requests': len(pending),
+                              'planner_initialization_seconds': planner_initialized-planner_started,
+                              'views_and_checks_seconds': time.monotonic()-planner_initialized}}), flush=True)
             # Submit bounded batches and persist every completed plan before
             # asking for the next batch. A rank may be preempted while a
             # 1,250-group shard is running; per-group checkpoints make resume
@@ -641,18 +860,47 @@ def main(argv=None):
             batch_size = max(1, int(getattr(planner, "batch_size", args.planner_batch_size)))
             for batch_start in range(0, len(pending), batch_size):
                 batch = pending[batch_start:batch_start + batch_size]
-                raws = planner.generate_multimage([(item["views"], item["prompt"]) for item in batch])
+                if args.group_mask_planning:
+                    from sa1b_pipeline.group_mask_planning import plan_batch
+                    raws = plan_batch(planner, batch, kind=args.kind, root=root)
+                elif args.per_mask_planning:
+                    from sa1b_pipeline.per_mask_planning import plan_batch
+                    raws = plan_batch(planner, batch, kind=args.kind, root=root)
+                elif args.lean_planning:
+                    from sa1b_pipeline.lean_retry import plan_batch
+                    raws = plan_batch(planner, batch, kind=args.kind, root=root,
+                                      retry=args.planning_operation_retry,
+                                      accepted_counts=json.loads(args.planning_operation_counts.read_text()) if args.planning_operation_counts else None,
+                                      existing_groups=planned, minimal=args.minimal_planning, scene=args.scene_planning, content=args.content_planning)
+                else:
+                    raws = planner.generate_multimage([(item["views"], item["prompt"]) for item in batch])
+                if args.kind == 'multi' and args.multi_plan_style in ('grounded-thinking-v8', 'grounded-thinking-v9'):
+                    from sa1b_pipeline.multi_compact_target import normalize_group
+                    raws=[normalize_group(raw) for raw in raws]
                 if len(raws) != len(batch):
                     raise RuntimeError(
                         f"planner returned an incomplete batch: {len(raws)}/{len(batch)}")
                 for item, raw in zip(batch, raws):
                     selection, objects = item["selection"], item["objects"]
                     try:
+                        if raw.get('_generation_metadata', {}).get('finish_reason') == 'length':
+                            raise ValueError('planner output reached max_new_tokens; incomplete response, not a source-mask rejection')
                         if args.kind == "twins":
-                            group = build_twin_group(selection["candidate"], objects, raw, item["mask_paths"],
+                            twin_objects, twin_masks, twin_geometry = objects, item["mask_paths"], item["geometries"]
+                            if raw.get('_twin_kept_object_ids'):
+                                # Evidence gates kept two of the over-generated candidates.
+                                keep = [i for i, o in enumerate(objects) if str(o['object_id']) in raw['_twin_kept_object_ids']]
+                                if len(keep) != len(raw['_twin_kept_object_ids']):
+                                    raise ValueError('kept twin members do not match the selection')
+                                twin_objects = [objects[i] for i in keep]
+                                twin_masks = [item["mask_paths"][i] for i in keep]
+                                twin_geometry = [item["geometries"][i] for i in keep]
+                            group = build_twin_group(selection["candidate"], twin_objects, raw, twin_masks,
                                                      split=args.split, scope_level=selection["scope_level"], group_id=item["gid"],
-                                                     geometry=item["geometries"], assigned_operation=selection["operation"],
+                                                     geometry=twin_geometry, assigned_operation=selection["operation"],
                                                      require_grounding=True)
+                            if raw.get('twin_overgeneration'):
+                                group['twin_overgeneration'] = raw['twin_overgeneration']
                             group["selection_evidence"] = selection["gate"]
                             preflight = twin_support_preflight(group, root / "generated" / item["gid"])
                             if not preflight["pass"]:
@@ -664,16 +912,21 @@ def main(argv=None):
                             group = build_multi_group(selection["candidate"], objects, raw, item["mask_paths"],
                                                       split=args.split, group_id=item["gid"], geometry=item["geometries"],
                                                       assignments=item["assignments"], require_grounding=True)
-                            group["adjacent_pairs"] = selection["adjacent_pairs"]
+                            if raw.get('grounding_version') in (4, 5, 6, 7):
+                                from sa1b_pipeline.multi_execution_contract import retain_feasible_plan, schedule_content_dependencies
+                                group = retain_feasible_plan(group)
+                                group = schedule_content_dependencies(group)
+                            else:
+                                group["adjacent_pairs"] = []
                             group["support_preflight"] = multi_support_preflight(group, root / "generated" / item["gid"])
-                            if not group["support_preflight"]["pass"]:
-                                raise ValueError("multi source masks overlap; cannot preserve both complete targets")
                     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                         # One malformed/infeasible completion must not discard
                         # valid siblings from the same continuous batch. Keep the
                         # raw answer and selection evidence for audit/retry.
                         rejection = {"group_id": item["gid"], "status": "plan_rejected",
                                      "reason": str(exc), "raw": raw, "selection": selection,
+                                     "failure_kind": ('generation_limit' if raw.get('_generation_metadata',{}).get('finish_reason') == 'length'
+                                         else 'output_format' if raw.get('_raw_output') and not raw.get('targets',raw.get('members')) else 'plan_constraint'),
                                      "planning_prompt": item["prompt"], "planning_views": item["views"],
                                      "planner_model": getattr(planner, "model_id", "unknown")}
                         atomic_json(root / "rejected" / f"{item['gid']}.json", rejection)
@@ -681,9 +934,32 @@ def main(argv=None):
                                           "id": item["gid"], "status": "rejected", "reason": str(exc)},
                                          ensure_ascii=False), flush=True)
                         continue
-                    group["planning"] = {"model": getattr(planner, "model_id", "unknown"), "calls": 1,
+                    if args.minimal_planning and args.kind == "twins":
+                        group["category_relation"] = selection.get("category_relation", "unknown")
+                        group["category_relation_source"] = "source_selection_not_inferred_from_ref"
+                    group["planning"] = {"model": getattr(planner, "model_id", "unknown"), "calls": raw.get("_planning_calls", raw.get("_generation_metadata", {}).get("calls", 1)),
                                           "views": item["views"], "view_digest": item["view_digest"], "raw": raw,
                                           "prompt": item["prompt"]}
+                    if args.group_mask_planning:
+                        group['planning']['request_granularity'] = 'all_masks'
+                    if args.per_mask_planning:
+                        from sa1b_pipeline.per_mask_planning import request_prompt as mask_prompt
+                        group['planning'].update(request_granularity='one_mask',
+                            views=item['per_mask_views'],
+                            prompt=[mask_prompt(op, item['per_mask_views'][i], (item.get('planning_source_hints') or {}).get(uid))
+                                    for i, (uid, op) in enumerate(item['_mask_assignments'].items())])
+                        view_metadata = json.loads((Path(item['per_mask_views'][0][0]).parent/'views.json').read_text())
+                        # Key by object id: kept over-generated twins are re-indexed U1/U2.
+                        cleanup = {str(t['object_id']): t.get('mask_cleanup', {}) for t in view_metadata['targets']}
+                        for member in group.get('members', group.get('units', [])):
+                            evidence = cleanup.get(str(member['object_id']), {})
+                            if evidence.get('removed_remote_pixels'):
+                                member['source_mask_cleanup'] = evidence
+                    if item.get('planning_source_hints'):
+                        for member in group.get('members', group.get('units', [])):
+                            hint = item['planning_source_hints'].get(member['unit_id'])
+                            if hint:
+                                member['source_annotation_hint'] = hint
                     # This is the resume checkpoint. It is written before the
                     # next request is submitted, so an interrupted rank never
                     # needs to repeat a successfully parsed MLLM response.
@@ -700,15 +976,16 @@ def main(argv=None):
             for group in planned:
                 atomic_json(plans_dir / (group['twin_id']+'.json'), group)
     finally:
-        if planner is not None and hasattr(planner, "close"):
+        if planner is not None and planner_override is None and hasattr(planner, "close"):
             planner.close()
     if args.kind == 'twins' and not args.defer_blind:
+        from sa1b_pipeline.twin_contract import blind_probe_satisfied
         for group in planned:
             check = group.get('group_checks', {}).get('blind_disambiguation', {})
-            if check.get('pass') is not True:
+            if not blind_probe_satisfied(group):
                 atomic_json(root / 'rejected' / (group['twin_id']+'_blind.json'),
                             {'group_id':group['twin_id'],'stage':'blind_preflight','check':check})
-        planned = [g for g in planned if g.get('group_checks', {}).get('blind_disambiguation', {}).get('pass') is True]
+        planned = [g for g in planned if blind_probe_satisfied(g)]
     write_jsonl(root / "planned.jsonl", planned)
     if args.plan_only:
         print(json.dumps({"status": "planned", "groups": len(planned), "root": str(root)}, ensure_ascii=False))

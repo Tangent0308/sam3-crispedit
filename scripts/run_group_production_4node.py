@@ -40,7 +40,7 @@ from sa1b_pipeline.production_state import (
 
 REPO = Path(__file__).resolve().parents[1]
 PROTECTED = Path(
-    "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014"
+    "/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014"
 )
 CHILDREN = set()
 CHILDREN_LOCK = threading.Lock()
@@ -125,8 +125,8 @@ def prepare(args):
         "multi_groups_in_flight": 16,
         "targets": targets,
         "rank_targets": {k: split_cells(v) for k, v in targets.items()},
-        "planner_model": MODEL_BASE + "Qwen3.8-Flash-Next-FP8",
-        "planner_tp": 4,
+        "planner_model": MODEL_BASE + "Qwen3.8-27B",
+        "planner_tp": 1,
         "blind_model": MODEL_BASE + "Qwen3.8-27B",
         "audit_model": MODEL_BASE + "Qwen3.8-27B",
         "editor_model": MODEL_BASE + "Qwen-Image-2.1",
@@ -260,11 +260,15 @@ def command(wave, name, cmd, devices):
         return
     start = time.time()
     atomic_json(wave / "active_stage.json", {"stage": name, "started": start})
+    env = stage_env(devices)
+    # Calling an absolute interpreter does not activate its bin directory.
+    # vLLM launches ninja subprocesses when initializing fused kernels.
+    env['PATH'] = str(Path(cmd[0]).parent) + os.pathsep + env.get('PATH', '')
     with (wave / (name + ".log")).open("a") as log:
         child = subprocess.Popen(
             cmd,
             cwd=REPO,
-            env=stage_env(devices),
+            env=env,
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,

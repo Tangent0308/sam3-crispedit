@@ -1,27 +1,46 @@
 # SA-1B SAMTok 编辑数据构造
 
-本仓库实现基于 SA-1B 图像与 dense mask 的多类型局部编辑数据构造。当前生产版本逐个处理源图中的有效 mask，为每个 mask 规划一种固定编辑类型（`add`、`replace`、`remove`、`attribute`），用 Qwen3.8-Flash-Next 生成精简且无歧义的指令，用 Qwen-Image-2.1 生成目标图，再用 Qwen3.8-27B 做类型感知的自动审核。
+最新进展（2026-10-25，第八轮，四机生产实现）：四机证据管线生产已实现并冻结，当前计划为孪生约 2.5 万个样本（1.25 万组）、多目标约 10 万个样本（目标），实验目录 `02_production_runs/sa1b_samtok_group_twins50k_multi100k_20261025`。四台执行同一个 `deployment/arnold_entry.sh`（`scripts/run_evidence_production_4node.py`），入口指令见[运行指南](docs/FOURNODE_RUN_GUIDE.md#入口指令)。按需整片读入 SA-1B，每图菜单并行选样，每波约 3 万 GPU·秒，最后一波只差 1–2 个单位时不再跑。单机生产规模冒烟：227 个孪生组加 149 个多目标组一波 58 分钟，GPU 平均忙 90%。预计四台独占节点约 2 天（本机 GPU 与他人进程共享，直接换算 3.3 天）。见[中文报告](/opt/tiger/tanyue/visualization_tmp/production_4node_20261025/四机生产实现与时间估计.md)。
+
+最新进展（2026-10-25，第七轮，管线层面收尾）：逐项实现并对照验证管线层面能解决的问题，只保留有明确收益的：请求优先级调度（`--priority-scheduling`，同批规划对照中生成阶段 427→370 秒，交付结果相同）、航拍视角不做新增（`--evidence-gate-viewpoint`）、跳过黑白照片（`--skip-grayscale`）。保护邻近内容（盲评 10:9）、生成失败换种子重试（5 组救回 1 组）、读者反馈重新规划（5 个救回 2 个）均无明确收益，未采用。新图完整出图 5：交付 77 个，助手盲评合格 65%，含小瑕疵 96%，不合格 3；另保留单目标 21 个，无不合格（不同图，不能与前几次直接比较）。剩下的瑕疵主要在生成器（贴片感的牌子与旗帜、删除残留）。见[中文报告](/opt/tiger/tanyue/visualization_tmp/audit_verifier_pasted_20261024/验证报告_第七轮.md)。
+
+最新进展（2026-10-24，第六轮，效率）：同等质量要求下提速。两类同时规划和生成（`--concurrent-kinds`）、规划 8 卡、审核 3 卡（`--audit-devices 5,6,7`）、首波和后续波次选样余量（`--selection-margin 1.25 --fill-margin 2.0`）、规划服务提前加载、核验器分操作（`--audit-verifier split`）、均衡导出改为精确搜索。新图完整出图 4：2 波、完整会话 1241 秒（完整出图 2 为 2178 秒），每个合格交付目标 17.5 秒（原 54.5 秒）；组内交付 88 个，助手盲评合格 81%，含小瑕疵 100%，不合格 0（不同图，质量差异不能归因于改动）。另有可选的“画里”新增核验（`--evidence-gate-medium`）和衣物长度规则（`--garment-extent-check`），并修复了 Ref 核对漏洞（第 3 版）。仍未解决：新增物在阴影或虚化处过亮过锐、可写区域重画导致邻近内容变糊、删除残留。见[中文报告](/opt/tiger/tanyue/visualization_tmp/audit_verifier_pasted_20261024/验证报告_第六轮.md)。
+
+最新进展（2026-10-24，第五轮）：新增可选的单目标保留（`--keep-singles`：孪生一个成员被拒时保留另一个，多目标只剩一个目标时保留它）和审核疑虑核对（`--audit-ref-reconcile`：审核质疑 Ref 唯一性或判“选错对象”时，用规划阶段的读者证据裁决）。对照出图中合格被误拒 13/226→3/226，没有不合格被放行；新图完整出图 2 组内交付 67 个（合格 60%，含小瑕疵 93%，不合格 5），另保留单目标 7 个，回放核对第 2 版后可多交付 5 个合格目标。光照提示传给生成器、核验器加针对性问题、同一样本审两次都没有带来提升，未采用。新问题：在邮票、DVD 封面、浮雕等画面里新增，生成器画成写实物体。见[中文报告](/opt/tiger/tanyue/visualization_tmp/audit_verifier_pasted_20261024/验证报告_续.md)。
+
+最新进展（2026-10-24，第四轮）：新增可选的审核核验器（`--audit-verifier think512|nothink`，`sa1b_pipeline/edit_verifier.py`）：主审核放行后，按操作类型问 5–7 个是/否缺陷问题，只拒绝不放行。新图完整出图中，它在主审核放行的目标里拦下不合格 4/8，误拒合格 0/50；同一批出图交付不合格率 9.3%→5.5%（73 个交付，合格 59%，含小瑕疵 95%）。代价是孪生同组合格成员一起丢掉（本次 6 个）、审核耗时增加；完整出图后已改为与主审核同批提交。贴图感：景深匹配改为 `focus_match`（离线盲评可见差异 14:3 偏好），但完整出图只触发 2/46；剩下的贴图感主要是阴影或逆光处新增物的光照与饱和度，尚未解决。见[中文报告](/opt/tiger/tanyue/visualization_tmp/audit_verifier_pasted_20261024/验证报告.md)。
+
+最新进展（2026-10-23，第三轮）：新增可选的编辑器收尾处理（`--edit-finish`）。删除时用 SAM3 找出目标自己的投影和倒影一并删除，另有补颗粒、杂散清理和景深匹配。选目标与规划新增：改色光照判断（`--evidence-gate-lighting`）、替换重试（`--replace-retry`），以及穿戴物、覆盖层、地表改色三条规则；表盘类新增物允许数字。新图完整出图 74 个交付目标，助手盲评：合格 74%（含小瑕疵 95%），不合格 4。删除残留投影或倒影、新物体平涂、阴影部件改色被提亮都是 0；孪生 add 接受率 0.22→0.57，但大部分属于样本差异。每个合格目标约 34 秒。见[中文报告](/opt/tiger/tanyue/visualization_tmp/clean_edit_quality_20261023/验证报告.md)。
+
+最新进展（2026-10-22，第二轮）：新增可选的显式文字 + OCR 核验（`--text-verify`）、删除承托检查（选目标阶段自动启用）和按实际接受量分波均衡（`scripts/run_evidence_waves.py`）。新图完整出图、助手盲评：合格 74%（含小瑕疵 98%），0 不合格；文字编辑全部写对，删除/替换 0 悬空；交付类型 15/15/13/15。见[中文报告](/opt/tiger/tanyue/visualization_tmp/text_support_balance_20261022/验证报告.md)。
+
+最新进展（2026-10-22）：新增可选的**元数据选目标**（`scripts/select_evidence_groups.py`）和**规划后证据核验**（`--evidence-gates`），默认管线不变。新图两臂完整出图对照、助手盲评：交付目标合格率 79%（含小瑕疵 94%）vs 当前方案 59%（72%），交付量持平，完整会话耗时 +6.5%，每个合格目标耗时约降 22%。样本仍小，暂不切换默认、不宜无人复核放量。见[当前方法](docs/PIPELINE.md#元数据选目标--证据核验完整出图对照2026-10-22)、[中文报告](/opt/tiger/tanyue/visualization_tmp/evidence_gate_20261022/验证报告.md)、[对照PDF](/opt/tiger/tanyue/visualization_tmp/evidence_gate_20261022/完整出图对照_两方案65目标+被丢弃16计划.pdf)。
+
+最新工作版保持27B `v13.8`，每mask原两图一次规划。最新三阶段试验确认：人工准确身份可将诊断合格20/48提高到29/48，但DAM辅助与65例LoRA未达到采用标准。独立新48目标：原27B20、关闭思考20、LoRA17、DAM22项直接合格；关闭思考规划热态316→56秒，但组级质量与定位存在退化，暂不默认启用。核心残留是mask实例绑定、操作自然性及精确指代，仍不建议无人复核放量。本轮没有新生图或正式数据改动。见[当前方法](docs/PIPELINE.md)、[中文报告](/opt/tiger/tanyue/visualization_tmp/oracle_region_sft_20261021/验证报告.md)、[新图孪生PDF](/opt/tiger/tanyue/visualization_tmp/oracle_region_sft_20261021/独立新图_孪生8组.pdf)、[新图多目标PDF](/opt/tiger/tanyue/visualization_tmp/oracle_region_sft_20261021/独立新图_多目标8组.pdf)。
+
+已完成 [FLUX 3 / 专用工具的固定目标对照](docs/PIPELINE.md#flux-3-与专用编辑工具对照2026-10-20)：原生vLLM-Omni接入可运行，FLUX出图更快，但本轮局部编辑质量较差，保留Qwen为默认；LaMa在部分删除任务有收益。该实验为16个目标级对照，不替代完整管线验收。
+
+当前开发版统一27B规划/审核、逐mask规划和40步编辑，**尚不建议无人复核放量**。近期模型比较各120目标：27B直接基本合格66项，Flash-Next FP8为56项；含仅文字待修则分别69/70项，未证明换模型能改善整体质量。当前部署热态耗时9.80/25.57分钟，继续保留27B。源图mask一致性修补仅改善部分边缘，关键残留未解决，未接入生产默认。方法、完整PDF和计时边界见[模型与mask对照](docs/PIPELINE.md#mask修补与27bflash-next规划对照2026-10-20)；规划结果不等于完整生图通过率。
+
+本仓库实现基于 SA-1B 图像与 dense mask 的局部编辑数据构造，覆盖 `add`、`replace`、`remove`、`attribute`。当前孪生与多目标开发版本统一使用 **Qwen3.8-27B 规划和审核**（旧共享文本孪生另有独立盲测），Qwen-Image-2.1 以 40 步生成目标图，保留 instruction/mask 2.0。已完成的单目标 50k 和旧四机冻结任务使用各自原配置，不能将其与当前开发版本混为一谈。
+
+早期指令专项验证见 [PIPELINE 第 10 节](docs/PIPELINE.md#10-指令自然性丰富度与格式专项2026-10-17)：两类各做三轮单次调用规划实验。源 ID 确定性绑定修复保留；自然性与内容偏好仅局部改善，未达到采用标准，保留为显式实验选项。该阶段没有据此启动新生图或全量任务；后续结果以上方最新验证为准。
 
 单目标 50k 的正式入口是 `scripts/run_production_4node.py`，四机启动包装在 `scripts/production/bootstrap_arnold_4node.sh`。运行指南和冻结配置见 [docs/FOURNODE_RUN_GUIDE.md](docs/FOURNODE_RUN_GUIDE.md)。详细设计、代码路径、质量和实时进度见 [docs/PIPELINE.md](docs/PIPELINE.md)。历史方案已经压缩到 [docs/DEVELOPMENT_HISTORY.md](docs/DEVELOPMENT_HISTORY.md)。
 
-## 当前分组训练的四机入口
+## 工作目录与入口
 
-15,000 组反事实孪生＋5,000 组链式多目标，使用 instruction/mask 2.0。已准备独立目录
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016`，
-15,994 张源图及标注已复制、按图像哈希分成四份，并排除评测源图。四机任务已启动，2026-10-17 重启后正在恢复；详细状态以各节点日志和进度记录为准。
+工作区统一归档到 `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline`，按共享输入、生产过程、部署、当前验证、历史实验组织，见[归档索引](/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/README.md)。本项目datasets目录只保留正式50k release，原始清单及媒体未变。
 
-```bash
-# Arnold：4 workers × 8 H100，四台填写同一入口。
-exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016/deployment/arnold_entry_full.sh
-```
+当前新任务入口为 `scripts/groups_single_node_entry.sh`，以 `GROUP_KIND=twins|multi` 选择类型，独立输出到归档下的新运行目录。源输入通过显式路径映射读取，映射哈希锁定在新任务合同中。完整用法见[运行指南](docs/FOURNODE_RUN_GUIDE.md#迁移后的新任务入口与旧任务边界2026-10-20)。
 
-新入口 `scripts/run_group_production_4node.py` 按最终通过配额补样，支持模型本地缓存、分阶段 GPU 并行、逐组恢复、全部媒体归档以及每 5 分钟的 tqdm 风格日志。完整命令、资源、恢复及初步 3–7 天预算见 [四机指南首节](docs/FOURNODE_RUN_GUIDE.md#当前分组训练任务15k-孪生5k-多目标2026-10-16)。自动通过清单与人工验收分开，缺额保留为 partial，不降低质量门槛凑数。
+旧20k四机工作区和15k单机部署已归档；前者保存的进度为孪生自动通过547组，后者是部署准备，均不是正式完成数据。冻结记录保留原文，不能仅修改外层目录直接恢复旧任务。数据与文档迁移已完成；最新小批实验位于当前验证归档，未启动正式批量生成。
 
 ## 多目标逐步保留入口
 
-新建多目标任务使用 `parallel-components-v1`：独立区域从原图并行编辑，冲突区域串行；逐项审核后只融合合格区域。失败回退，至少保留两个目标，并重新检查类型组合、邻接关系与最终整图。入口为 `scripts/run_multi_transactional.py`，复用 `run_group_pipeline.py --plan-only` 的计划，不重复规划。新准备的四机配置自动接入：每节点 6 个编辑器＋2 个审核器分卡常驻，逐步审核合批；旧冻结部署包及旧 `keep-passed-v1` 配置保持原流程。调用和恢复见 [四机指南](docs/FOURNODE_RUN_GUIDE.md#多目标并行融合与逐步保留)。
+新建多目标任务使用 `parallel-components-v1`：独立区域从原图并行编辑，冲突区域串行；逐项审核后只融合合格区域。失败回退，至少保留两个目标，并重新检查类型组合与最终整图；不要求目标相邻。入口为 `scripts/run_multi_transactional.py`，复用 `run_group_pipeline.py --plan-only` 的计划，不重复规划。新准备的四机配置自动接入：每节点 6 个编辑器＋2 个审核器分卡常驻，逐步审核合批；旧冻结部署包及旧 `keep-passed-v1` 配置保持原流程。调用和恢复见 [四机指南](docs/FOURNODE_RUN_GUIDE.md#多目标并行融合与逐步保留)。
 
-默认 `--generation-mode parallel-components`；`--generation-mode serial` 可用于串行对照，`--save-crop-evidence` 保存模型合成前后的局部证据。四机冻结入口不变；设计和同计划质量/速度对照见 [PIPELINE 第 7.20 节](docs/PIPELINE.md#720-并行局部编辑与合格区域融合2026-10-17)。最新规划与审核改进见 [PIPELINE 7.21](docs/PIPELINE.md#721-采用并行融合物理对比规划与新增审核修复2026-10-17)：10 候选中自动通过 4 组、视觉明确合格 3 组，提供全候选 PDF；自动放行仍需要视觉复核。
+默认 `--generation-mode parallel-components`；新实验加 `--local-generation-reference` 将编辑器的原图方位指代转换为局部实体定位，训练指令保持不变。`--save-crop-evidence` 保存合成前后的局部证据。最新 27B 测试 10 候选生成 9 组 / 32 项，单项保留 26，整组自动通过 3；其中仅 1 组基本可用（有轻微叶片数量偏差）。该轮主要问题是指代、操作自然性及当时的邻接合同（邻接要求已于 2026-10-18 取消），见 [PIPELINE 第 9 节](docs/PIPELINE.md#9-统一-27b-与质量修复验证2026-10-17)。并行融合设计见第 7.20 节；历史结果不代表最新版本的验收。
 
 ## 已完成的 50k 数据
 
@@ -65,7 +84,7 @@ python -m scripts.run_production_4node --root /path/to/run status
 
 ## 分组数据（新增）
 
-反事实孪生和紧邻多目标数据使用独立运行根目录，入口为
+反事实孪生和多目标数据使用独立运行根目录，入口为
 `scripts/prepare_group_inputs.py` 和 `scripts/run_group_pipeline.py`。准备阶段先写入
 `eval_reservation.json`，再物化训练/评测候选；训练脚本会拒绝评测源图的 source ID
 或原图字节哈希。`sa1b_pipeline/group_selection.py` 只做几何和配额预选，
@@ -87,7 +106,7 @@ python -m scripts.run_production_4node --root /path/to/run status
 小批动态入口为 `scripts/run_dynamic_twins.py`，支持阶段恢复、最终配额、尝试预算和进度日志；它是单协调器，不可直接在四 rank 共享一个输出根目录。生成仍用双卡常驻编辑器，联合审核每组一次，明确合格记录与自动通过记录分开保存。
 
 当前独立输入根目录为
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014`：
+`/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/01_shared_inputs/sa1b_samtok_group_inputs_20261014`：
 训练候选 15,994、评测候选 1,199、评测 reservation 1,200；孪生第一批已固定为
 `inputs/train_twin_selected.jsonl`（5,000 组）和
 `inputs/eval_twin_selected.jsonl`（200 组）。四机运行先用

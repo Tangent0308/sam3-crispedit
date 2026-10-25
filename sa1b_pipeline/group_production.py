@@ -118,10 +118,9 @@ def accept(groups, targets, kind):
     counts, sources = Counter(), Counter()
     seen, out = set(), []
     scope_counts = Counter()
-    object_count = 0
     total = sum(targets.values())
     # Distribution constraints apply to production-sized runs. Tiny diagnostic
-    # batches cannot represent twenty categories or the requested part ratio.
+    # batches cannot represent twenty categories. Object/part quotas are disabled.
     profile = kind == "twins" and total >= 100
     for g in groups:
         gid = identity(g, kind)
@@ -135,12 +134,10 @@ def accept(groups, targets, kind):
         scopes = group_scopes(g) if profile else set()
         if profile and (
             any(scope_counts[x] >= math.floor(total * 0.05) for x in scopes)
-            or (not is_part_group(g) and object_count >= math.floor(total * 0.60))
         ):
             continue
         out.append(g)
         scope_counts.update(scopes)
-        object_count += int(not is_part_group(g))
         counts[k] += 1
         sources[sid] += 1
     return out
@@ -162,22 +159,9 @@ def choose(pool, attempted, accepted, targets, kind, limit):
     counts = Counter(cell(g, kind) for g in accepted)
     tries = Counter(cell(r, kind) for r in attempted)
     available = defaultdict(list)
-    part_only = (
-        kind == "twins"
-        and sum(targets.values()) >= 100
-        and sum(not is_part_group(g) for g in accepted)
-        >= math.floor(sum(targets.values()) * 0.60)
-    )
     scope_counts = Counter(x for g in accepted for x in group_scopes(g))
     for row in pool:
         if kind == "twins" and sum(targets.values()) >= 100:
-            # add resolves to a source attachment part after generation.
-            if (
-                part_only
-                and row["operation"] != "add"
-                and row.get("candidate_granularity") != "part"
-            ):
-                continue
             if any(
                 str(o.get("category", "")).strip().casefold() in scope_counts
                 and scope_counts[str(o.get("category", "")).strip().casefold()]

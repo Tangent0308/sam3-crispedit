@@ -160,8 +160,6 @@ def twin_pair_gate(a: dict[str, Any], b: dict[str, Any], *, image_size: tuple[in
     if str(a.get("object_id")) == str(b.get("object_id")):
         reasons.append("same_object")
     ca, cb = normalized_category(a.get("category", "")), normalized_category(b.get("category", ""))
-    if candidate_granularity(a) != candidate_granularity(b):
-        reasons.append("granularity_mismatch")
     for obj in (a, b):
         ok, reason = category_allowed(obj.get("category", ""))
         if not ok:

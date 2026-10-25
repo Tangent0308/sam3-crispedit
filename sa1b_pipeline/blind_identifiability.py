@@ -167,7 +167,13 @@ def run_blind_probes(groups, model, output_dir):
     from .production_state import atomic_json
     directory=Path(output_dir);directory.mkdir(parents=True,exist_ok=True)
     started=time.perf_counter();pending=[];inference_seconds=0.0
+    from .twin_contract import adapted
     for group in groups:
+        if adapted(group):
+            group.setdefault('group_checks', {})['blind_disambiguation'] = {
+                'applicable':False,'status':'not_required','calls':0,
+                'reason':'same-operation contract allows different member payloads'}
+            continue
         images,prompt=probe_request(group)
         digest=hashlib.sha256(Path(images[0]).read_bytes()).hexdigest()
         fingerprint=hashlib.sha256(json.dumps({'image':digest,'prompt':prompt,
@@ -194,7 +200,7 @@ def run_blind_probes(groups, model, output_dir):
             atomic_json(path,{'fingerprint':fingerprint,'images':images,'prompt':prompt,'result':result})
             group['group_checks']['blind_disambiguation']=result
     atomic_json(directory/'summary.json',{'groups':len(groups),'new_calls':len(pending),
-        'pass':sum(g['group_checks']['blind_disambiguation']['pass'] for g in groups),
+        'pass':sum(g['group_checks']['blind_disambiguation'].get('pass') is True for g in groups),
         'inference_seconds':inference_seconds,'seconds':time.perf_counter()-started,
         'version':PROBE_VERSION})
     return groups

@@ -287,7 +287,7 @@ def test_planner_loads_verified_local_copy_but_keeps_canonical_identity(monkeypa
     assert seen["processor"] == seen["model"] == "/verified/local/model"
 
 
-def test_production_profile_requires_parts_and_caps_each_scope():
+def test_production_profile_ignores_object_part_but_caps_each_scope():
     values = []
     for i in range(100):
         g = good(str(i))
@@ -297,7 +297,7 @@ def test_production_profile_requires_parts_and_caps_each_scope():
         ]
         values.append(g)
     q = {"add:cross:2": 100}
-    assert len(accept(values, q, "twins")) == 60
+    assert len(accept(values, q, "twins")) == 100
     for i, g in enumerate(values[60:]):
         for m in g["members"]:
             m["granularity"] = "part"

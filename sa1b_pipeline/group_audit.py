@@ -20,10 +20,16 @@ from .audit_backend import VLLMAuditor
 from .validate import _target_panel, audit_prompt, deterministic_check
 
 
-TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. Image 1 is the clean original full scene. Image 2 contains one row per member: SOURCE original crop (left), RESULT edited crop (middle), and MASK ONLY black-and-white selector (right). Judge generated appearance ONLY from the middle RESULT column. The right column is never a result. White selects the source object and black excludes it. The source scene and the member result images are provided. Different categories are allowed; comparable means all whole objects or all parts, with the shared edit natural for every member. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Before deciding, match each white selector to the actual source part and exclude black holes and neighboring objects. Check every ref against all similar instances in the full scene; image-left/image-right refer to the original scene, never crop row order. For add, verify direct physical contact with the selected host/site, not a nearby surface. For remove, check for target remnants and unsupported remnants; deleting a wheel, door, support or other functional part is not natural unless the image clearly supports it. For replace, require a visibly different physical form/design, not only a color or material change. For attribute, verify the requested surface changed while geometry, markings and unrelated materials remain. Judge only visible evidence and fail a member with a concrete mismatch. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
+from .twin_contract import adapted, blind_probe_satisfied
+
+TWIN_GROUP_PROMPT = '''You are auditing one counterfactual twin group. Image 1 is the clean original full scene. Image 2 contains one row per member: SOURCE original crop (left), RESULT edited crop (middle), and MASK ONLY black-and-white selector (right). Judge generated appearance ONLY from the middle RESULT column. The right column is never a result. White selects the source object and black excludes it. The source scene and the member result images are provided. Different categories are allowed; comparable means similar source mask area (ratio at most 3), including mixed whole-object/part pairs, with the shared edit natural for every member. The same no-ref edit was intended for each marked member, while each ref identifies a different original instance. Decide whether every reference is unique, every assigned operation is correct, every requested edit is complete and natural, and the member results are comparable. The group fails if any member is wrong, if a result edits another member, if the operation is misclassified, or if the shared request is not natural for all. Before deciding, match each white selector to the actual source part and exclude black holes and neighboring objects. Check every ref against all similar instances in the full scene; image-left/image-right refer to the original scene, never crop row order. For add, verify direct physical contact with the selected host/site, not a nearby surface. For remove, check for target remnants and unsupported remnants; deleting a wheel, door, support or other functional part is not natural unless the image clearly supports it. For replace, require a visibly different physical form/design, not only a color or material change. For attribute, verify the requested surface changed while geometry, markings and unrelated materials remain. Judge only visible evidence and fail a member with a concrete mismatch. Return JSON only: {"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"members_preserved":true,"comparable":true,"natural":true,"failure_reasons":[],"evidence":"brief"}.'''
 
 MULTI_GROUP_PROMPT = '''Audit one joint multi-target edit. Image 1 is the clean ORIGINAL full scene; image 2 is the clean FINAL full scene. Image 3 has one row per unit, explicitly labeled with its unit ID and generation step. Its FOUR aligned columns are ORIGINAL crop, AFTER THIS STEP crop, FINAL crop, BINARY SOURCE MASK. White selects the source region; the mask column is NEVER a generated result. Use clean crop columns to judge appearance. Original-to-after-step shows the requested edit, after-step-to-final shows whether it survived later edits. Other targets may legitimately change in later steps; do not call their requested changes damage. The per-step input/output audits separately check local preservation.
 Check each ref against the ORIGINAL full scene, each operation and payload against its row, and final consistency across adjacent targets. Fail concrete wrong targets, ambiguous refs, missing/incorrect edits, operation misclassification, visible crosstalk, floating additions, malformed geometry or destroyed prior edits. Add must create genuinely new visible content in direct contact with its source site, not merely recolor an existing accessory. Replace needs a new physical form/design. Minor texture differences or plausible taste alone are not failures. For removal, a dark flat patch covering clothing is not evidence of successful removal: inspect the revealed structure and distinguish erasure from recoloring. For attributes, compare the specified property across the intended surface; do not claim a brown surface is black merely because an adjacent component turned black. Report the unit and visible discrepancy for each failure. Inspect every row before deciding; do not infer unchanged colors from the small full-scene thumbnail. Return JSON only: {"units":[{"unit_id":"U1","source_entity":"visible selected entity","ref_matches_mask":true,"step_done":true,"survives":true,"natural":true,"issue":"brief visible evidence"}],"decision":"pass|fail","unique_refs":true,"operations_correct":true,"all_targets_done":true,"no_crosstalk":true,"outside_preserved":true,"natural":true,"failure_reasons":[],"evidence":"brief"}. Include exactly one units entry for EVERY supplied target; inspect each independently before the overall decision.'''
+
+from .edit_quality import AUDIT_RULES
+MULTI_GROUP_PROMPT += "\n" + AUDIT_RULES
+TWIN_GROUP_PROMPT += "\n" + AUDIT_RULES
 
 TWIN_REQUIRED_AUDIT_FIELDS = ("unique_refs", "operations_correct", "all_targets_done", "members_preserved", "comparable", "natural")
 MULTI_GROUP_PROMPT += "\n" + MULTI_PHYSICAL_RULES + "\nFor EVERY units entry also return host_integrity: bool and observed_change: a short description of the actual change. host_integrity is false when a remaining person, host or supported item is structurally broken; otherwise true. Describe the actual revealed structure, not just whether the old pixels disappeared."
@@ -51,16 +57,17 @@ def multi_step_prompt(instruction, operation):
             + MULTI_LOCATION_NOVELTY_RULES + "\n"
             + (MULTI_CONTRAST_RULES + "\n" if operation in {"add", "replace"} else "")
             + ("The detail crops center the ACTUAL CHANGED FOOTPRINT. Inspect what was there in SOURCE, including black/excluded parts of the anchor mask. The white mask is the attachment site, not the full area occupied by the new item.\n" if operation == "add" else "")
-            + MULTI_PHYSICAL_RULES + "\n"
+            + MULTI_PHYSICAL_RULES + "\n" + AUDIT_RULES + "\n"
             + OPERATION_AUDIT_RULES.replace("{operation}", operation) + "\n" + BLIND_RULE
             + "\nReturn the supplied JSON schema. host_integrity is true when remaining host/body/support is coherent; "
+              "item_complete is true for non-add; for add verify the entire new silhouette and actual visible attachment, and reject cut-off pieces. "
               "target_done means the full requested edit is visible. non_target_preserved checks unrelated content. "
               "Any failed check makes decision=fail.\nInstruction: " + instruction)
 
 
 def group_audit_contract(kind: str, model: str) -> dict[str, str]:
-    return {"model": model, "kind": kind, "mode": "joint-core-defects-v4" if kind == "twins"
-            else "multi-operation-contrast-v8.2"}
+    return {"model": model, "kind": kind, "mode": "joint-contact-core-quality-v6" if kind == "twins"
+            else "multi-core-quality-v12-detail"}
 
 
 def multi_audit_schema(*, joint: bool = False, contrast: bool = False) -> dict[str, Any]:
@@ -71,12 +78,14 @@ def multi_audit_schema(*, joint: bool = False, contrast: bool = False) -> dict[s
     text = {"type": "string"}
     bools = lambda names: {name: {"type": "boolean"} for name in names}
     common = {"decision": {"enum": ["pass", "fail"]},
-              "failure_reasons": {"type": "array", "items": text}, "evidence": text}
+              "failure_reasons": {"type": "array", "items": text}, "evidence": text,
+              "serious_defects": {"type": "array", "items": text},
+              "warnings": {"type": "array", "items": text}}
     if not joint:
         return obj({"source_entity": text,
                     **({"source_state": text, "result_state": text} if contrast else {}),
                     "observed_change": text, "observed_location": text,
-                    **bools(("ref_matches_mask", "location_correct", "addition_is_new")),
+                    **bools(("ref_matches_mask", "location_correct", "addition_is_new", "item_complete")),
                     **common, **bools(("operation_correct", "target_done", "non_target_preserved",
                                       "natural", "host_integrity"))})
     unit = obj({"unit_id": text, "source_entity": text, "observed_location": text,
@@ -185,19 +194,45 @@ def _single_member_audits(groups: list[dict[str, Any]], model: VLLMAuditor,
             contrast = kind == "multi" and row["operation"] in {"add", "replace"}
             panel = _target_panel(row, panel_dir, binary_locator=True, tight_detail=contrast,
                                   focus_change=(contrast and row['operation'] == 'add'))
+            if kind == 'multi':
+                # Keep context AND a tight exact-selector view in the same image.
+                # Full-photo inputs still establish unique reference and support.
+                detail_row = {k: v for k, v in row.items() if k != 'execution_mask_path'}
+                detail = _target_panel(detail_row, panel_dir / 'detail', binary_locator=True, tight_detail=True)
+                overview = Image.open(panel).convert('RGB')
+                closeup = Image.open(detail).convert('RGB')
+                combined = Image.new('RGB', (1536, 1024), 'white')
+                combined.paste(overview, (0, 0)); combined.paste(closeup, (0, 512))
+                path = panel_dir / (Path(panel).stem + '_context_and_detail.jpg')
+                combined.save(path, quality=95, subsampling=0)
+                panel = str(path)
             prompt = audit_prompt(row["instruction"], operation=row["operation"], binary_locator=True)
             if kind == "multi":
                 prompt = multi_step_prompt(row["instruction"], row["operation"])
+            observed = kind == 'multi' and row['operation'] in {'replace', 'attribute'}
+            schema = multi_audit_schema(contrast=contrast) if kind == 'multi' else None
+            if observed:
+                from .operation_evidence import audit_prompt as observed_prompt, audit_schema
+                prompt = observed_prompt(row['instruction'], row['operation'], row.get('instruction_spec'))
+                schema = audit_schema()
+            if kind == 'multi':
+                prompt += "\nImage 3 repeats the SAME edit in two rows: upper contextual comparison, lower magnified selector comparison; each row is SOURCE / FINAL RESULT / MASK. Count actual physical pieces in the lower photos, not stripes or desired payload names. Inspect all edges of any new item; verify new content by contrasting with the source."
+            diag = (member.get('generation_context') or {}).get('paste_diagnostics') or {}
+            if diag.get('cross_boundary_components'):
+                prompt += "\nCompositing diagnostic: some raw changes crossed the allowed boundary. Inspect the FINAL item for truncation or missing parts. This diagnostic alone is not a failure; unrelated raw drift may be correctly discarded."
             jobs.append({"job_id": f"{group.get('twin_id') or group.get('multi_id')}::{member['unit_id']}",
                          "images": [row["source_image"], row["edited_image"], panel],
                          "prompt": prompt,
-                         **({"output_schema": multi_audit_schema(contrast=contrast)} if kind == "multi" else {})})
+                         **({"output_schema": schema} if schema else {})})
             locations.append((group, member))
     results = _call_batched(model, jobs) if jobs else []
     by_group: dict[str, list[dict[str, Any]]] = {}
     for (group, member), result in zip(locations, results):
         audit = result.get("semantic_audit", {})
         if kind == "multi":
+            if member['operation'] in {'replace', 'attribute'}:
+                from .operation_evidence import normalize_audit
+                audit = normalize_audit(audit, member['operation'])
             audit = _enforce_multi_integrity(audit)
         member["semantic_audit"] = audit
         gid = str(group.get("twin_id") or group.get("multi_id"))
@@ -228,7 +263,7 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
         # Clean context plus labeled clean/binary crops localize without tint.
         images = [group["source_image"], comparison]
         jobs.append({"job_id": group["twin_id"], "images": images[:3],
-                     "prompt": TWIN_GROUP_PROMPT + "\n" + BLIND_RULE + "\nTarget contract:\n" +
+                     "prompt": twin_audit_prompt(group, joint=False) + "\n" + BLIND_RULE + "\nTarget contract:\n" +
                      _target_contract(group, kind="twins")})
     # The source plus one tiled comparison stays within the three-image limit
     # while showing every member, including optional three-member groups.
@@ -247,7 +282,7 @@ def audit_twin_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_di
         checks["semantic_audit_pass"] = semantic_pass
         checks["group_pass"] = bool(
             member_pass
-            and checks.get("blind_disambiguation", {}).get("pass") is True
+            and blind_probe_satisfied(group)
             and
             checks.get("deterministic", {}).get("pass") is True
             and checks.get("cross_target_preservation", {}).get("pass") is True
@@ -272,7 +307,8 @@ handle is not automatically appropriate to every host. Attribute must be a plaus
 not painted-looking food/skin; preserve glass, labels and unrelated materials. For add check the actual
 contact footprint on the selected source site, size and support, not just proximity to the host.
 Check refs against ALL similar objects in the full source, not just these members. Small/clipped/occluded
-objects are valid if identity, scope and the edit are clear. Different categories are valid when the SAME
+objects are valid if identity, scope and the edit are clear. Whole-object/part mixtures are valid; size is checked from mask areas by code. Never reject solely for object/part labels.
+Different categories are valid when the SAME
 request is natural for both. Do not demand identical object names or identical attachment-site names.
 shared_edit_valid requires comparable practical suitability of the EXACT payload at every intended site;
 mere physical possibility is insufficient if ordinary use clearly favors one member (e.g. a water pitcher
@@ -290,12 +326,40 @@ Return JSON only, EVERY member in order:
 "scope_correct":"pass|fail|uncertain","operation_correct":"pass|fail|uncertain",
 "target_done":"pass|fail|uncertain","non_target_preserved":"pass|fail|uncertain",
 "natural":"pass|fail|uncertain"},"failure_reasons":[],"warnings":[]}],
-"comparable_granularity":"pass|fail|uncertain","shared_edit_valid":"pass|fail|uncertain","evidence":"brief"}.
+"shared_edit_valid":"pass|fail|uncertain","evidence":"brief"}.
 '''
+
+from .audit_instruction_revision import RULES as REVISION_RULES, revise as revise_instruction
+
+JOINT_TWIN_PROMPT += "\n" + AUDIT_RULES + "\n" + REVISION_RULES
+JOINT_TWIN_PROMPT += '\nEach member also returns instruction_revision: {"mode":"keep|ref","ref":"","reason":"","same_target":false,"unique":false,"evidence":""}.'
 
 JOINT_MEMBER_FIELDS = ("reference_correct", "single_instance", "scope_correct", "operation_correct",
                        "target_done", "non_target_preserved", "natural")
 
+
+
+
+def twin_audit_prompt(group, *, joint=True):
+    if not adapted(group):
+        return JOINT_TWIN_PROMPT if joint else TWIN_GROUP_PROMPT
+    if not joint:
+        return TWIN_GROUP_PROMPT.replace(
+            'with the shared edit natural for every member', 'with each member-specific edit natural for its own target').replace(
+            'The same no-ref edit was intended for each marked member',
+            'Only the operation type is shared; each member has its OWN edit and no-ref instruction').replace(
+            'or if the shared request is not natural for all', 'or if any member-specific request is unnatural for its own target')
+    return ADAPTED_TWIN_PROMPT
+
+
+ADAPTED_TWIN_PROMPT = """Audit same-operation twins. Image 1 is the clean full source. Image 2 has one row per member: SOURCE / RESULT / BINARY MASK. Image 3 shows full member results. Each result starts from the SAME source and edits ONLY its own member.
+Only the operation type is shared. Payload, attribute, value and attachment site can differ; judge each member against its OWN instruction. Do not require identical no-ref sentences, shared payload suitability or blind ambiguity.
+Identify the actual source mask extent and compare the result. Check the ref against ALL similar instances in the full original scene, without using mask labels to disambiguate. Wrong target/extent, ambiguous ref, unchanged or incomplete edit, wrong operation, damage to another member, and implausible anatomy/support are failures. Add must contact its selected source site and preserve existing content. Replace needs a different physical design. Attribute preserves unrelated structure and markings. Remove must not leave substantial remnants or unsupported content.
+Accept natural everyday requests; do not reject merely for different categories, whole/part labels, occlusion, clipping or small size. Ignore mild edge/texture differences and subjective preferences; list them as warnings. Mark uncertain only if the core reference/edit cannot be judged.
+Return JSON with EVERY member in order:
+{"members":[{"unit_id":"U1","observed_entity":"...","ref_entity":"...","observed_change":"...","checks":{"reference_correct":"pass|fail|uncertain","single_instance":"pass|fail|uncertain","scope_correct":"pass|fail|uncertain","operation_correct":"pass|fail|uncertain","target_done":"pass|fail|uncertain","non_target_preserved":"pass|fail|uncertain","natural":"pass|fail|uncertain"},"failure_reasons":[],"warnings":[],"instruction_revision":{"mode":"keep|ref","ref":"","reason":"","same_target":false,"unique":false,"evidence":""}}],"member_edits_valid":"pass|fail|uncertain","evidence":"brief"}.
+member_edits_valid checks that each request fits its OWN target, never that requests match across targets.
+""" + "\n" + AUDIT_RULES + "\n" + REVISION_RULES
 
 def _acknowledged_hard_defects(warnings):
     """Do not downgrade an explicitly reported serious defect to a soft note.
@@ -316,20 +380,27 @@ def _acknowledged_hard_defects(warnings):
 
 def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> None:
     audit = result.get("semantic_audit") or {}
+    edit_check = "member_edits_valid" if adapted(group) else "shared_edit_valid"
     rows = audit.get("members") or []
     if isinstance(rows, list) and rows and all(isinstance(r, dict) and "checks" in r for r in rows):
         rows = [{**r, **{k: (r.get("checks") or {}).get(k) == "pass" for k in JOINT_MEMBER_FIELDS}}
                 for r in rows]
         for row in rows:
             contradictions = _acknowledged_hard_defects(row.get("warnings", []))
+            scope_conflict = explicit_scope_contradiction(row.get('observed_entity', ''),
+                                                        row.get('ref_entity', ''))
+            if scope_conflict:
+                row['scope_correct'] = False
+                contradictions.append(scope_conflict)
             if contradictions:
                 row["failure_reasons"] = list(row.get("failure_reasons") or []) + contradictions
+            row["failure_reasons"] = list(row.get("failure_reasons") or []) + list(row.get("serious_defects") or [])
             if row.get("failure_reasons"):
                 row["natural"] = False
             if not all(str(row.get(k, "")).strip() for k in ("observed_entity", "ref_entity", "observed_change")):
                 row["scope_correct"] = False
-        audit = {**audit, "members": rows, "comparable_granularity": audit.get("comparable_granularity") == "pass",
-                 "shared_edit_valid": audit.get("shared_edit_valid") == "pass"}
+        audit = {**audit, "members": rows,
+                 edit_check: audit.get(edit_check) == "pass"}
     expected = [m["unit_id"] for m in group["members"]]
     valid_rows = isinstance(rows, list) and all(isinstance(r, dict) for r in rows)
     ids_match = valid_rows and [r.get("unit_id") for r in rows] == expected
@@ -337,7 +408,7 @@ def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> No
     if (result.get("finish_reason") == "length" or audit.get("decision") == "fail"
             or audit.get("_parse_error") or audit.get("failure_reasons")):
         members_pass = False
-    semantic_pass = members_pass and audit.get("comparable_granularity") is True and audit.get("shared_edit_valid") is True
+    semantic_pass = members_pass and audit.get(edit_check) is True
     for index, member in enumerate(group["members"]):
         row = rows[index] if ids_match else {"failure_reasons": ["missing_or_mismatched_member_ids"]}
         member["semantic_audit"] = {**row, "decision": "pass" if ids_match and
@@ -349,8 +420,35 @@ def _apply_joint_twin_audit(group: dict[str, Any], result: dict[str, Any]) -> No
                    "audit_mode": "joint-core-defects-v4", "audit_calls": 1,
                    "audit_request": {k: result.get(k) for k in
                                      ("semantic_audit_raw", "input_tokens", "output_tokens", "finish_reason")}})
-    checks["group_pass"] = (checks.get("blind_disambiguation", {}).get("pass") is True) and semantic_pass and all(checks.get(k, {}).get("pass") is True for k in
+    checks["group_pass"] = blind_probe_satisfied(group) and semantic_pass and all(checks.get(k, {}).get("pass") is True for k in
         ("deterministic", "cross_target_preservation", "support_gap"))
+
+
+def explicit_scope_contradiction(observed, referenced):
+    """Resolve an explicit A-and-B observation versus an A-only reference.
+
+    This narrowly checks the model's own evidence; it is not an NLP substitute
+    for mask grounding. Color coordination and unknown noun relations pass on
+    to the visual decision. No source IDs or specific object pairs are used.
+    """
+    parts = re.split(r'\s+(?:and|plus)\s+', str(observed).casefold())
+    if len(parts) != 2:
+        return ''
+    heads = []
+    modifiers = set('black white gray grey red blue green yellow purple pink orange brown beige '
+                    'gold silver dark light upper lower left right front back small large'.split())
+    for part in parts:
+        phrase = re.split(r'\s+(?:of|on|in|at|with|from|worn)\s+', part)[0]
+        words = re.findall(r'[a-z]+', phrase)
+        if not words or words[-1] in modifiers:
+            return ''
+        heads.append(words[-1].rstrip('s'))
+    if heads[0] == heads[1]:
+        return ''
+    ref_words = {w.rstrip('s') for w in re.findall(r'[a-z]+', str(referenced).casefold())}
+    if sum(head in ref_words for head in heads) == 1:
+        return 'observed selector contains two named entities but reference covers only one'
+    return ''
 
 
 def refresh_twin_add_checks(group: dict[str, Any]) -> bool:
@@ -360,7 +458,14 @@ def refresh_twin_add_checks(group: dict[str, Any]) -> bool:
         return checks.get("deterministic", {}).get("pass") is not False
     results = []
     for member in group["members"]:
+        previous = member.get("deterministic", {})
         result = deterministic_check(_member_audit_row(group, member, kind="twins"))
+        # Cached presence refresh must preserve diagnostic evidence from checks
+        # whose generation context is absent from the audit row (e.g. clipping).
+        if previous.get("decision") == "fail":
+            result["decision"] = "fail"
+            result["failure_reasons"] = list(dict.fromkeys(
+                previous.get("failure_reasons", []) + result.get("failure_reasons", [])))
         member["deterministic"] = result
         results.append(result)
     # A new check must never erase an existing rejection from another gate.
@@ -373,9 +478,41 @@ def refresh_twin_add_checks(group: dict[str, Any]) -> bool:
     return passed
 
 
+def twin_selected_comparison(group, path):
+    """Aligned exact selector cutouts; context stays in the other two inputs."""
+    rows = []
+    for m in group['members']:
+        mask = Image.open(m['mask']).convert('L')
+        bbox = mask.getbbox()
+        if not bbox:
+            raise ValueError('empty twin audit selector')
+        pad = max(8, round(max(bbox[2]-bbox[0], bbox[3]-bbox[1])*.08))
+        box = (max(0,bbox[0]-pad),max(0,bbox[1]-pad),min(mask.width,bbox[2]+pad),min(mask.height,bbox[3]+pad))
+        row = Image.new('RGB',(1200,440),'white')
+        draw = ImageDraw.Draw(row)
+        for i, key in enumerate(('source_image','edited_image')):
+            im = Image.open(group[key] if i == 0 else m[key]).convert('RGB')
+            if im.size != mask.size:
+                raise ValueError('twin audit image/mask shape mismatch')
+            cut = Image.composite(im,Image.new('RGB',im.size,'#888888'),mask).crop(box)
+            tile = ImageOps.contain(cut,(580,385))
+            row.paste(tile,(600*i+(600-tile.width)//2,50+(385-tile.height)//2))
+            draw.text((600*i+12,8),m['unit_id']+(' SELECTED SOURCE' if i==0 else 'SAME PIXELS IN RESULT'),font=load_font(25),fill='black')
+        rows.append(row)
+    panel = Image.new('RGB',(1200,440*len(rows)),'white')
+    for i,row in enumerate(rows): panel.paste(row,(0,440*i))
+    path = Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    panel.save(path,quality=95,subsampling=0)
+    return str(path)
+
+
 def audit_twin_groups_joint(groups: list[dict[str, Any]], model: VLLMAuditor,
-                            panel_dir: str | Path) -> list[dict[str, Any]]:
+                            panel_dir: str | Path, *, exact_selector=False, thinking=False,
+                            observed_operation=True, compact=None) -> list[dict[str, Any]]:
     """One visual request per group; deterministic gates remain independent."""
+    if compact is True or (compact is None and groups and all(adapted(g) for g in groups)):
+        from .twin_compact_audit import audit
+        return audit(groups, model, panel_dir)
     panel_dir = Path(panel_dir)
     jobs, audited_groups = [], []
     for group in groups:
@@ -386,11 +523,76 @@ def audit_twin_groups_joint(groups: list[dict[str, Any]], model: VLLMAuditor,
         comparison = _member_comparison(panels, panel_dir / f"{group['twin_id']}_local.jpg", crop_panels=True)
         full = _member_comparison([m["edited_image"] for m in group["members"]],
                                  panel_dir / f"{group['twin_id']}_full.jpg")
+        prompt = twin_audit_prompt(group)
+        if exact_selector:
+            full = twin_selected_comparison(group,panel_dir/f"{group['twin_id']}_selected.jpg")
+            prompt = prompt.replace('Image 3 shows full member results.',
+                'Image 3 shows exact SELECTED SOURCE pixels and SAME PIXELS IN RESULT on gray; gray is a visualization, not image damage. Use Image 2 for replacement/add shapes extending beyond the original selector.')
+            prompt += ('\nCompare each member independently; one successful member cannot rescue another. '
+                'For attribute, the requested surface itself must visibly acquire the value: changing only an excluded accessory or a small patch fails target_done. '
+                'For replace, name the new visible object and verify its required physical form; an empty bracket, remaining support, or removal alone fails. '
+                'For add, verify existing graphics and accessories remain; replacing a graphic by the payload fails operation_correct. '
+                'Explicit payload count must match. A severe mismatch is a failure even when the rest looks natural. '
+                'Record actual before and after appearance in observed_change, not the requested edit. '
+                'For each member additionally return extent_coverage="complete|partial|none|uncertain". '
+                'Complete means the substantive requested edit is realized, allowing tiny edge imperfections. '
+                'For whole-object color changes, changing only a buckle while the bag fabric keeps its old color is PARTIAL, even if the buckle lies inside the mask. '
+                'For remove the selected entity must be absent; for replace the requested replacement must actually exist; for add the requested new content must exist at the site. '
+                'Compare the dominant selected surface in Image 3 before declaring color completion; an accessory color change cannot stand in for its host. '
+                'Also return nearest_rival (a short description of the closest similar visible candidate, or none) and reference_unique (boolean). '
+                'Interpret the REF in Image 1 without using a mask or member labels to disambiguate it. '
+                'The white shutter is ambiguous if another white shutter is visible. The mullion on the left building is ambiguous if that building has several mullions. '
+                'Upper/right only inside a crop does not identify the target in the original scene. '
+                'A correct masked edit does not make an ambiguous REF correct; set reference_unique=false when the sentence fits the rival too.')
         jobs.append({"job_id": group["twin_id"], "images": [group["source_image"], comparison, full],
-                     "prompt": JOINT_TWIN_PROMPT + "\n" + BLIND_RULE + "\nTarget contract:\n" + _target_contract(group, kind="twins")})
+                     "prompt": prompt + ("\nReason briefly about the weakest member before returning JSON; keep reasoning under 150 words." if thinking else '') + "\n" + BLIND_RULE + "\nTarget contract:\n" + _target_contract(group, kind="twins"),
+                     **({'enable_thinking':True,'max_tokens':3072} if thinking else {})})
+        if observed_operation and group.get('operation') in {'replace', 'attribute'}:
+            from .operation_evidence import twin_prompt
+            jobs[-1]['prompt'] = twin_prompt(jobs[-1]['prompt'], group)
+            jobs[-1]['max_tokens'] = 1600
+        jobs[-1]['max_tokens'] = jobs[-1].get('max_tokens', 1600) + 160 * len(group['members'])
         audited_groups.append(group)
     for group, result in zip(audited_groups, _call_batched(model, jobs)):
+        observed = observed_operation and group.get('operation') in {'replace', 'attribute'}
+        if observed:
+            from .operation_evidence import enforce_twin_observation
+            enforce_twin_observation(result, group['operation'])
+        audit_raw = result.get('semantic_audit') or {}
+        revision_rows = audit_raw.get('members', [])
+        valid_revision_ids = (isinstance(revision_rows, list) and
+            all(isinstance(r, dict) for r in revision_rows) and
+            [r.get('unit_id') for r in revision_rows] == [m['unit_id'] for m in group['members']])
+        if valid_revision_ids:
+            for member, row in zip(group['members'], revision_rows):
+                checks = row.get('checks') or {}
+                image_ok = (all(checks.get(k) == 'pass' for k in
+                    ('single_instance','scope_correct','operation_correct','target_done','non_target_preserved','natural'))
+                    and not row.get('failure_reasons') and not row.get('serious_defects')
+                    and not _acknowledged_hard_defects(row.get('warnings', []))
+                    and (not exact_selector or row.get('extent_coverage') == 'complete')
+                    and not audit_raw.get('_parse_error') and result.get('finish_reason') != 'length')
+                error = revise_instruction(member, row, image_ok=image_ok)
+                if error:
+                    row.setdefault('failure_reasons', []).append(error)
+            if not adapted(group) and all(m.get('instruction_spec') for m in group['members']):
+                sentences = {m['instruction_noref'] for m in group['members']}
+                if len(sentences) != 1:
+                    audit_raw.setdefault('failure_reasons', []).append('revised_twin_noref_mismatch')
+                else:
+                    group['instruction_noref'] = group['members'][0]['instruction_noref']
+                    group['instruction_spec'] = group['members'][0]['instruction_spec'].copy()
+        if exact_selector:
+            for row in (result.get('semantic_audit') or {}).get('members', []):
+                if isinstance(row,dict) and row.get('extent_coverage') != 'complete':
+                    row.setdefault('failure_reasons', []).append('requested extent is not fully realized or not assessed')
+                if isinstance(row,dict) and (row.get('reference_unique') is not True or not str(row.get('nearest_rival','')).strip()):
+                    row.setdefault('failure_reasons', []).append('reference uniqueness against visible rivals not established')
         _apply_joint_twin_audit(group, result)
+        if exact_selector:
+            group['group_checks']['audit_mode'] = 'joint-exact-selector-v4-scope' + ('-thinking' if thinking else '')
+        if observed:
+            group['group_checks']['audit_mode'] = 'joint-contact-core-quality-v6'
     return groups
 
 
@@ -447,16 +649,17 @@ def _enforce_multi_integrity(audit: dict[str, Any], *, joint: bool = False) -> d
     rows = audit.get("units", []) if joint else [audit]
     if not isinstance(rows, list):
         rows = []
-    failures = []
+    failures = list(audit.get('serious_defects') or [])
     for row in rows:
         if not isinstance(row, dict) or row.get("host_integrity") is not True:
             failures.append("host_integrity_not_verified")
             continue
-        for key in ("ref_matches_mask", "location_correct", "addition_is_new", "operation_correct"):
+        for key in ("ref_matches_mask", "location_correct", "addition_is_new", "operation_correct", "item_complete"):
             # Old diagnostic responses remain readable; structured decoding
             # requires these fields for every new single-step call.
             if row.get(key) is False:
                 failures.append(key + "_failed")
+        failures.extend(row.get('serious_defects') or [])
         evidence = [str(row.get(k, "")) for k in ("evidence", "issue", "observed_change")]
         if _multi_hard_defects(evidence):
             failures.append("acknowledged_serious_defect")
@@ -478,7 +681,7 @@ def audit_multi_groups(groups: list[dict[str, Any]], model: VLLMAuditor, panel_d
 
 def audit_committed_multi_groups(groups, model, panel_dir):
     """Joint audit only; transactional generation already audited each step."""
-    if any(g.get("commit_policy") not in {"keep-passed-v1", "parallel-components-v1"} for g in groups):
+    if any(g.get("commit_policy") not in {"keep-passed-v1", "parallel-components-v1", "parallel-components-v2-content-dependencies", "parallel-components-v3-content-dependencies", "parallel-components-v4-source-overlap", "parallel-components-v5-current-context"} for g in groups):
         raise ValueError("joint-only audit requires committed multi groups")
     audits = [[_enforce_multi_integrity(u.get("semantic_audit", {}))
                for u in g["units"]] for g in groups]

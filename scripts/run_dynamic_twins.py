@@ -44,7 +44,7 @@ from sa1b_pipeline.source_isolation import assert_no_eval_leakage, load_reservat
 def run(args):
     root = args.output_root.resolve()
     frozen = Path(
-        "/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014"
+        "/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014"
     )
     if root == frozen or frozen in root.parents or root in frozen.parents:
         raise ValueError("protected production root")

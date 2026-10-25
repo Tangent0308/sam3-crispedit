@@ -1,4 +1,4 @@
-"""One-call planners for twin and adjacent multi-target groups."""
+"""One-call planners for twin and multi-target groups."""
 from __future__ import annotations
 
 from .group_geometry import candidate_category
@@ -15,7 +15,7 @@ from .fonts import load_font
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from .geometry import load_mask
-from .group_geometry import adjacent_pairs, twin_pair_gate, object_features, precise_point
+from .group_geometry import twin_pair_gate, object_features, precise_point
 from .instruction_protocol import make_spec, render, BLIND_RULE
 from .instruction_style import INSTRUCTION_STYLE
 from .instructions import build_unit, validate_instruction
@@ -29,7 +29,7 @@ TWIN_PROMPT = r'''Plan ONE counterfactual twin group in ONE response. Image 1 is
 
 First identify EACH mask independently from pixels. Candidate labels are deliberately withheld: the geometric preselection does not prove semantic sameness. Describe the selected physical entity, its visible extent and one excluded neighboring part in at most 16 words. Infer a mechanical part from its attachment/function, not just its color or rectangular outline. Do not call every member the same noun merely to create a group. A strap alone, a bag plus strap and a pouch are not interchangeable extents. A partial colored patch cannot authorize deleting the whole object. Occlusion, image clipping and small size alone are NOT rejection reasons when the visible target and request are clear.
 
-Then decide whether ALL masks represent distinct editable instances at COMPARABLE granularity (all whole objects or all parts), possibly DIFFERENT categories, and whether the assigned operation is natural for ALL. Reject a mismatched group with feasible=false and one concrete reason. Never change the assigned operation or omit a member. Do not select new targets.
+Then decide whether ALL masks represent distinct editable regions of comparable SIZE (mask area ratio at most 3; mixing whole objects and parts is allowed), possibly DIFFERENT categories, and whether the assigned operation is natural for ALL. Reject a mismatched group with feasible=false and one concrete reason. Never change the assigned operation or omit a member. Do not select new targets.
 
 Before choosing words, find the intersection of practical edits appropriate to EVERY member in its current scene. Optimize for an ordinary photo-editing request, not a novel transformation merely possible to render. Different categories are welcome; shared FUNCTION, physical support and current state matter more than names. Reject only a concrete incompatibility, not small size, occlusion, clipping, unconventional but plausible taste, or a different category. Do not force a payload just to satisfy a quota.
 For feasible groups choose ONE shared edit:
@@ -96,13 +96,18 @@ def normalize_multi_grounding(plan: dict[str, Any], objects: list[dict[str, Any]
     # without another model call; real conflicting labels still fail below.
     placeholders = {"singular noun", "singular object or part noun", "scope noun"}
     targets = plan.get("targets")
-    if (plan.get("grounding_version") == 3 or
+    if (plan.get("grounding_version") in (3, 4, 5, 6, 7) or
             (plan.get("grounding_version") != 2 and isinstance(targets, list) and
              any(isinstance(t, dict) and t.get("scope") in placeholders for t in targets))):
         if not isinstance(targets, list):
             raise ValueError("multi grounding targets missing")
         bound = []
         for item in targets:
+            if plan.get("grounding_version") == 7 and (item.get("grounding") or {}).get("edit_feasible") is False:
+                # Minimal rejection carries no invented entity; partial retention
+                # drops this entry later while preserving valid siblings.
+                bound.append(item)
+                continue
             entity = (item.get("grounding") or {}).get("entity", "")
             if not isinstance(entity, str) or not entity.strip() or entity in placeholders:
                 raise ValueError("multi source entity unresolved")
@@ -141,9 +146,23 @@ def normalize_multi_grounding(plan: dict[str, Any], objects: list[dict[str, Any]
 
 def validate_twin_grounding(plan: dict[str, Any]) -> None:
     """Validate explicit contradictions, never treat self-reported fields as visual proof."""
-    if plan.get("grounding_version") not in (2, 3, 4):
+    if plan.get("grounding_version") in (6, 7):
+        from .lean_planning import validate_edit
+        if plan.get("grounding_version") == 7:
+            from .minimal_planning import validate_edit
+        for member in plan.get("members", []):
+            placement = plan.get("placement")
+            if plan.get("operation") == "add" and placement:
+                placement = {**placement, "site": member.get("placement_site", "")}
+            validate_edit({**plan, **member, "placement": placement})
+            if plan.get("operation") == "replace":
+                from .planning_quality import appearance_only_replacement
+                if appearance_only_replacement(member.get("scope", ""), plan.get("payload", "")):
+                    raise ValueError("replacement changes only appearance of the same noun")
+        return
+    if plan.get("grounding_version") not in (2, 3, 4, 5):
         raise ValueError("missing twin visual grounding")
-    if plan.get("grounding_version") == 4:
+    if plan.get("grounding_version") in (4, 5, 6, 7):
         fit = plan.get("shared_fit")
         expected = {str(m.get("object_id")) for m in plan.get("members", [])}
         if (not isinstance(fit, list) or len(fit) != len(expected)
@@ -151,7 +170,6 @@ def validate_twin_grounding(plan: dict[str, Any]) -> None:
                 or {str(x.get("object_id")) for x in fit} != expected
                 or not all(x.get("natural") is True and str(x.get("reason", "")).strip() for x in fit)):
             raise ValueError("shared edit lacks per-member naturalness evidence")
-    kinds = set()
     operation = plan.get("operation")
     for member in plan.get("members", []):
         binding = member.get("grounding") or {}
@@ -160,13 +178,6 @@ def validate_twin_grounding(plan: dict[str, Any]) -> None:
             raise ValueError("mask entity differs from member scope")
         if binding.get("kind") not in {"object", "part"}:
             raise ValueError("twin selector is not one object or part")
-        if plan.get("grounding_version") == 4 and binding.get("host") and binding["kind"] == "object":
-            # Explicit attached component nouns cannot become whole objects
-            # merely because the model labels both members "object".
-            from .group_geometry import candidate_granularity
-            if candidate_granularity({"category": scope}) == "part":
-                raise ValueError("attached component labeled as whole object")
-        kinds.add(binding["kind"])
         if not str(binding.get("distinction", "")).strip():
             raise ValueError("missing full-scene distinction")
         if binding.get("edit_feasible") is not True:
@@ -181,22 +192,31 @@ def validate_twin_grounding(plan: dict[str, Any]) -> None:
                 target = str(attr.get("value", "")).strip().casefold()
                 if target and (target == current or re.search(r"(?<!\w)" + re.escape(target) + r"(?!\w)", current)):
                     raise ValueError("attribute value already present in grounded source")
-    if len(kinds) != 1:
-        raise ValueError("twin instance granularity mismatch")
     if operation == "replace" and not str(plan.get("replacement_form", "")).strip():
         raise ValueError("missing replacement physical design difference")
     if operation == "replace":
+        from .planning_quality import appearance_only_replacement
+        if appearance_only_replacement('', plan.get('payload', '')):
+            raise ValueError('replacement payload names only an attribute, not a new physical object')
+        for member in plan.get('members', []):
+            if appearance_only_replacement(member.get('scope') or plan.get('scope', ''), plan.get('payload', '')):
+                raise ValueError('replacement changes only material/color/finish of the same noun')
         # Catch explicit material/color-only rewrites of the SAME noun. This
         # cannot certify a design change; remaining cases still need vision.
         property_words = set("a an the new different modern polished matte glossy shiny smooth rough "
             "wood wooden metal metallic steel stainless plastic ceramic glass marble stone concrete "
             "brass copper gold golden silver aluminum aluminium alloy leather fabric black white red "
             "blue green yellow orange purple pink gray grey brown beige bright dark light solid".split())
-        payload_words = set(re.findall(r"[a-z]+", str(plan.get("payload", "")).casefold()))
+        def words(text):
+            # Pluralization is not a physical design change (windscreen(s)).
+            return {w[:-1] if len(w)>3 and w.endswith('s') and not w.endswith(('ss','us')) else w
+                    for w in re.findall(r"[a-z]+", str(text).casefold())}
+        property_words = words(' '.join(property_words))
+        payload_words = words(plan.get("payload", ""))
         if payload_words and payload_words <= property_words | {'chrome','finish','texture','coating','paint','surface'}:
             raise ValueError('replacement payload names only an attribute, not a new physical object')
         for member in plan.get("members", []):
-            scope_words = set(re.findall(r"[a-z]+", str(member.get("scope") or plan.get("scope", "")).casefold()))
+            scope_words = words(member.get("scope") or plan.get("scope", ""))
             if payload_words and not (payload_words - scope_words - property_words):
                 raise ValueError("replacement changes only material/color/finish of the same noun")
 
@@ -328,13 +348,29 @@ def _selected_grid(source: Image.Image, objects: list[dict[str, Any]], masks: li
 def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], directory: str | Path,
                 *, image_size: tuple[int, int] | None = None, locator_outline: bool = False,
                 locate_in_scene: bool = False, locator_cutout: bool = False,
-                selected_only: bool = False, context_cutout: bool = False) -> tuple[list[str], list[str], str]:
-    """Build two stable images plus binary mask files for a single group call."""
+                selected_only: bool = False, context_cutout: bool = False,
+                save_debug_views: bool = True, grounded_zoom: bool = False, grounded_binary: bool = False,
+                aligned_outline: bool = False, clean_contours: bool = False,
+                twin_crops: bool = False) -> tuple[list[str], list[str], str]:
+    """Build stable planning images plus binary masks for a single group call."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     source = Image.open(candidate["image_path"]).convert("RGB")
     masks = [load_mask(obj, source.size) for obj in objects]
-    if context_cutout:
+    if twin_crops:
+        from .twin_crop_views import VERSION as view_version
+        if clean_contours or len(objects) != 2:
+            raise ValueError('twin crops require two objects and a single view style')
+        locate_in_scene = False
+    elif clean_contours:
+        from .full_contour_views import VERSION as view_version
+        locate_in_scene = False
+    elif aligned_outline:
+        from .aligned_planning_views import VERSION as view_version
+        locate_in_scene = True
+    elif grounded_zoom:
+        view_version = "context-tight-selected-binary-v1" if grounded_binary else "context-tight-selected-v1"
+    elif context_cutout:
         view_version = "context-selected-v1"
     elif selected_only:
         view_version = "selected-only-grid-v1"
@@ -354,14 +390,50 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
     marked = root / "marked_scene.png"
     sheet = root / "member_crops.png"
     mask_paths = []
-    if not full.exists():
+    if twin_crops:
+        from .twin_crop_views import twin_crop_views
+        paths = [full, root/'mask_U1_crop.png', root/'mask_U2_crop.png']
+        if not all(p.exists() for p in paths) or not (root/'crop_metadata.json').exists():
+            images, metadata = twin_crop_views(source, masks)
+            for path, image in zip(paths, images):
+                image.save(path, compress_level=1)
+            for row, obj in zip(metadata, objects):
+                row['object_id'] = str(obj['object_id'])
+            (root/'crop_metadata.json').write_text(json.dumps(metadata, indent=2))
+        for obj, mask in zip(objects, masks):
+            path = root / f"mask_{obj['object_id']}.png"
+            if not path.exists():
+                Image.fromarray(mask.astype(np.uint8)*255).save(path, compress_level=1)
+            mask_paths.append(str(path))
+        return list(map(str, paths)), mask_paths, digest
+    if clean_contours:
+        from .full_contour_views import contour_pair
+        annotated = root / 'full_contours.png'
+        if not full.exists() or not annotated.exists():
+            clean, contours, labels = contour_pair(source, masks)
+            clean.save(full, compress_level=1)
+            contours.save(annotated, compress_level=1)
+            (root / 'contour_labels.json').write_text(json.dumps(labels, indent=2))
+        for obj, mask in zip(objects, masks):
+            path = root / f"mask_{obj['object_id']}.png"
+            if not path.exists():
+                Image.fromarray(mask.astype(np.uint8) * 255).save(path, compress_level=1)
+            mask_paths.append(str(path))
+        return [str(full), str(annotated)], mask_paths, digest
+    if not full.exists() and (save_debug_views or not locate_in_scene):
         clean = source.copy()
         clean.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
         clean.save(full, compress_level=1)
-    if not marked.exists():
+    if save_debug_views and not marked.exists():
         _overlay(source, objects, masks).save(marked, compress_level=1)
     if not sheet.exists():
-        if context_cutout:
+        if aligned_outline:
+            from .aligned_planning_views import aligned_sheet
+            aligned_sheet(source, masks).save(sheet, compress_level=1)
+        elif grounded_zoom:
+            from .multi_grounded_views import grounded_sheet
+            grounded_sheet(source, objects, masks, binary_column=grounded_binary).save(sheet, compress_level=1)
+        elif context_cutout:
             three = _crop_sheet(source, objects, masks, locator_cutout=True)
             paired = Image.new("RGB", (1024, three.height))
             paired.paste(three.crop((0, 0, 512, three.height)), (0, 0))
@@ -383,20 +455,48 @@ def group_views(candidate: dict[str, Any], objects: list[dict[str, Any]], direct
     return [str(full), str(sheet)], mask_paths, digest
 
 
-def twin_prompt(assigned_operation: str, objects: list[dict[str, Any]]) -> str:
-    return TWIN_PROMPT + "\n" + BLIND_RULE + "\nAssigned operation: " + assigned_operation + "\nCandidates:\n" + "\n".join(
+def twin_prompt(assigned_operation: str, objects: list[dict[str, Any]], *, style='legacy') -> str:
+    from .instruction_diversity import preference_prompt
+    if style == 'legacy':
+        prompt = TWIN_PROMPT
+    elif style in ('concise-27b-v5', 'concise-27b-v8'):
+        from .twin_planning import PROMPT
+        prompt = PROMPT
+    else:
+        raise ValueError('unknown twin planning style')
+    if style == 'concise-27b-v8':
+        prompt += preference_prompt([assigned_operation], objects)
+    return prompt + "\n" + BLIND_RULE + "\nAssigned operation: " + assigned_operation + "\nCandidates:\n" + "\n".join(
         f"- object_id={o['object_id']} (must appear exactly once)" for o in objects)
 
 
-def multi_prompt(assignments: dict[str, str], objects: list[dict[str, Any]], order: list[str], *, grounding_first: bool = False, context_cutout: bool = False) -> str:
+def multi_prompt(assignments: dict[str, str], objects: list[dict[str, Any]], order: list[str], *, grounding_first: bool = False, context_cutout: bool = False, content_policy: str = 'baseline', execution_contract: bool = False) -> str:
+    if content_policy not in ('baseline', 'ranked', 'scene'):
+        raise ValueError('unknown instruction content policy')
     prompt = MULTI_GROUNDING_FIRST_PROMPT if grounding_first else MULTI_PROMPT
     if context_cutout:
         prompt = prompt.replace("Image 2 is a numbered grid of SELECTED PIXELS ONLY crops. Every tile retains only its own mask's original pixels; uniform gray is excluded padding, including holes. Tile order is NOT scene order.",
             "Image 2 has one row per target with TWO aligned columns: LEFT is clean local CONTEXT, RIGHT contains SELECTED PIXELS ONLY. "
             "Use the left crop to understand attachment and anatomy; ONLY the right crop defines the editable entity. "
             "Uniform gray in the right crop is excluded padding, including holes. Row order is NOT scene order.")
-    return prompt + "\n" + BLIND_RULE + "\n" + INSTRUCTION_STYLE + "\nAssigned operations:\n" + "\n".join(
-        f"- object_id={o['object_id']}, unit_id=U{i+1}, operation={assignments[str(o['object_id'])]}, source_label_hint={json.dumps(str(o.get('category', 'unknown'))[:120])}" for i, o in enumerate(objects)
+    from .planning_quality import RULES
+    from .edit_quality import PLAN_RULES
+    from .instruction_diversity import preference_prompt
+    content_rules = ''
+    if content_policy in ('ranked', 'scene'):
+        content_rules = preference_prompt(assignments.values(), objects)
+    if not grounding_first:
+        prompt = prompt.replace('"object_id":"ID"', '"object_id":""')
+        prompt += ('\nIdentify targets ONLY by their U1/U2/... tags. Set every object_id to the empty string; '
+                   'the program maps each unique U tag to its source ID. Never predict a source ID.\n')
+    if execution_contract and not grounding_first:
+        from .multi_execution_contract import RULES as EXECUTION_RULES
+        prompt = prompt.replace('"grounding_version":3', '"grounding_version":4')
+        prompt = prompt.replace('retain its target entry with edit_feasible=false, a concrete reason and feasible=false.',
+            'retain its target entry with edit_feasible=false and a concrete reason; group feasible means at least two feasible targets.')
+        prompt += '\n' + EXECUTION_RULES
+    return prompt.replace('Source labels are fallible hints.', '') + "\n" + RULES + "\n" + PLAN_RULES + content_rules + "\n" + BLIND_RULE + "\n" + INSTRUCTION_STYLE + "\nAssigned operations:\n" + "\n".join(
+        (f"- object_id={o['object_id']}, " if grounding_first else '- ') + f"unit_id=U{i+1}, operation={assignments[str(o['object_id'])]}" for i, o in enumerate(objects)
     ) + "\nDefault generation order: " + ", ".join(order)
 
 
@@ -446,24 +546,36 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         raise ValueError("malformed planner JSON: " + str(plan.get("evidence", "")))
     if plan.get("feasible") is False:
         raise ValueError("infeasible twin plan: " + str(plan.get("reason") or plan.get("evidence") or "no shared natural edit"))
+    from .twin_contract import adapted
+    independent = adapted(plan)
+    from .twin_planning import normalize_compact_twin
+    plan = normalize_compact_twin(plan)
     if assigned_operation is not None and plan.get("operation") != assigned_operation:
         raise ValueError("twin assigned operation mismatch")
     if split == "eval" and len(objects) != 2:
         raise ValueError("evaluation twins must have exactly two members")
-    if plan.get("operation") == "add" and (plan.get("placement") or {}).get("anchor_mode") != "support":
+    if not independent and plan.get("operation") == "add" and (plan.get("placement") or {}).get("anchor_mode") != "support":
         raise ValueError("twin add requires a direct support anchor")
     if plan.get("feasible") is not True or plan.get("operation") not in {"add", "replace", "remove", "attribute"}:
         raise ValueError("infeasible or invalid twin plan")
-    if require_grounding or plan.get("grounding_version") in (2, 3, 4):
-        validate_twin_grounding(plan)
-    _validate_group_edit_fields(plan)
+    if independent:
+        from .minimal_planning import validate_edit
+        for member in plan.get('members', []):
+            if member.get('operation') != plan['operation'] or member.get('feasible') is not True:
+                raise ValueError('adapted twin member operation/feasibility mismatch')
+            validate_edit(member)
+            _validate_group_edit_fields(member)
+    else:
+        if require_grounding or plan.get("grounding_version") in (2, 3, 4, 5):
+            validate_twin_grounding(plan)
+        _validate_group_edit_fields(plan)
     members = plan.get("members")
     if not isinstance(members, list) or len(members) != len(objects):
         raise ValueError("twin plan member count mismatch")
     by_id = {str(m.get("object_id")): m for m in members}
     if len(by_id) != len(members):
         raise ValueError("duplicate twin object ids")
-    if plan.get("operation") == "attribute":
+    if not independent and plan.get("operation") == "attribute":
         attrs = plan.get("attributes") or []
         target_values = [str(a.get("value", "")).strip().lower() for a in attrs if isinstance(a, dict)]
         for item in members:
@@ -481,13 +593,14 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         item = by_id.get(str(obj["object_id"]))
         if not item or not str(item.get("ref_phrase", "")).strip():
             raise ValueError("missing twin reference")
-        raw = _shared_raw(plan, item["ref_phrase"], str(obj["object_id"]), index,
+        edit_plan = item if independent else plan
+        raw = _shared_raw(edit_plan, item["ref_phrase"], str(obj["object_id"]), index,
                           scope=str(item.get("scope") or plan.get("scope") or ""), source_color=str(item.get("source_color", "")))
         if not raw["scope"]:
             raise ValueError("missing member scope")
         if raw["operation"] == "add" and "placement_site" in item:
             raw["placement"] = {**(raw["placement"] or {}), "site": item["placement_site"]}
-        _validate_group_edit_fields({**plan, "scope": raw["scope"], "placement": raw["placement"]})
+        _validate_group_edit_fields({**edit_plan, "scope": raw["scope"], "placement": raw["placement"]})
         unit = build_unit(raw, {**obj, "metadata": obj.get("metadata", {})}, mask_path, geom, [])
         errors = validate_instruction(unit)
         if errors:
@@ -498,13 +611,13 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
         raise ValueError("twin references are not unique")
     spec = dict(units[0].instruction_spec)
     no_ref = units[0].instruction_noref
-    if any(u.instruction_noref != no_ref for u in units):
+    if not independent and any(u.instruction_noref != no_ref for u in units):
         raise ValueError("shared spec did not render one no-ref instruction")
     member_rows = []
     for u, geom in zip(units, geometry):
         grounding = by_id[str(u.object_id)].get("grounding") or {}
         member_rows.append({"unit_id": u.unit_id, "object_id": u.object_id, "ref": u.ref_phrase,
-                            "instruction": u.instruction_ref, "instruction_noref": no_ref,
+                            "instruction": u.instruction_ref, "instruction_noref": u.instruction_noref,
                             "instruction_spec": u.instruction_spec, "mask": u.mask_path,
                             "bbox": u.bbox, "point": u.point, "support_mask": None,
                             "support_policy": u.support_policy, "edited_image": None,
@@ -515,18 +628,56 @@ def build_twin_group(candidate: dict[str, Any], objects: list[dict[str, Any]], p
                             "grounding": grounding,
                             "mask_role": u.mask_role, "mask_semantics": u.mask_semantics,
                             "unit": u.to_dict()})
+    from .edit_quality import contact_metadata
+    for member in member_rows:
+        if member['operation'] == 'add':
+            values = member['grounding'].get('contact_xy')
+            if values == []:
+                raise ValueError('add requires a precise contact point')
+            contact = contact_metadata(values, np.asarray(Image.open(member['mask']).convert('L')) > 127)
+            if contact is None and plan.get('grounding_version') == 7:
+                from .minimal_planning import named_site_contact
+                contact = named_site_contact(member['mask'], member['instruction_spec']['placement'].get('site',''))
+            if contact:
+                member['unit']['generation_contact'] = contact
     return {"schema_version": "sa1b.samtok.group.v1",
             "instruction_protocol_version": "2.0", "mask_semantics_version": "2.0",
             "instruction_style_version": "benchmark-concise-3-blind-1",
-            "twin_contract_version": "blind-cross-category-1",
+            "twin_contract_version": plan["twin_contract_version"] if independent else "blind-size-matched-2",
             "category_relation": "same" if len({candidate_category({"category": u.scope}) for u in units}) == 1 else "cross",
             "twin_id": group_id,
             "source_id": candidate["source_id"], "source_image": candidate["image_path"],
             "source_provenance": candidate.get("provenance", {}), "operation": units[0].operation,
-            "instruction_spec": {**spec, "ref": "", "scope": ""}, "instruction_noref": no_ref,
+            "instruction_spec": None if independent else {**spec, "ref": "", "scope": ""}, "instruction_noref": None if independent else no_ref,
             "scope_level": scope_level, "members": member_rows, "split": split,
             "group_checks": {"plan": {"status": "pass", "model_evidence": plan.get("evidence", "")},
                              "group_gate": "pending_generation"}, "merged_target": None}
+
+
+def bind_multi_target_ids(plan, objects, assignments):
+    """Resolve omitted/example object IDs from explicit, unique target IDs only.
+
+    Never infer from row order or repair a conflicting real ID/operation. UIDs
+    are the stable identifiers shown on the visual inputs and in assignments.
+    """
+    from copy import deepcopy
+    result = deepcopy(plan)
+    targets = result.get('targets')
+    if not isinstance(targets, list) or len(targets) != len(objects):
+        raise ValueError('multi plan target count mismatch')
+    known = {f'U{i+1}': str(o['object_id']) for i, o in enumerate(objects)}
+    ids = [t.get('unit_id') for t in targets]
+    if len(set(ids)) != len(ids) or set(ids) != set(known):
+        raise ValueError('multi target ID mismatch: missing, duplicated or unknown')
+    for t in targets:
+        expected = known[t['unit_id']]
+        supplied = str(t.get('object_id', '')).strip()
+        if supplied not in ('', 'ID', expected):
+            raise ValueError('multi object ID contradicts target ID')
+        if t.get('operation') != assignments.get(expected):
+            raise ValueError('multi operation or object mismatch')
+        t['object_id'] = expected
+    return result
 
 
 def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], plan: dict[str, Any],
@@ -534,11 +685,13 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
                       geometry: list[dict[str, Any]], assignments: dict[str, str],
                       require_grounding: bool = False) -> dict[str, Any]:
     plan = normalize_multi_grounding(plan, objects)
-    if plan.get("feasible") is not True:
+    partial = plan.get("grounding_version") in (4, 5, 6, 7)
+    if plan.get("feasible") is not True and not partial:
         targets = plan.get("targets")
         reasons = [str(t.get("reason", "")) for t in (targets if isinstance(targets, list) else [])
                    if isinstance(t, dict) and t.get("edit_feasible") is False]
         raise ValueError("infeasible multi plan: " + "; ".join(reasons or [str(plan.get("reason", ""))]))
+    plan = bind_multi_target_ids(plan, objects, assignments)
     targets = plan.get("targets")
     if not isinstance(targets, list) or len(targets) != len(objects):
         raise ValueError("multi plan target count mismatch")
@@ -546,50 +699,90 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
     if len(by_id) != len(targets):
         raise ValueError("duplicate multi object ids")
     units = []
+    dropped = []
+    contacts = {}
+    from .multi_execution_contract import validate_target_evidence, bind_dependencies
     for index, (obj, mask_path, geom) in enumerate(zip(objects, mask_paths, geometry), 1):
         item = by_id.get(str(obj["object_id"]))
         expected_unit_id = f"U{index}"
         if (not item or str(item.get("unit_id")) != expected_unit_id
                 or item.get("operation") != assignments.get(str(obj["object_id"]))):
             raise ValueError("multi operation or object mismatch")
-        if require_grounding:
-            grounding = item.get("grounding") or {}
-            if (not same_scope_identity(grounding.get("entity", ""), item.get("scope", ""))
-                    or grounding.get("edit_feasible") is not True
-                    or not grounding.get("mask_description") or not grounding.get("reason")):
-                raise ValueError("multi target lacks consistent visual grounding")
-            if item.get("operation") == "attribute":
-                current = str(grounding.get("current_value", "")).strip().casefold()
-                if not current or any(str(a.get("value", "")).strip().casefold() == current
-                                      for a in item.get("attributes", [])):
-                    raise ValueError("multi attribute is missing source value or repeats it")
-            if item.get("target_part") or item.get("qualifier") or item.get("remove_mode", "whole") != "whole":
-                raise ValueError("multi edit exceeds the preselected source extent")
-            if item.get("operation") == "add" and (item.get("placement") or {}).get("anchor_mode") != "support":
-                raise ValueError("multi add requires a direct support anchor")
-        validate_multi_semantics(item, obj.get("category", ""))
-        _validate_group_edit_fields(item)
-        raw = {"feasible": True, "object_id": str(obj["object_id"]), "unit_index": index,
-               "operation": item["operation"], "ref_phrase": item["ref_phrase"],
-               "category": item.get("scope", "object"), "scope": item["scope"],
-               "payload": item.get("payload", ""), "target_part": item.get("target_part", ""),
-               "remove_mode": item.get("remove_mode", "whole"), "placement": item.get("placement"),
-               "attributes": item.get("attributes", []), "qualifier": item.get("qualifier", ""),
-               "evidence": item.get("evidence", "")}
-        unit = build_unit(raw, {**obj, "metadata": obj.get("metadata", {})}, mask_path, geom, [])
-        errors = validate_instruction(unit)
-        if errors:
-            raise ValueError("invalid multi instruction: " + ",".join(errors))
-        units.append(unit)
+        try:
+            validate_target_evidence(item, required=plan.get("grounding_version") == 4)
+            if plan.get("grounding_version") in (5, 6, 7):
+                entity = str((item.get('grounding') or {}).get('entity', '')).strip().lower()
+                if entity in {'u1','object','region','the selected region','selected region'} or re.fullmatch(r'u\d+', entity):
+                    raise ValueError('planning entity is an annotation placeholder, not a physical noun')
+                if re.search(r'\bselected\b', item.get('ref_phrase',''), re.I):
+                    raise ValueError('explicit Ref cannot rely on selection markers')
+            if require_grounding or partial:
+                grounding = item.get("grounding") or {}
+                if plan.get("grounding_version") in (6, 7):
+                    from .lean_planning import validate_edit
+                    if plan.get("grounding_version") == 7:
+                        from .minimal_planning import validate_edit
+                    validate_edit(item)
+                if (not same_scope_identity(grounding.get("entity", ""), item.get("scope", ""))
+                        or grounding.get("edit_feasible") is not True
+                        or (plan.get("grounding_version") not in (6, 7) and
+                            (not grounding.get("mask_description") or not grounding.get("reason")))):
+                    raise ValueError("multi target lacks consistent visual grounding")
+                if item.get("operation") == "attribute" and plan.get("grounding_version") != 7:
+                    current = str(grounding.get("current_value", "")).strip().casefold()
+                    if not current or any(str(a.get("value", "")).strip().casefold() == current
+                                          for a in item.get("attributes", [])):
+                        raise ValueError("multi attribute is missing source value or repeats it")
+                if item.get("target_part") or item.get("qualifier") or item.get("remove_mode", "whole") != "whole":
+                    raise ValueError("multi edit exceeds the preselected source extent")
+                if item.get("operation") == "add" and (item.get("placement") or {}).get("anchor_mode") != "support":
+                    raise ValueError("multi add requires a direct support anchor")
+            validate_multi_semantics(item, obj.get("category", ""))
+            _validate_group_edit_fields(item)
+            raw = {"feasible": True, "object_id": str(obj["object_id"]), "unit_index": index,
+                   "operation": item["operation"], "ref_phrase": item["ref_phrase"],
+                   "category": item.get("scope", "object"), "scope": item["scope"],
+                   "payload": item.get("payload", ""), "target_part": item.get("target_part", ""),
+                   "remove_mode": item.get("remove_mode", "whole"), "placement": item.get("placement"),
+                   "attributes": item.get("attributes", []), "qualifier": item.get("qualifier", ""),
+                   "evidence": item.get("evidence", "")}
+            unit = build_unit(raw, {**obj, "metadata": obj.get("metadata", {})}, mask_path, geom, [])
+            errors = validate_instruction(unit)
+            if errors:
+                raise ValueError("invalid multi instruction: " + ",".join(errors))
+            if item['operation']=='add':
+                from .edit_quality import contact_metadata
+                values=(item.get('grounding') or {}).get('contact_xy')
+                if values==[]:raise ValueError('add requires a precise contact point')
+                contacts[expected_unit_id]=contact_metadata(values, np.asarray(Image.open(mask_path).convert('L'))>127)
+                if contacts[expected_unit_id] is None and plan.get('grounding_version') == 7:
+                    from .minimal_planning import named_site_contact
+                    contacts[expected_unit_id]=named_site_contact(mask_path, (item.get('placement') or {}).get('site',''))
+            units.append(unit)
+        except ValueError as exc:
+            if not partial:raise
+            dropped.append({'unit_id':expected_unit_id,'object_id':str(obj['object_id']),
+                            'mask':mask_path,'reason':str(exc),'stage':'plan_evidence'})
+
+    if len(units)<2:raise ValueError('fewer than two feasible targets: '+str(dropped))
     multi_refs = [u.ref_phrase.strip().lower() for u in units]
     if len(set(multi_refs)) != len(multi_refs):
         raise ValueError("multi references are not unique")
     order_ids = plan.get("generation_order") or [u.unit_id for u in sorted(units, key=lambda u: (u.operation != "remove", u.operation != "replace", u.operation != "attribute"))]
-    if (not isinstance(order_ids, list) or len(order_ids) != len(units)
-            or set(order_ids) != {u.unit_id for u in units}):
+    all_ids=[f"U{i+1}" for i in range(len(objects))]
+    kept_ids=[u.unit_id for u in units]
+    if (not isinstance(order_ids, list) or len(set(order_ids)) != len(order_ids)
+            or not set(order_ids) <= set(all_ids) or not set(kept_ids) <= set(order_ids)
+            or (not partial and set(order_ids) != set(all_ids))):
         raise ValueError("invalid generation order")
+    # Partial plans may omit only targets already rejected by evidence checks.
+    # Every executable target must still appear exactly once; never invent an order.
+
+    order_ids,dependencies,dependency_evidence=bind_dependencies(plan,all_ids,kept_ids,[u for u in order_ids if u in kept_ids])
     member_rows = []
-    for u, geom in zip(units, geometry):
+    geom_by_id={str(o['object_id']):g for o,g in zip(objects,geometry)}
+    for u in units:
+        geom=geom_by_id[str(u.object_id)]
         member_rows.append({"unit_id": u.unit_id, "object_id": u.object_id, "ref": u.ref_phrase,
                             "instruction": u.instruction_ref, "instruction_noref": u.instruction_noref,
                             "instruction_spec": u.instruction_spec, "mask": u.mask_path,
@@ -600,11 +793,17 @@ def build_multi_group(candidate: dict[str, Any], objects: list[dict[str, Any]], 
                             "grounding": by_id[str(u.object_id)].get("grounding", {}),
                             "mask_role": u.mask_role, "mask_semantics": u.mask_semantics,
                             "unit": u.to_dict()})
+    for member in member_rows:
+        if contacts.get(member['unit_id']):member['unit']['generation_contact']=contacts[member['unit_id']]
+        member['unit']['execution_observations']=member['grounding']
     return {"schema_version": "sa1b.samtok.group.v1",
             "instruction_protocol_version": "2.0", "mask_semantics_version": "2.0",
             "instruction_style_version": "benchmark-concise-3-blind-1", "multi_id": group_id,
             "source_id": candidate["source_id"], "source_image": candidate["image_path"],
             "source_provenance": candidate.get("provenance", {}), "n_targets": len(units),
             "operations": [u.operation for u in units], "generation_order": order_ids,
+            "planning_retention":{"version":1,"dropped":dropped,"original_targets":len(objects)},
+            "protected_source_masks":[d['mask'] for d in dropped],
+            "edit_dependencies":dependencies,"dependency_evidence":dependency_evidence,
             "adjacent_pairs": [], "units": member_rows, "joint_target": None,
             "joint_audit": {"status": "pending_generation"}, "split": split}

@@ -25,12 +25,12 @@ def test_real_parts_and_removable_accessories_are_not_anatomy():
         validate_multi_semantics({'scope':'bare arm','operation':'attribute'})
 
 
-def test_multi_prompt_has_per_id_fallible_hints_and_fixed_operations():
+def test_multi_prompt_has_fixed_operations_without_fallible_source_hints():
     text = multi_prompt({'5':'attribute','7':'add'},
                         [{'object_id':'5','category':'sleeve'}, {'object_id':'7','category':'shirt'}], ['U1','U2'])
-    assert 'unit_id=U1, operation=attribute, source_label_hint="sleeve"' in text
-    assert 'unit_id=U2, operation=add, source_label_hint="shirt"' in text
-    assert 'fallible' in text and 'the selected region' in text
+    assert 'unit_id=U1, operation=attribute' in text
+    assert 'unit_id=U2, operation=add' in text
+    assert 'source_label_hint' not in text and 'the selected region' in text
 
 
 def test_audit_cannot_accept_its_own_body_destruction_evidence():
@@ -72,11 +72,11 @@ def test_plural_anatomy_and_clothing_scope_mismatch():
 def test_multi_decoder_schema_rejects_nested_target_layout():
     import jsonschema
     from sa1b_pipeline.multi_plan_schema import multi_plan_schema
-    schema = multi_plan_schema()
+    schema = multi_plan_schema(execution_contract=True)
     jsonschema.Draft202012Validator.check_schema(schema)
-    jsonschema.validate({'grounding_version': 3, 'feasible': False, 'targets': [], 'generation_order': [], 'evidence': 'incompatible'}, schema)
+    jsonschema.validate({'grounding_version': 4, 'feasible': False, 'targets': [], 'generation_order': [], 'edit_dependencies': [], 'evidence': 'incompatible'}, schema)
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate({'grounding_version': 3, 'feasible': True, 'targets': [{'targets': []}], 'generation_order': [], 'evidence': ''}, schema)
+        jsonschema.validate({'grounding_version': 4, 'feasible': True, 'targets': [{'targets': []}], 'generation_order': [], 'edit_dependencies': [], 'evidence': ''}, schema)
 
 
 def test_nonhuman_arm_and_impossible_garment_site_regressions():
@@ -100,7 +100,7 @@ def test_multi_audit_schema_requires_integrity_and_step_evidence():
                'operation_correct':True, 'target_done':True, 'non_target_preserved':True, 'natural':True}
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(minimal, multi_audit_schema())
-    jsonschema.validate({**minimal, 'host_integrity':True, 'source_state':'white chair', 'result_state':'blue chair', 'observed_change':'Color changed.', 'source_entity':'chair', 'observed_location':'chair surface', 'ref_matches_mask':True, 'location_correct':True, 'addition_is_new':True}, multi_audit_schema(contrast=True))
+    jsonschema.validate({**minimal, 'serious_defects':[], 'warnings':[], 'item_complete':True, 'host_integrity':True, 'source_state':'white chair', 'result_state':'blue chair', 'observed_change':'Color changed.', 'source_entity':'chair', 'observed_location':'chair surface', 'ref_matches_mask':True, 'location_correct':True, 'addition_is_new':True}, multi_audit_schema(contrast=True))
 
 
 def test_grounding_label_modifiers_do_not_cause_false_rejection():

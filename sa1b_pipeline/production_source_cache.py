@@ -15,8 +15,25 @@ def record_key(info, subdir):
     return digest([subdir, Path(info['file']).name, info['offset']])
 
 
+def _feeder_import(name):
+    """Import a feeder dependency; the locked production runtimes do not carry crc32c / tfd_utils, nodes
+    install them next to the environments (scripts/evidence_production/setup_extras.sh, SA1B_FEEDER_LIB)."""
+    import importlib
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        import os
+        import sys
+        lib = os.environ.get('SA1B_FEEDER_LIB')
+        if not lib:
+            raise
+        if lib not in sys.path:
+            sys.path.append(lib)
+        return importlib.import_module(name)
+
+
 def read_frame(stream, offset, description, payload_length=None):
-    import crc32c
+    crc32c = _feeder_import('crc32c')
     stream.seek(offset)
     if payload_length is not None:
         if not 0 < payload_length < 512*1024*1024:
@@ -47,7 +64,7 @@ def read_frame(stream, offset, description, payload_length=None):
 
 
 def decode_frame(frame):
-    from tfd_utils.pb2 import Example
+    Example = _feeder_import('tfd_utils.pb2').Example
     return {k: v.bytes_list.value[0] for k, v in Example.FromString(frame[12:-4]).features.feature.items()
             if v.bytes_list.value}
 

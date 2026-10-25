@@ -57,10 +57,11 @@ def main(argv=None):
         for row in rows:
             operation_counts[str(row.get("operation"))] += 1
             member_counts[len(row.get("members", []))] += 1
-        if any(row.get('twin_contract_version') == 'blind-cross-category-1' for row in rows):
+        contracts = {row.get('twin_contract_version') for row in rows}
+        if contracts & {'blind-cross-category-1', 'blind-size-matched-2'}:
             from sa1b_pipeline.group_schema import validate_twin_record
-            if any(row.get('twin_contract_version') != 'blind-cross-category-1' for row in rows):
-                raise RuntimeError('cannot merge historical twins into the blind cross-category contract')
+            if len(contracts) != 1:
+                raise RuntimeError('cannot merge twins with different contract versions')
             for row in rows:
                 validate_twin_record(row, expected_split=args.split)
                 relation_counts[row.get('category_relation')] += 1
@@ -83,8 +84,6 @@ def main(argv=None):
                 raise RuntimeError(f"multi-target operations are not distinct valid types: {operations}")
             if n == 5 and (set(operations) != set(OPS) or len(set(operations)) != 4):
                 raise RuntimeError(f"five-target group must contain four types and one repeat: {operations}")
-            if not row.get("adjacent_pairs"):
-                raise RuntimeError(f"multi-target group has no adjacent-pair evidence: {_group_id(row)}")
             member_counts[n] += 1
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temp = args.output.with_suffix(args.output.suffix + ".tmp")

@@ -58,12 +58,24 @@ def test_multi_large_collar_overlap_is_clipped_not_rejected(tmp_path):
     assert not (support & neighbor).any()
 
 
-def test_multi_overlapping_source_targets_rejected(tmp_path):
+def test_multi_overlapping_sources_preserved_for_serial_execution(tmp_path):
     group = fixture_group(tmp_path, gap=-2)
     result = multi_support_preflight(group, tmp_path / "out")
-    assert not result["pass"]
+    assert result["pass"]
     assert result["pairs"][0]["source_overlap_pixels"] > 0
-    assert "execution_mask_path" not in group["units"][0]["unit"]
+    assert result["pairs"][0]["requires_serial"]
+    for i, member in enumerate(group['units']):
+        own = np.asarray(Image.open(member['mask'])) > 0
+        support = writable_mask(member['unit'], (200,120), require_add_placement=False)
+        other = np.asarray(Image.open(group['units'][1-i]['mask'])) > 0
+        assert support[own].all()
+        assert not (support & other & ~own).any()
+    group['generation_order'] = ['U1','U2']
+    from sa1b_pipeline.multi_parallel import conflict_components
+    components, edges = conflict_components(group)
+    assert components == [['U1','U2']]
+    assert edges[0]['reason'] == 'source_mask_overlap'
+
 
 
 def test_multi_joint_panel_retains_last_target_and_actual_order(tmp_path):

@@ -50,13 +50,13 @@ def main():
                 model.close()
             for g in groups:
                 atomic_json(root / "planned" / f"{g['twin_id']}.json", g)
+        from sa1b_pipeline.twin_contract import blind_probe_satisfied
         write_rows(
             root / "planned.jsonl",
             [
                 g
                 for g in groups
-                if g.get("group_checks", {}).get("blind_disambiguation", {}).get("pass")
-                is True
+                if blind_probe_satisfied(g)
             ],
         )
         return

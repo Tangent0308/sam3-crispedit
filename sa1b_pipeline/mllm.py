@@ -8,6 +8,7 @@ from .instruction_style import INSTRUCTION_STYLE
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 from PIL import Image
@@ -47,7 +48,8 @@ class VLLMSelector:
 
     def __init__(self, model_id: str, *, tensor_parallel_size: int = 1, max_model_len: int = 16384,
                  max_new_tokens: int = 1200, temperature: float = 0.0, batch_size: int = 8,
-                 disable_custom_all_reduce: bool = False):
+                 disable_custom_all_reduce: bool = False,
+                 max_num_batched_tokens: int = 8192, enable_thinking: bool = False, thinking_token_budget: int | None = None):
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         from .mllm_runtime import architecture_options
@@ -56,6 +58,8 @@ class VLLMSelector:
         model_id = resolve_model(model_id)
         architecture_kwargs = architecture_options(model_id, tensor_parallel_size)
         self.batch_size = batch_size
+        self.enable_thinking = enable_thinking
+        self.thinking_token_budget = thinking_token_budget
         # Reuse the parent repository's production Qwen3.8 backend. It pins
         # the multimodal processor settings and the non-thinking chat template
         # used by the completed derived-edit runs.
@@ -63,7 +67,7 @@ class VLLMSelector:
         # it intentionally hard-codes tensor_parallel_size=1. Full selection
         # runs must honor the caller's TP setting and use the direct vLLM path.
         self._inherited_backend = False
-        if tensor_parallel_size == 1 and os.environ.get("SA1B_FORCE_DIRECT_VLLM") != "1":
+        if not enable_thinking and tensor_parallel_size == 1 and os.environ.get("SA1B_FORCE_DIRECT_VLLM") != "1":
             try:
                 from utils import vlm_utils
                 vlm_utils.configure_backend("qwen38-vllm", model_id=model_id, device="cuda:0", dtype="bf16")
@@ -93,7 +97,7 @@ class VLLMSelector:
         self.processor = AutoProcessor.from_pretrained(model_id, padding_side="left")
         llm_kwargs = dict(model=model_id, dtype="bfloat16", tensor_parallel_size=tensor_parallel_size,
                           max_model_len=max_model_len, trust_remote_code=True,
-                          max_num_seqs=8, max_num_batched_tokens=8192,
+                          max_num_seqs=batch_size, max_num_batched_tokens=max_num_batched_tokens,
                           limit_mm_per_prompt={"image": 3}, enable_prefix_caching=True,
                           gpu_memory_utilization=0.85, enforce_eager=True,
                           disable_custom_all_reduce=disable_custom_all_reduce)
@@ -103,17 +107,18 @@ class VLLMSelector:
         mm_backend = os.environ.get("SA1B_MM_ENCODER_ATTN_BACKEND")
         if mm_backend:
             llm_kwargs["mm_encoder_attn_backend"] = mm_backend
+        if enable_thinking:
+            llm_kwargs["reasoning_parser"] = "qwen3"
         llm_kwargs.update(architecture_kwargs)
         self.llm = LLM(**llm_kwargs)
         self.params = SamplingParams(temperature=temperature, max_tokens=max_new_tokens,
-                                     top_p=1.0, stop=["<|im_end|>"])
+                                     top_p=1.0, stop=["<|im_end|>"],
+                                     **({"thinking_token_budget": thinking_token_budget} if thinking_token_budget is not None else {}))
 
     def close(self) -> None:
         """Release vLLM's worker processes and CUDA allocations explicitly."""
-        engine = getattr(getattr(self, "llm", None), "llm_engine", None)
-        shutdown = getattr(engine, "shutdown", None)
-        if callable(shutdown):
-            shutdown()
+        from .mllm_runtime import close_engine
+        close_engine(getattr(self, 'llm', None))
 
     def _messages(self, image_path: str, prompt: str) -> tuple[str, Image.Image]:
         image = Image.open(image_path).convert("RGB")
@@ -121,15 +126,15 @@ class VLLMSelector:
             {"type": "image", "image": image}, {"type": "text", "text": prompt},
         ]}]
         rendered = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
-                                                       enable_thinking=False)
+                                                       enable_thinking=self.enable_thinking)
         return rendered, image
 
-    def _multi_messages(self, image_paths: list[str], prompt: str) -> tuple[str, list[Image.Image]]:
+    def _multi_messages(self, image_paths: list[str], prompt: str, *, enable_thinking=None) -> tuple[str, list[Image.Image]]:
         images = [Image.open(path).convert("RGB") for path in image_paths]
         content = [{"type": "image", "image": image} for image in images]
         content.append({"type": "text", "text": prompt})
         rendered = self.processor.apply_chat_template([{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True,
-                                                       enable_thinking=False)
+                                                       enable_thinking=self.enable_thinking if enable_thinking is None else enable_thinking)
         return rendered, images
 
     def generate(self, jobs: list[tuple[str, str]]) -> list[dict[str, Any]]:
@@ -163,14 +168,34 @@ class VLLMSelector:
         result = []
         for output in outputs:
             text = output.outputs[0].text if output.outputs else ""
+            if self.enable_thinking:
+                text = text.split('</think>', 1)[-1].strip() if '</think>' in text else ''
             result.append(_safe_parse(text, stage="selection"))
         return result
 
-    def generate_multimage(self, jobs: list[tuple[list[str], str]]) -> list[dict[str, Any]]:
+    def generate_multimage(self, jobs: list[tuple[list[str], str]], *, schemas=None, token_limits=None,
+                           thinking=None) -> list[dict[str, Any]]:
+        """``thinking`` optionally disables reasoning per request (False); None keeps the engine default.
+
+        Evidence gates share a resident thinking planner; their short checks must
+        not spend a reasoning budget. Text-only requests (no images) are allowed.
+        """
+        if schemas is not None and len(schemas) != len(jobs):
+            raise ValueError('per-request schema count mismatch')
+        if thinking is not None and (len(thinking) != len(jobs) or any(t not in (None, False) for t in thinking)):
+            raise ValueError('per-request thinking may only disable reasoning')
+        if token_limits is not None and (len(token_limits) != len(jobs) or
+                any(type(n) is not int or not 1 <= n <= 4096 for n in token_limits)):
+            raise ValueError('invalid per-request token limits')
+        if (schemas is not None or token_limits is not None or thinking is not None) and self._inherited_backend:
+            raise ValueError('per-request schemas require direct vLLM')
         if len(jobs) > self.batch_size:
             results = []
             for start in range(0, len(jobs), self.batch_size):
-                results.extend(self.generate_multimage(jobs[start:start + self.batch_size]))
+                results.extend(self.generate_multimage(jobs[start:start + self.batch_size],
+                    schemas=schemas[start:start + self.batch_size] if schemas is not None else None,
+                    token_limits=token_limits[start:start + self.batch_size] if token_limits is not None else None,
+                    thinking=thinking[start:start + self.batch_size] if thinking is not None else None))
                 print(f"MLLM multi-image requests completed: {len(results)}/{len(jobs)}", flush=True)
             return results
         if self._inherited_backend:
@@ -180,18 +205,48 @@ class VLLMSelector:
                 content.append({"type": "text", "text": prompt})
                 messages.append([{"role": "user", "content": content}])
             return [_safe_parse(x, stage="audit") for x in self.backend.chat_batch(messages, max_new_tokens=self.max_new_tokens)]
+        started = time.perf_counter()
         requests = []
-        for paths, text in jobs:
-            prompt, images = self._multi_messages(paths, text)
-            requests.append({"prompt": prompt, "multi_modal_data": {"image": images}})
-        outputs = self.llm.generate(requests, self.params, use_tqdm=False)
+        reasoning = [self.enable_thinking and (thinking is None or thinking[i] is not False) for i in range(len(jobs))]
+        for i, (paths, text) in enumerate(jobs):
+            # Only pass an override when it differs from the engine default
+            # (keeps the long-standing two-argument call for normal requests).
+            prompt, images = (self._multi_messages(paths, text) if reasoning[i] == self.enable_thinking
+                              else self._multi_messages(paths, text, enable_thinking=reasoning[i]))
+            requests.append({"prompt": prompt, **({"multi_modal_data": {"image": images}} if images else {})})
+        prepared = time.perf_counter()
+        params = self.params
+        if schemas is not None or token_limits is not None or not all(reasoning) and self.enable_thinking:
+            from copy import deepcopy
+            from vllm.sampling_params import StructuredOutputsParams
+            params = []
+            for i in range(len(jobs)):
+                param = deepcopy(self.params)
+                if schemas is not None:
+                    param.structured_outputs = StructuredOutputsParams(json=schemas[i], whitespace_pattern=r" ?")
+                if token_limits is not None:
+                    param.max_tokens = token_limits[i]
+                if not reasoning[i] and getattr(param, 'thinking_token_budget', None) is not None:
+                    param.thinking_token_budget = None
+                params.append(param)
+        outputs = self.llm.generate(requests, params, use_tqdm=False)
+        completed = time.perf_counter()
+        self.last_batch_metrics = {'requests': len(jobs), 'prepare_seconds': prepared-started,
+                                   'inference_seconds': completed-prepared,
+                                   'input_tokens': sum(len(o.prompt_token_ids or []) for o in outputs),
+                                   'output_tokens': sum(len(o.outputs[0].token_ids) if o.outputs else 0 for o in outputs)}
         results = []
-        for output in outputs:
+        for output, thought in zip(outputs, reasoning):
             result = output.outputs[0] if output.outputs else None
             raw = result.text if result else ""
-            parsed = _safe_parse(raw, stage="audit")
+            # Reasoning is internal; retain the final structured answer only.
+            final_raw = (raw.split('</think>', 1)[-1].strip() if '</think>' in raw else '') if thought else raw
+            parsed = _safe_parse(final_raw, stage="audit")
             parsed['_generation_metadata'] = {'output_tokens': len(result.token_ids) if result else 0,
-                'finish_reason': result.finish_reason if result else None, 'raw_output': raw}
+                'input_tokens': len(output.prompt_token_ids or []),
+                'finish_reason': result.finish_reason if result else None, 'raw_output': final_raw, 'thinking_enabled': thought,
+                'reasoning_completed': ('</think>' in raw) if thought else None,
+                'thinking_token_budget': getattr(self, 'thinking_token_budget', None) if thought else None}
             results.append(parsed)
         return results
 

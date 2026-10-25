@@ -1,4 +1,149 @@
-# 四机运行指南
+# 运行指南（单机新入口与四机历史部署）
+
+## 孪生约 2.5 万个样本 ＋ 多目标约 10 万个样本：四机生产（证据管线，2026-10-25）
+
+当前推荐的大批量入口。配置与完整出图 5 相同（证据核验、文字核验、编辑收尾、审核核验、优先级调度，40 步），四台各自跑波次，最后合并。代码：`scripts/run_evidence_production_4node.py`，部署脚本在 `scripts/evidence_production/`。
+
+- 实验目录（下文 `$ROOT`，目录名沿用最初的 50k/100k 计划）：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_twins50k_multi100k_20261025`
+- 已冻结（2026-10-25）：配置 `config.json`，代码包 `deployment/code.tar.gz`（sha256 `a1e49b9e…`）。还没有提交 Arnold。
+- 配额（`config.json` 的 `quotas`，数量是大致目标）：
+  - 孪生约 **25,000 个样本** = 12,500 组：每组两张目标图。每台每种操作 782 组，按自动通过的组数均衡；全部完成时 12,512 组（25,024 个样本）。
+  - 多目标约 **100,000 个样本** = 100,000 个目标（每组 2–4 个目标）：每台每种操作 6,250 个目标。
+- 停止规则（省时间）：每台每类剩余缺口不超过 2 个单位（孪生组 / 多目标目标）时不再开新波次，导出相应少最多 2 个。
+- 每台的流程：
+  1. **源图池**：按本 rank 固定的 SA-1B 分片顺序按需整片读入（`sa1b_pipeline/shard_feeder.py`，排除 benchmark 200 张和评测预留 1,200 张，图像哈希跨 rank 去重）。新类别由 27B 判断可编辑性（不思考，只判断能通过分数和面积预筛的物体类别）。然后计算每张图的“菜单”：每种操作能否组成孪生组，多目标能用哪些操作（`evidence_selection.menu`）。
+  2. **每波**：
+     - 按剩余需要和实际通过率选样。菜单先过滤，行在 32 个进程里构建，与串行选样结果一致。
+     - 每波约 3 万 GPU·秒的工作量，孪生和多目标按剩余量分配。
+     - 然后跑完整的规划、生成和审核（`run_dual_validation.py`），规划图 16 进程并行准备。
+  3. **导出与合并**：结束后本 rank 均衡导出（多目标按组合类型精确求解），rank 0 等所有 rank 完成后合并到 `$ROOT/final/`。
+- 资源：
+  - 4 × 8 H100 80GB。
+  - 每台本地盘至少 300 GB（模型副本和环境）。
+  - 挂载 `/mnt/bn/strategy-mllm-train`。
+  - SA-1B 的 HDFS 挂载 `/mnt/hdfs/sg_byte_ttlive_strategy_llm` 可选：没有时节点等待 `prefeed` 读入的分片。
+
+### 入口指令
+
+**Arnold 任务**：4 workers × 8 H100，挂载 `/mnt/bn/strategy-mllm-train`。四台的启动命令完全相同，平台注入 rank（`ARNOLD_ID`），不用 torchrun，不设 `CUDA_VISIBLE_DEVICES`。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+exec bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_twins50k_multi100k_20261025/deployment/arnold_entry.sh
+```
+
+`arnold_entry.sh` 的内容如下，也可以直接把这几行填进 Arnold：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+export EVIDENCE_RUN_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_twins50k_multi100k_20261025
+export EVIDENCE_RUNTIME_ROOT="${EVIDENCE_RUNTIME_ROOT:-/opt/tiger/sa1b-evidence-production-runtime}"
+exec bash "$EVIDENCE_RUN_ROOT/deployment/launch_4node.sh"
+```
+
+launcher 依次做这些事：
+1. 检查 4×8 拓扑、代码包和配置校验和；
+2. 解包到 `/opt/tiger/sa1b-evidence-production-code/<sha>`；
+3. 安装两套锁定环境（`scripts/group_production/setup_runtime.sh`，CUDA 12.9）；
+4. 安装两个旁挂库（`scripts/evidence_production/setup_extras.sh`：RapidOCR 用于文字核验，crc32c 和 tfd-utils 用于读分片）；
+5. 检查字体；
+6. 把三个模型复制到 `/opt/tiger/sa1b-evidence-model-cache`；
+7. 启动本 rank。
+
+**提交前（开发机，可选）**：若 Arnold 节点没有 HDFS 挂载，先在本机读入分片。每片约 10 分钟，按 rank 轮流；每台约需 4 片，读 5 片留余量，共约 1.5–2.5 小时、260 GB。可以和生产同时跑，节点会等待。
+
+```bash
+cd /opt/tiger/tanyue/sa1b-samtok-edit-data
+ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_twins50k_multi100k_20261025
+nohup python3 scripts/run_evidence_production_4node.py --root "$ROOT" prefeed --shards-per-rank 5 > "$ROOT/logs/prefeed.log" 2>&1 &
+```
+
+**本次冻结所用的命令**（已执行，不需要再跑）：
+
+```bash
+python3 scripts/run_evidence_production_4node.py --root "$ROOT" prepare --twin-samples 25000 --multi-samples 100000 --replace-unstarted
+python3 scripts/run_evidence_production_4node.py --root "$ROOT" bundle
+```
+
+- `bundle` 打包当前工作区代码，记录代码、配置和模型清单的校验和。
+- 改配额或代码：在任何节点启动前执行 `prepare ... --replace-unstarted`，再 `bundle`。旧配置和代码包留档到 `planning/replaced_<时间>/`。
+
+### 进度
+
+```bash
+tail -F "$ROOT/logs/progress.log"          # rank 0 每 10 分钟一行：各 rank 波数、进度、ETA
+python3 scripts/run_evidence_production_4node.py --root "$ROOT" status
+tail -F "$ROOT/logs/node0.log"             # 每台完整日志
+python3 -m json.tool "$ROOT/nodes/node0/waves/progress.json"   # 本 rank 的目标、可导出数、下一波计划
+python3 scripts/run_evidence_production_4node.py --root "$ROOT" merge --partial   # 当前快照导出到 final_partial/
+```
+
+每个 rank 的波次在 `nodes/node<r>/waves/waveNN/`（选样、规划、生成、审核、计时），台账 `ledger.json`，分片池日志 `pool_log.jsonl`。四台完成后数据在 `$ROOT/final/`：`twins_balanced.jsonl`、`multi_balanced.jsonl`、`singles.jsonl`（单目标，另行使用），`summary.json`。
+
+### 中断恢复
+
+- 重新提交同一入口即可。波次从检查点续跑，分片、标签、菜单按标记续做。
+- 波次协调器失败后自动重试 3 次，间隔 2 分钟。
+- 上一个 Arnold trial 留下的锁会自动留档后接管。同一 trial 内跨主机残留的锁，确认旧进程已停止后执行 `recover-lock --rank <r> --previous-workers-stopped`。
+- 不要同时提交两个写同一目录的任务。
+
+### 冒烟与时间
+
+- 单机冒烟：`$ROOT/planning/smoke2/`，经 `launch_4node.sh` 启动，`world_size=1`。
+  - 第 1 波按生产规模：孪生 227 组、多目标 149 组，58 分钟，GPU 平均忙 90%。
+  - 自动通过：孪生 89 组、多目标 83 组（213 个目标）。
+- 时间（四台并行，`$ROOT/planning/eta.py`）：
+
+  | 口径 | 每台选样（孪生组 / 多目标组） | 独占节点估计 | 本机实测直接换算 |
+  |---|---:|---|---|
+  | **当前：孪生约 2.5 万个样本 ＋ 多目标约 10 万个样本** | 7,350 / 17,953（79 波） | **约 2.0 天（1.8–2.1）** | 3.3 天 |
+  | 孪生 5 万组 ＋ 多目标 10 万组（原计划） | 29,371 / 45,060 | 约 5.6 天 | 9.2 天 |
+
+  - 本机每张 GPU 上有其他用户的进程，我们只分到约 55% 的算力，所以“独占节点估计”按这个比例折算。
+  - 不含排队、节点重启，以及首次装环境和复制模型（每台约 0.5–1 小时）。
+- 存储（当前计划）：约 3.6 TB、620 万个文件。
+- 详细见报告 `/opt/tiger/tanyue/visualization_tmp/production_4node_20261025/四机生产实现与时间估计.md`。
+
+## 迁移后的新任务入口与旧任务边界（2026-10-20）
+
+实验和生产工作区统一归档到 `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline`，正式结果仅发布到datasets。旧四机与单机冻结包保存原始内部路径和合同，**下文历史命令不应直接执行来恢复迁移后的旧任务**；仅改外层RUN_ROOT不足以恢复。旧任务进度、源输入、检查点及媒体均保留，但本次未验证迁移续跑。
+
+当前工作仓库的新任务可使用下列入口，先做有上限的质量验证。两类分别创建独立新目录；此处是使用说明，本轮未启动生成。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/tiger/tanyue/sa1b-samtok-edit-data
+export GROUP_KIND=twins  # 多目标改为multi
+export GROUP_TARGET=15000  # 多目标改为5000
+export GROUP_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/new_${GROUP_KIND}_$(date -u +%Y%m%dT%H%M%SZ)"
+export GROUP_SOURCE_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_train_20k_20261016"
+export GROUP_ARCHIVE_PATH_MAP="/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/path_map.json"
+exec bash scripts/groups_single_node_entry.sh --max-waves 2 --wave-size 128
+```
+
+需要单机8卡、不设置CUDA_VISIBLE_DEVICES、不用torchrun。入口使用27B规划/审核及Qwen/vLLM-Omni编辑，默认检查/安装运行环境；日志在 `$GROUP_RUN_ROOT/logs/single_node.log`，进度在 `progress.json`。当前质量仍需验证，不能据历史预算直接承诺15k/5k完成时间。两波128候选只是上限，不保证得到指定数量的合格组。
+
+### 输入映射与续跑
+
+`run_twins_single_node.py --archive-path-map`只映射源输入的绝对路径。原输入文件保持只读，原文件哈希及映射哈希一起写入**新任务**config；不会动态重写历史检查点。这避免重复复制大体积输入清单。共15,994个源图路径已在迁移后确认存在。
+
+继续本入口创建的新任务时，必须把GROUP_RUN_ROOT设为首次实际目录，不要重新使用时间戳表达式；使用同一代码、输入、映射、目标及波次大小。配置变化会触发合同检查，不能直接覆盖。迁移前冻结任务另需恢复方案，不能套用此新任务续跑说明。
+
+检查位置：
+
+```bash
+tail -n 30 "$GROUP_RUN_ROOT/logs/single_node.log"
+python3 -m json.tool "$GROUP_RUN_ROOT/progress.json"
+```
+
+最终自动通过记录在 `accepted.jsonl`；未达配额输出partial，完整导出仍在工作区 `final/`。核验媒体、自包含路径、数量和质量后，才发布到datasets，不把运行目录本身放入datasets。
+
+## 历史部署与流程说明
+
+以下保留旧版本的结构、参数及故障处理供追溯。绝对目录已更新为归档位置，但冻结包内部不做改写；不能将这些示例视为已迁移验收的可执行续跑命令。
 
 ## 多目标并行融合与逐步保留
 
@@ -19,10 +164,12 @@ python scripts/run_multi_transactional.py \
   --audit-python /path/to/mllm/bin/python \
   --editor-devices 0,1,2,3,4,5 --audit-devices 6,7 \
   --groups-in-flight 16 --audit-batch-size 4 \
-  --generation-mode parallel-components
+  --generation-mode parallel-components --local-generation-reference
 ```
 
-每个目标至多尝试一次：程序检查失败则不调用语义审核；语义审核通过才提交新图，失败则丢弃该结果并从同一分量上个合格图继续。最后实际保留目标数、指令、mask、操作列表、顺序和邻接证据重新构建，再做一次整组审核；不重复逐步审核。少于两个目标、不满足现有类型组合/邻接约束、或最终整组审核失败，都不会发布为多目标数据。可选 `--save-crop-evidence` 保存合成前后诊断图；串行对照使用 `--generation-mode serial`。
+正常运行每个目标至多尝试一次，不因质量失败追加生图：程序检查失败则不调用语义审核；语义审核通过才提交新图，失败则丢弃该结果并从同一分量上个合格图继续。异常中断时尚未持久化的工作可能重复，成本应包含失败启动。最后实际保留目标数、指令、mask、操作列表、顺序重新构建，再做一次整组审核；不重复逐步审核。最终至少保留两个合格编辑目标，不要求相邻。少于两个目标、不满足现有类型组合约束、或最终整组审核失败，都不会发布为多目标数据。可选 `--save-crop-evidence` 保存合成前后诊断图；串行对照使用 `--generation-mode serial`。
+
+规划阶段使用 `run_group_pipeline.py --kind multi --plan-only --planner-model /path/to/Qwen3.8-27B --planner-tp 1`，其余输入/配额参数沿用原用法。局部指代选项和代码哈希均参与恢复合同，不能加到已经冻结的旧输出目录上续跑。本轮准确命令保存在 `sa1b_samtok_group_27b_quality_20261017/reproduction/` 及 `multi_current/*_command.json`，是实验复现记录。新建生产部署需重新准备代码快照；旧四机和旧单机共享包未被覆盖。
 
 检查点与日志：
 
@@ -44,7 +191,7 @@ python scripts/run_multi_transactional.py \
 
 - 资源：**4 台 × 8 张 H100 80GB**，CUDA 12.9；每台建议至少 64 CPU 核、512 GiB 主存和 500 GiB 本地可用磁盘（Flash-Next 使用 CPU offload）。
 - 共享挂载：`/mnt/bn/strategy-mllm-train`。训练源图及 RLE 标注已复制到新目录，运行不依赖原始 HDFS 挂载。
-- 新目录：`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016`。
+- 新目录：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_train_20k_20261016`。
 - 自动通过目标：孪生 **15,000 组**，四种编辑各 3,750；同类 4,500／跨类 10,500；双成员 12,750／三成员 2,250，成功组对应 32,250 张目标图。多目标 **5,000 组**，2／3／4／5 个目标分别 1,000／1,500／1,250／1,250，共 17,750 个成功编辑步骤。
 - 最终孪生还限制每个 scope 至多 5%，实际源 selector 为部件的组不少于 40%；add 按解析后的附着部位统计。面积桶与同宿主部件比例会记录和监控，未作为额外硬配额，不能宣称它们自动精确达到 30/40/30 和 10%。
 - 每个 rank 负责 3,750 个孪生、1,250 个多目标的最终名额。多目标按操作多重集分配名额，2–4 个目标不重复类型，5 个目标四类俱全且仅一类重复；最终各类编辑步骤约 4,438，整数差不超过 3。
@@ -58,7 +205,7 @@ python scripts/run_multi_transactional.py \
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016/deployment/arnold_entry_full.sh
+exec bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_train_20k_20261016/deployment/arnold_entry_full.sh
 ```
 
 该文件完整设置 `GROUP_RUN_ROOT`、`GROUP_RUNTIME_ROOT=/opt/tiger/sa1b-group-production-runtime`、`GROUP_SKIP_SETUP=0`，最后执行 launcher。Launcher 检查真实 4×8 拓扑、代码包与配置校验和、冻结模型文件清单，然后解包到节点本地、安装两套锁定环境、检查 CUDA 算子、缓存模型并启动本 rank。W&B 关闭。不要把入口最后的 `exec bash ...` 删掉。
@@ -87,7 +234,7 @@ exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_tra
 
 采用每波最多 128 组的分阶段调度，阶段之间释放模型，不让两个大模型争同一张卡：
 
-1. CPU 从本 rank 冻结源图中按缺额提出新组合，精确面积检查；多目标的相邻关系用 RLE 检查。每张源图在每种数据集最多保留 2 组，同一个源图＋对象组合不重复规划。
+1. CPU 从本 rank 冻结源图中按缺额提出新组合，精确面积检查；多目标用 RLE 检查源 mask 非空及冲突，不限制目标间距离。每张源图在每种数据集最多保留 2 组，同一个源图＋对象组合不重复规划。
 2. GPU 0–3：Flash-Next FP8 TP4，一组一次规划。孪生随后单独用 GPU 0 上的 27B 做一次原图＋no-ref 盲测，保持本轮验证的模型组合。
 3. GPU 0–7：每张卡一个编辑器，不同组并行，组内各成员／链步骤按现有方法生成；40 步、完整 Ref、区域贴回与 difference-first-3 不变。SAM3 只在需要时加载。
 4. GPU 0–3：最多四个 27B 审核副本，每个副本按批次保存逐组审核检查点。孪生每组一次联合审核；多目标沿用每步审核＋最终联合审核。
@@ -98,13 +245,13 @@ exec bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_tra
 每 300 秒追加一行类似 tqdm 的进度到：
 
 ```bash
-tail -F /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016/logs/progress_tqdm.log
+tail -F /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_train_20k_20261016/logs/progress_tqdm.log
 ```
 
 它显示两种数据的最终通过数／目标、尝试数、各 rank 阶段和 ETA；至少通过 32 组后才基于当前实测吞吐给出 ETA。冷启动、补低通过类别、停机时间会影响该估计。rank 0 提前完成时仍保留监控，等其余 rank 结束后退出。聊天窗口不会自动推送日志。
 
 ```bash
-ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_train_20k_20261016
+ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_train_20k_20261016
 # 在本仓库根目录可查询；只需 CPU 依赖。
 python scripts/run_group_production_4node.py --root "$ROOT" status
 # 每台的完整 stdout/stderr
@@ -163,7 +310,7 @@ python scripts/run_group_production_4node.py --root "$ROOT" recover-lock \
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-export SA1B_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014"
+export SA1B_RUN_ROOT="/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014"
 export SA1B_RUNTIME_ROOT="/opt/tiger/sa1b-production-runtime"
 export SA1B_SKIP_SETUP=0
 export WANDB_MODE=disabled
@@ -176,7 +323,7 @@ exec bash "$SA1B_RUN_ROOT/deployment/launch_4node.sh"
 也可以直接调用冻结入口：
 
 ```bash
-bash /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014/deployment/arnold_entry_full.sh
+bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014/deployment/arnold_entry_full.sh
 ```
 
 脚本会拒绝非 4×8 配置。启动前应看到：
@@ -193,7 +340,7 @@ Shared inputs and model configurations are accessible
 ## 查看进度
 
 ```bash
-ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014
+ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014
 python -m scripts.run_production_4node --root "$ROOT" status
 for n in 0 1 2 3; do tail -F "$ROOT/logs/node$n.log"; done
 tail -F "$ROOT/logs/progress_monitor_tqdm.log"
@@ -212,7 +359,7 @@ tail -F "$ROOT/logs/progress_monitor_tqdm.log"
 
 ```bash
 python3 -u -m scripts.finalize_production_exports \
-  --root /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014 \
+  --root /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014 \
   --workers 16
 ```
 
@@ -224,7 +371,7 @@ python3 -u -m scripts.finalize_production_exports \
 
 ## 2026-10-14 启动修复与原地恢复
 
-以下记录 2026-10-14 的故障恢复方式：当时使用同一 root `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014` 和原入口重新提交，保留 `SA1B_SKIP_SETUP=0`，无需重新 prepare。当前本批已经完成且源缓存已清理，不再直接套用该历史重启步骤。
+以下记录 2026-10-14 的故障恢复方式：当时使用同一 root `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014` 和原入口重新提交，保留 `SA1B_SKIP_SETUP=0`，无需重新 prepare。当前本批已经完成且源缓存已清理，不再直接套用该历史重启步骤。
 
 - 审核 lock 曾同时安装 `opencv-python` 与 `opencv-python-headless`，二者覆盖同一 `cv2` 目录，子进程报 `libxcb.so.1`。修复为只保留 headless；旧环境 lock 变化时自动同步，并重新安装 headless 修复共享文件。
 - 编辑器从共享盘并发读权重，触发 Omni 默认 600 秒启动超时。`model_cache.py` 在启动 GPU worker 前将编辑、审核权重各复制一份到节点本地盘，按文件 SHA-256 校验、断点复用；约需 83 GiB，建议预留 100 GiB。Omni 初始化及 stage 超时均设为 1800 秒。缓存阶段日志有字节进度，复制不会占用模型初始化的超时额度。
@@ -255,11 +402,11 @@ wc -l "$ROOT/final/auto_pass.jsonl"
 孪生/多目标任务不能使用 50k 的 `SA1B_RUN_ROOT`、部署包或队列数据库。先创建独立目录并预留评测源图：
 
 ```bash
-GROUP_INPUT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014
+GROUP_INPUT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/01_shared_inputs/sa1b_samtok_group_inputs_20261014
 SOURCE_ROOT=/mnt/hdfs/sg_byte_ttlive_strategy_llm/user/haobo.yuan/datasets
 python scripts/prepare_group_inputs.py \
-  --frozen-root /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014 \
-  --benchmark-exclusion /mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014/inputs/benchmark_exclusion.jsonl \
+  --frozen-root /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014 \
+  --benchmark-exclusion /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014/inputs/benchmark_exclusion.jsonl \
   --source-root "$SOURCE_ROOT" --output-root "$GROUP_ROOT" \
   --eval-count 1200 --train-limit 16000 \
   --materialize-missing-train --materialize-workers 32
@@ -290,11 +437,11 @@ python scripts/run_group_pipeline.py --kind twins \
 Flash-Next 仍是待验证的规划/审核候选，不代表已经达到正式发布质量。当前适配根据本地 `config.json` 的 `Qwen4ExpForConditionalGeneration` 自动启用 Triton MoE、Engram CPU offload；四卡使用 TP4，八卡使用 TEP8。它需要支持该架构的运行时；`requirements/mllm-vllm-cu129.txt` 中的旧 27B 环境不能直接视作已验证兼容。本机实验复用 `/tmp/sa1b-next-runtime/bin/python`（vLLM 0.31.1rc1.dev296、CUDA 12.9）及已下载的节点缓存。审核切换模型时同时指定 `--audit-tp 4`，默认仍为 1。每种模型/输入变体必须使用新的输出根目录，避免复用另一模型的计划缓存。
 
 正式 wave1 选择已经固定在独立根目录
-`/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_twins_flashnext_wave1_20261015/inputs/selected.jsonl`（5,000 组），四个分片位于同目录的 `shards/twins_train_wave1/`。这份清单已完成四类、scope、面积比和评测排除校验，不要重新选择或覆盖它：校验摘要和清单/分片哈希见 `$GROUP_ROOT/verification/selection_integrity.json`。全量训练/评测 source ID 与图像哈希隔离记录见 `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014/verification/source_isolation_full.json`。 重新生成该记录可运行 `scripts/verify_group_inputs.py`；它在模型启动前失败即停止，避免把泄漏或配额错误带入四机。
+`/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/05_history/20261015/sa1b_samtok_twins_flashnext_wave1_20261015/inputs/selected.jsonl`（5,000 组），四个分片位于同目录的 `shards/twins_train_wave1/`。这份清单已完成四类、scope、面积比和评测排除校验，不要重新选择或覆盖它：校验摘要和清单/分片哈希见 `$GROUP_ROOT/verification/selection_integrity.json`。全量训练/评测 source ID 与图像哈希隔离记录见 `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/01_shared_inputs/sa1b_samtok_group_inputs_20261014/verification/source_isolation_full.json`。 重新生成该记录可运行 `scripts/verify_group_inputs.py`；它在模型启动前失败即停止，避免把泄漏或配额错误带入四机。
 
 ```bash
-export GROUP_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_twins_flashnext_wave1_20261015
-export GROUP_INPUT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_group_inputs_20261014
+export GROUP_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/05_history/20261015/sa1b_samtok_twins_flashnext_wave1_20261015
+export GROUP_INPUT_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/01_shared_inputs/sa1b_samtok_group_inputs_20261014
 python scripts/shard_group_selection.py \
   --selection "$GROUP_ROOT/inputs/selected.jsonl" \
   --output-root "$GROUP_ROOT/shards/twins_train_wave1" --world-size 4
@@ -339,7 +486,7 @@ $GROUP_ROOT/shards/multi_eval/                     # 4 x 25
 
 多目标选择文件在进入规划前必须完成操作配额检查。`scripts/rebalance_multi_operations.py` 会枚举每组可行序列并只更新 `operations` 字段；训练和评测的重排证据分别记录在 `$GROUP_ROOT/verification/multi_operation_balance.json`，随后必须重新运行 `scripts/shard_group_selection.py` 更新四机分片。不要用固定的目标位置顺序代替该步骤，也不要把不可行操作通过改标签强行填入配额。
 
-选择阶段使用快速 bbox 容量池后再运行 `scripts/recheck_multi_selection.py` 做 RLE 相邻复核；快速池本身不能进入规划或发布。四机入口将 `GROUP_KIND=multi`、`GROUP_SPLIT=train`、`GROUP_SHARD_ROOT=$GROUP_ROOT/shards/multi_train_wave1`、`GROUP_SELECTION=$GROUP_ROOT/inputs/train_multi_selected.jsonl`，目标设为 1,500；评测时改用 `multi_eval` 分片、`eval_multi_selected.jsonl` 和 `GROUP_SPLIT=eval`。多目标每组仍只做一次规划调用，随后按 `generation_order` 链式生图，组级生成/27B 审核/人工 ledger 全部通过后才可发布。
+选择阶段使用快速 bbox 容量池后再运行 `scripts/recheck_multi_selection.py` 做 RLE 非空及冲突复核（不要求相邻）；快速池本身不能进入规划或发布。四机入口将 `GROUP_KIND=multi`、`GROUP_SPLIT=train`、`GROUP_SHARD_ROOT=$GROUP_ROOT/shards/multi_train_wave1`、`GROUP_SELECTION=$GROUP_ROOT/inputs/train_multi_selected.jsonl`，目标设为 1,500；评测时改用 `multi_eval` 分片、`eval_multi_selected.jsonl` 和 `GROUP_SPLIT=eval`。多目标每组仍只做一次规划调用，随后按 `generation_order` 链式生图，组级生成/27B 审核/人工 ledger 全部通过后才可发布。
 
 生图阶段追加 `--editor-model ... --audit-model ... --publish`，并将 `--split eval` 指向
 `inputs/eval_candidates.jsonl` 生成 200 组评测；评测组必须全部通过人工 ledger 后才可发布。多目标第一批在孪生第一批训练侧确认后执行，命令把 `--kind twins` 改为 `--kind multi`，目标设为 1,500，并使用同一个 source-isolation reservation。每个组一条 planning call，生成和审核 checkpoint 可从同一独立根目录恢复；不要把失败组缩减成较少目标数。
@@ -415,3 +562,42 @@ python scripts/run_dynamic_twins.py \
 审核模型配置在第一次进入审核阶段时单独冻结；可以先 `--stop-after planning` 或 `--stop-after generation` 检查阶段结果，再用原参数去掉停止选项继续。重复同一停止选项不会越过该阶段。需要扩充候选时用 `--candidate-extension /path/to/candidates.jsonl` 注册不可变增量清单，既有波次不变，已尝试源图仍不重复；增量也检查评测隔离。
 
 建议沿用生产环境的已验证本地模型缓存，避免共享盘冷读拖慢每波启动。启动前设置 `SA1B_LOCAL_MODEL_MAP` 为 canonical 模型路径到本机缓存路径的 JSON（例如 `export SA1B_LOCAL_MODEL_MAP="$(cat /path/to/verified-model-map.json)"`）；缓存必须有 `stage_model` 产生的 `ready.json` 和 `files.json`，不能只随意写一个目录。加载使用本地路径，数据 provenance 仍记录 canonical 模型。`stage_attempts.jsonl` 保留失败/恢复启动耗时，不能只用最终成功退出的时间估算总成本。
+
+## 单机 8 卡孪生入口（27B，2026-10-17）
+
+新增 `scripts/twins_single_node_entry.sh`。GPU 0 运行 27B 规划，GPU 1–6 各运行一个 40 步 Qwen-Image-2.1 编辑器，GPU 7 运行 27B 盲测和联合审核。模型跨 wave 常驻、微批重叠执行。CUDA 12.9 环境由 `requirements/group_production/*.lock.txt` 锁定，首次启动安装并校验模型缓存及随代码打包的字体；无需 torchrun、rank 或 WandB。
+
+**当前仅建议单批试跑**：原 32 候选测试自动通过 20 组，逐图 10 合格、8 失败、2 存疑；最新 16 候选定向修复自动通过 12 组，逐图 6 合格、3 失败、3 存疑，均未达到无人复核放量要求。下面共享包是先前冻结版本，不含最新修复；使用最新代码应先按下文 `prepare_twins_single_node.py` 新建部署目录。工程入口可运行不等于质量已验收。以下历史入口限一批 128 候选，最终目标仍冻结为 15,000，不会直接启动完整生成。
+
+Arnold 选择 **1 worker × 8 H100 80GB**，挂载 `/mnt/bn/strategy-mllm-train`，填写完整入口：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+unset CUDA_VISIBLE_DEVICES
+export GROUP_RUNTIME_ROOT=/opt/tiger/sa1b-group-production-runtime
+export TWINS_SOURCE_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_train_20k_20261016
+export TWINS_TARGET=15000
+exec bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/03_deployments/sa1b_samtok_twins_15k_27b_single_20261017/deployment/launch_single_node.sh --max-waves 1
+```
+
+共享快照入口自动核验代码 SHA-256、解压到本地并设置 `TWINS_RUN_ROOT`。不依赖新机器预先存在 git checkout。源四机目录仅用作只读输入，新结果目录为 `sa1b_samtok_twins_15k_27b_single_20261017`；不会恢复、覆盖或停止旧四机任务。源目录中的图片和 masks 已收纳，不需要继续读取最早的 HDFS tar。
+
+该包由以下命令生成，已有包拒绝覆盖；修改代码应选择新根目录：
+
+```bash
+python3 scripts/prepare_twins_single_node.py --root /path/to/new_run_root
+```
+
+质量确认后，去掉 `--max-waves 1` 可在同一目录按最终配额继续；当前没有启动完整生产，也不把此操作建议为已经达标。若核心代码/模型/协议更改，配置检查会拒绝混用旧结果，需新建根目录。相同版本中断后直接重复同一入口即可，完成规划和生成按内容指纹恢复，审核阶段中断可复用成图。
+
+本机已有环境时可设 `GROUP_SKIP_SETUP=1`、`TWINS_MLLM_PYTHON=/tmp/sa1b-next-runtime/bin/python`、`TWINS_EDITOR_PYTHON=/tmp/sa1b-cu129-validation/editor/bin/python`。这两个 `/tmp` 路径仅适用于当前机器；新机器沿用上述默认安装。默认缓存目录是本地 `/opt/tiger/sa1b-group-model-cache`，不要将模型缓存放共享盘。
+
+```bash
+# 登录机器后查看持久日志：
+tail -f /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/03_deployments/sa1b_samtok_twins_15k_27b_single_20261017/logs/single_node.log
+```
+
+`progress.json` 是全局最终配额进度，`waves/00001/progress.json` 等记录逐组完成及自动通过类型；服务细节位于 `services/*/*/*/worker.log`。默认最终四类各 3,750 组，同类 30%、跨类 70%、三成员 15%，保留源复用、类别和部件比例约束。候选耗尽或预算到达明确写未完成状态，不降低审核来凑数。
+
+只有最终配额齐备才写 `final/twins_train.jsonl`；否则写 `final/twins_train.partial.jsonl`。所有图片和 mask 收纳到运行目录，最终图片路径相对于运行根目录。`accepted.jsonl` 与 final 清单均是自动审核记录，不代表人工质量验收，`published=false`。

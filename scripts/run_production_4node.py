@@ -31,7 +31,7 @@ from sa1b_pipeline.production_state import (
     write_rows,
 )
 
-DEFAULT_ROOT = '/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014'
+DEFAULT_ROOT = '/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_edit_50k_20261014'
 
 
 def emit(event):

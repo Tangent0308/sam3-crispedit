@@ -33,6 +33,8 @@ def _evidence_hashes(member):
     hashes = {p: file_hash(p) for key in ("step_input_image", "step_output_image", "mask",
             "support_mask", "chain_execution_mask", "chain_protected_mask")
             if (p := member.get(key))}
+    for key in ("dependency_overlap_mask_path", "dependency_interface_mask_path"):
+        if path := member.get("unit", {}).get(key): hashes[path] = file_hash(path)
     for evidence in (member.get("generation_context", {}).get("crop_evidence") or {}).values():
         if file_hash(evidence["path"]) != evidence["sha256"]:
             raise ValueError("raw crop evidence changed")
@@ -59,7 +61,7 @@ def _retained_adjacency(group):
 
 
 def run_committed_step(group, member, current, original, step_dir, editor, auditor, *,
-                       index, seed=0, save_crop_evidence=False):
+                       index, seed=0, save_crop_evidence=False, defer_semantic=False):
     """Generate/audit one resumable attempt; the caller alone advances its chain."""
     step_dir = Path(step_dir)
     uid = member["unit_id"]
@@ -70,6 +72,8 @@ def run_committed_step(group, member, current, original, step_dir, editor, audit
         decision = json.loads(ledger.read_text())
         if decision["input_sha256"] != input_hash or decision["unit_id"] != uid:
             raise ValueError("transactional step input changed")
+        if decision.get('defer_semantic', False) != defer_semantic:
+            raise ValueError('transactional step audit policy changed')
         payload = {k: v for k, v in decision.items() if k != 'ledger_sha256'}
         if decision.get('ledger_sha256') != digest(payload):
             raise ValueError("transactional decision changed")
@@ -79,13 +83,27 @@ def run_committed_step(group, member, current, original, step_dir, editor, audit
         started = time.monotonic()
         member = deepcopy(member); unit = _unit_dict(member)
         own = load_mask({"mask_path": member.get("mask_v1") or member["mask"]}, size)
-        # Retain protection for ALL other source selectors, even rejected ones.
+        # Other selectors are protected outside this target's own source extent;
+        # shared source pixels belong to the serial component, not two writers.
         # Only committed edits contribute prior-change protection.
         before = np.asarray(Image.open(current).convert("RGB"), dtype=np.int16)
         prior = np.max(np.abs(original - before), axis=2) > 12
-        protected = load_mask({"mask_path": unit["protected_mask_path"]}, size) | (prior & ~own)
+        prior_protected = prior & ~own
+        if unit.get("dependency_overlap_mask_path"):
+            permission = load_mask({"mask_path": unit["dependency_overlap_mask_path"]}, size)
+            prior_protected &= ~permission
+        protected = load_mask({"mask_path": unit["protected_mask_path"]}, size) | prior_protected
         from .specialist_editors import writable_mask
         writable = writable_mask(unit, size, require_add_placement=False)
+        removal_effect = getattr(editor, "removal_effect", None)
+        if removal_effect is not None and unit["operation"] == "remove":
+            # Opt-in: the removed object's own shadow/reflection joins this step's writable support.
+            unit["protected_mask_path"] = _write_mask(step_dir / "chain_protected.png", protected)
+            effect_path, effect_info = removal_effect(current, unit, step_dir / "removal_effect.png")
+            unit["removal_effects"] = effect_info
+            if effect_path:
+                writable |= load_mask({"mask_path": effect_path}, size)
+                unit["removal_effect_mask_path"] = effect_path
         unit["execution_mask_path"] = _write_mask(step_dir / "chain_execution.png", writable & ~protected)
         unit["protected_mask_path"] = _write_mask(step_dir / "chain_protected.png", protected)
         if save_crop_evidence:
@@ -96,8 +114,9 @@ def run_committed_step(group, member, current, original, step_dir, editor, audit
         support = _support_for(editor, current, unit, step_dir / "support_mask.png")
         member.setdefault("unit", {}).update({k: unit[k] for k in ("execution_mask_path", "protected_mask_path")})
         resolve_source_region(member, current, output, step_dir)
-        row = _row(group, member, current, output, support, input_image=current, output_image=output, step=index)
-        check = deterministic_check(row)
+        row = _row(group, member, current, output, support, input_image=current, output_image=output, step=index,
+                   generation_context=context)
+        check = deterministic_check(row, semantic_low_change=True)
         member.update(step_input_image=current, step_output_image=output, support_mask=support,
                       step_audit=check, generation_context=context, seed=seed,
                       generation_seconds=generation_seconds,
@@ -107,7 +126,11 @@ def run_committed_step(group, member, current, original, step_dir, editor, audit
         eligible = check.get("decision") == "pending_semantic_audit" and member.get("blind_eligible") is True
         if not member.get("blind_eligible"):
             reasons.append("unresolved_source_region")
-        if eligible:
+        if eligible and defer_semantic:
+            # Provisional generation checkpoint, never a semantic acceptance.
+            accepted = True
+            member['semantic_audit_pending'] = True
+        elif eligible:
             t = time.monotonic()
             _single_member_audits([{**group, "units": [member]}], auditor, step_dir / "audit_panels", kind="multi")
             member["audit_seconds"] = time.monotonic() - t
@@ -119,6 +142,7 @@ def run_committed_step(group, member, current, original, step_dir, editor, audit
             accepted = False
         decision = {"unit_id": uid, "input_sha256": input_hash, "accepted": accepted,
                     "reasons": reasons, "member": member, "image_hashes": _evidence_hashes(member)}
+        decision['defer_semantic'] = defer_semantic
         decision['ledger_sha256'] = digest(decision)
         atomic_json(ledger, decision)
     return decision
@@ -153,8 +177,6 @@ def generate_committed_multi_group(plan, directory, editor, auditor, *, seed=0, 
     group = deepcopy(plan)
     group["commit_policy"] = POLICY
     preflight = multi_support_preflight(group, root)
-    if not preflight["pass"]:
-        raise ValueError("transactional source masks overlap")
     group["support_preflight"] = preflight
     by_id = {u["unit_id"]: u for u in group["units"]}
     original = np.asarray(Image.open(group["source_image"]).convert("RGB"), dtype=np.int16)
@@ -178,7 +200,7 @@ def generate_committed_multi_group(plan, directory, editor, auditor, *, seed=0, 
     return finalize_committed_group(plan, group, kept, decisions, current, root, auditor)
 
 
-def finalize_committed_group(plan, group, kept, decisions, current, root, auditor):
+def finalize_committed_group(plan, group, kept, decisions, current, root, auditor, *, component_only=False):
     """Rebuild retained annotations and run exactly one final audit when eligible."""
     ids = [u["unit_id"] for u in plan["units"]]
     order = plan["generation_order"]
@@ -191,7 +213,7 @@ def finalize_committed_group(plan, group, kept, decisions, current, root, audito
                           "planned_operations": plan["operations"], "decisions": decisions,
                           "kept_unit_ids": group["generation_order"],
                           "dropped_unit_ids": [uid for uid in plan["generation_order"] if uid not in keep_ids]}
-    group["adjacent_pairs"] = _retained_adjacency(group) if len(kept) >= 2 else []
+    group["adjacent_pairs"] = []  # Legacy field; no distance requirement or mask-distance IO.
     with Image.open(group["source_image"]) as source:
         shape = (source.height, source.width)
     allowed = _union_support(group["source_image"], kept) if kept else np.zeros(shape, dtype=bool)
@@ -204,7 +226,16 @@ def finalize_committed_group(plan, group, kept, decisions, current, root, audito
     except (ValueError, KeyError, TypeError) as exc:
         group["joint_audit"].update(status="retained_contract_rejected", failure_reasons=[str(exc)])
     else:
-        if group["joint_audit"]["outside_union_support_fraction"] <= .02:
+        if component_only:
+            from .multi_component_audit import verify_component_fusion
+            proof = verify_component_fusion(group)
+            group['joint_audit'].update(
+                status='complete', audit_mode='component-final-v2',
+                group_mllm_calls=0, fusion_verification=proof,
+                member_semantic_audit_pass=all(member_passes(u.get('semantic_audit', {})) for u in kept),
+                **{'pass': bool(proof['pass'] and group['joint_audit']['blind_protocol']['pass']
+                               and all(member_passes(u.get('semantic_audit', {})) for u in kept))})
+        elif group["joint_audit"]["outside_union_support_fraction"] <= .02:
             group = audit_committed_multi_groups([group], auditor, root / "audit_panels")[0]
             group["joint_audit"]["status"] = "complete"
         else:

@@ -5,6 +5,18 @@ import json
 from pathlib import Path
 
 
+def close_engine(llm):
+    """Release either legacy vLLM engines or the current v1 MP client."""
+    engine = getattr(llm, 'llm_engine', None)
+    shutdown = getattr(engine, 'shutdown', None)
+    if callable(shutdown):
+        shutdown()
+        return
+    shutdown = getattr(getattr(engine, 'engine_core', None), 'shutdown', None)
+    if callable(shutdown):
+        shutdown(timeout=10)
+
+
 def architecture_options(model_id: str, tensor_parallel_size: int) -> dict:
     """Keep dense defaults; use the validated Flash-Next FP8 CPU offload path."""
     path = Path(model_id) / "config.json"

@@ -80,6 +80,23 @@ def materialize(entry, root, source_root, exclusion):
     else:
         image = read_record(source_root, entry['image'], 'sa1b_tfd_1k')
         dense = read_record(source_root, entry['annotation'], 'sa1b_dense_label/annotation')
+    return materialize_records(entry, image, dense, root, exclusion)
+
+
+def materialize_records(entry, image, dense, root, exclusion, claims_root=None):
+    """Write sources/<sid>/{image.jpg, dense.json, complete.json} from decoded SA-1B records.
+
+    Shared by random-access ``materialize`` and the whole-shard feeder (``shard_feeder``).
+    ``claims_root`` (default ``root``) holds ``control/image_hashes``; per-rank source roots share one."""
+    from PIL import Image
+
+    from .geometry import load_mask
+    root = Path(root)
+    sid = entry['source_id']
+    directory = root/'sources'/sid
+    marker = directory/'complete.json'
+    if marker.exists():
+        return json.loads(marker.read_text())
     if image['key'].decode() != sid or dense['key'].decode() != sid:
         raise ValueError('SA1B image/annotation/index identity mismatch')
     raw = image['jpg']
@@ -89,7 +106,7 @@ def materialize(entry, root, source_root, exclusion):
         atomic_json(marker, result)
         return result
     # Shared atomic directory claim deduplicates identical image bytes across ranks.
-    claim = root/'control/image_hashes'/hashed
+    claim = Path(claims_root or root)/'control/image_hashes'/hashed
     claim.parent.mkdir(parents=True, exist_ok=True)
     try:
         claim.mkdir()

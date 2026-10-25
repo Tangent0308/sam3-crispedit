@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-MULTI_PLAN_VERSION = "multi-visible-fit-7-physical-contrast"
+MULTI_PLAN_VERSION = "multi-visible-fit-13-execution-contract"
 _PEOPLE = {"person", "people", "man", "woman", "boy", "girl", "child", "customer"}
 _ANATOMY = {"head", "face", "arm", "hand", "leg", "foot", "finger", "ear", "eye", "nose", "mouth", "neck", "torso", "body"}
 _CORE_CLOTHES = {"jeans", "trousers", "pants", "shorts", "shirt", "t-shirt", "blouse", "jacket", "coat", "dress", "skirt", "sleeve", "sweater", "clothing", "garment", "hijab"}
@@ -36,6 +36,10 @@ def operation_exclusion(category: str, operation: str) -> str:
 
 
 def validate_multi_semantics(item, source_category=""):
+    from .planning_quality import appearance_only_replacement
+    if item.get('operation') == 'replace' and appearance_only_replacement(
+            item.get('scope', ''), item.get('payload', '')):
+        raise ValueError('multi replacement changes only appearance of the same entity')
     # A clothing mask must never silently become the wearer, even for add.
     if _heads(source_category) & _CORE_CLOTHES and _heads(item.get("scope", "")) & (_ANATOMY | _PEOPLE):
         raise ValueError("multi garment mask reinterpreted as anatomy/person")
@@ -48,6 +52,10 @@ def validate_multi_semantics(item, source_category=""):
         if (_heads(item.get("scope", "")) & {"jeans", "trousers", "pants", "shorts", "skirt"}
                 and re.search(r"\b(?:breast|chest|shoulder|collar|lapel)\b", site)):
             raise ValueError("multi direct attachment site lies outside the lower garment")
+    if item.get('operation') == 'attribute' and _heads(item.get('scope', '')) & {'shadow', 'shadows'}:
+        attrs = item.get('attributes') or []
+        if any(a.get('property') in {'color', 'material', 'pattern', 'texture', 'text', 'finish'} for a in attrs):
+            raise ValueError('shadow is illumination, not a paintable object')
     reason = operation_exclusion(item.get("scope", ""), item.get("operation"))
     if reason:
         raise ValueError("multi operation incompatible with source extent: " + reason)
