@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -109,8 +110,24 @@ def main(argv=None, *, services=None):
         start = time.monotonic(); results = []; lock = threading.Lock(); planned_count = 0
         # Atomic checkpoints keep per-group progress visible while planning the
         # next microbatch; wall throughput never sums overlapping stage times.
+        failures = []
+        data_errors = (ValueError, KeyError, IndexError, AssertionError, ZeroDivisionError)
         def process(group):
-            result = process_twin(group, root, editors, audits, local_reference=args.local_generation_reference)
+            try:
+                result = process_twin(group, root, editors, audits, local_reference=args.local_generation_reference)
+            except data_errors as exc:
+                # A data-dependent error of one group is recorded and the group left out (see the multi job).
+                import traceback
+                with lock:
+                    failures.append(group['twin_id'])
+                    with (root/'failed_groups.jsonl').open('a') as f:
+                        f.write(json.dumps({'twin_id': group['twin_id'], 'error': repr(exc),
+                                            'traceback': traceback.format_exc(), 'time': time.time()}) + '\n')
+                    print(json.dumps({'group_failed': group['twin_id'], 'error': repr(exc)}), flush=True)
+                    if len(failures) > max(3, math.ceil(.05 * max(1, len(rows)))):
+                        raise RuntimeError(f'{len(failures)} twin groups failed with data errors; '
+                                           f'see {root}/failed_groups.jsonl')
+                return None
             with lock:
                 results.append(result)
                 atomic_json(root/'progress.json', {
@@ -171,7 +188,10 @@ def main(argv=None, *, services=None):
                 for f in done: f.result()
         except BaseException:
             for f in pending: f.cancel()
-            for pool in pools: pool.close()
+            import traceback
+            traceback.print_exc()  # visible even when a concurrent job reports first
+            if services is None:  # shared services belong to the caller (other jobs use them)
+                for pool in pools: pool.close()
             raise
         finally:
             if services is None:

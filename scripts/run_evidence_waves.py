@@ -77,6 +77,30 @@ def wave_counts(wave, cache=True):
     return sel, acc, groups
 
 
+def code_hashes() -> dict:
+    """The code fingerprint run_dual_validation.py freezes in <wave>/run/dual_contract.json."""
+    from sa1b_pipeline.production_state import file_hash
+    return {str(f.relative_to(REPO)): file_hash(f) for folder in ('sa1b_pipeline', 'scripts', 'utils')
+            for f in (REPO / folder).rglob('*.py')}
+
+
+def supersede_stale_run(wave: Path) -> Path | None:
+    """An unfinished wave started by other code (a hotfix restart) cannot resume: its run and every multi
+    group checkpoint freeze the code hashes. Set its run directory aside (kept for inspection) so that the
+    wave runs again from planning on the same selection; finished waves are never touched."""
+    run = wave / 'run'
+    contract = run / 'dual_contract.json'
+    if (run / 'session.json').exists() or not contract.exists():
+        return None
+    if json.loads(contract.read_text()).get('code') == code_hashes():
+        return None
+    kept = wave / f'run.superseded.{int(time.time())}'
+    run.rename(kept)
+    print(json.dumps({'wave': wave.name, 'superseded_run': str(kept), 'reason': 'code changed since the wave started'}),
+          flush=True)
+    return kept
+
+
 def multi_target(args, accepted_units, accepted_groups, groups=None):
     """Accepted multi targets wanted per operation: fixed, or from --multi-groups and the mean number of
     targets per accepted group so far (prior MULTI_TARGETS_PER_GROUP).
@@ -398,6 +422,7 @@ def main(argv=None):
             print('selection found no eligible groups; stopping', flush=True)
             break
         if not (wave / 'run/session.json').exists():
+            supersede_stale_run(wave)
             env = {key: value for key, value in os.environ.items() if key != 'CUDA_VISIBLE_DEVICES'}
             cmd = [sys.executable, str(REPO / 'scripts/run_dual_validation.py'), '--inputs-root', str(wave / 'inputs'),
                    '--output-root', str(wave / 'run'), '--reservation', str(args.reservation),

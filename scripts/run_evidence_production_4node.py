@@ -147,8 +147,21 @@ def bundle(args):
     and the entry scripts. Nothing is committed."""
     root, dest = args.root, args.root / 'deployment'
     dest.mkdir(exist_ok=True)
+    hotfixes = []
     if (dest / 'code.tar.gz').exists():
-        raise ValueError('deployment already frozen; use a new experiment root for code changes')
+        if not args.hotfix:
+            raise ValueError('deployment already frozen; use a new experiment root for code changes, or '
+                             'bundle --hotfix REASON for a fix to a started run (config and inputs stay frozen)')
+        # Keep the previous code beside; ranks pick the new bundle up when they restart, and the wave
+        # coordinator sets aside a wave that was started by the old code (run_evidence_waves.supersede_stale_run).
+        previous = json.loads((dest / 'manifest.json').read_text())
+        hotfixes = previous.get('hotfixes', [])
+        kept = root / 'planning' / f'hotfix_{time.strftime("%Y%m%dT%H%M%S")}'
+        kept.mkdir(parents=True)
+        for name in ('code.tar.gz', 'code.sha256', 'manifest.json'):
+            (dest / name).rename(kept / name)
+        hotfixes.append({'time': time.time(), 'reason': args.hotfix,
+                         'previous_code_sha256': previous['code_sha256'], 'previous_bundle': str(kept)})
     names = subprocess.check_output(['git', 'ls-files', '-co', '--exclude-standard', '--', 'sa1b_pipeline', 'scripts',
                                      'utils', 'requirements', 'pyproject.toml', 'requirements.txt'],
                                     cwd=REPO, text=True).split()
@@ -189,7 +202,8 @@ def bundle(args):
         'code_sha256': file_hash(dest / 'code.tar.gz'), 'files': len(names), 'git_head': git,
         'uncommitted_paths_at_bundle': dirty, 'config_sha256': file_hash(root / 'config.json'),
         'model_inventory_sha256': file_hash(dest / 'models.json'),
-        'instruction_protocol_sha256': file_hash(REPO / 'sa1b_pipeline/instruction_protocol.py')})
+        'instruction_protocol_sha256': file_hash(REPO / 'sa1b_pipeline/instruction_protocol.py'),
+        **({'hotfixes': hotfixes} if hotfixes else {})})
     print(json.dumps({'root': str(root), 'files': len(names), 'code_sha256': file_hash(dest / 'code.tar.gz')}))
 
 
@@ -494,7 +508,8 @@ def main():
     prep.add_argument('--reservation', type=Path, default=DEFAULT_INPUTS['reservation'])
     prep.add_argument('--benchmark-exclusion', type=Path, default=DEFAULT_INPUTS['benchmark_exclusion'])
     prep.add_argument('--affordance-cache', type=Path, default=DEFAULT_INPUTS['affordance_cache'])
-    sub.add_parser('bundle')
+    bun = sub.add_parser('bundle')
+    bun.add_argument('--hotfix', help='replace the code of a started run (reason recorded; previous bundle kept)')
     n = sub.add_parser('node')
     n.add_argument('--rank', type=int, required=True)
     n.add_argument('--mllm-python', required=True)

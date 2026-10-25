@@ -114,6 +114,26 @@ def fuse_components(source, results, directory):
     return str(output), proof
 
 
+def drop_overlapping_components(source, results):
+    """Components whose accepted supports overlap cannot both be fused. Supports can grow after planning
+    (a removal also clears its shadow or reflection), so independent components occasionally meet
+    (production wave 1, rank 3). Keep the earlier component; drop the later one whole, as if its edits had not
+    been accepted (no audit is overridden). Returns the results and the dropped unit IDs."""
+    owned, out, dropped = None, [], []
+    for result in results:
+        if not result['kept']:
+            out.append(result)
+            continue
+        support = _union_support(source, result['kept'])
+        if owned is not None and (owned & support).any():
+            dropped += [u['unit_id'] for u in result['kept']]
+            out.append({**result, 'kept': [], 'current': source})
+            continue
+        owned = support if owned is None else owned | support
+        out.append(result)
+    return out, dropped
+
+
 def select_valid_component_subset(group, results):
     """Keep the largest valid set without rerendering or hiding dependencies.
 
@@ -238,6 +258,7 @@ def generate_parallel_multi_group(plan, directory, editor_factory, auditor, *, s
     if grouped_audit:
         from .multi_component_audit import complete_components_together
         results,shared_calls=complete_components_together(group,results,auditor,root/'group_audit')
+    results, overlap_dropped = drop_overlapping_components(group['source_image'], results)
     results, contract_dropped = select_valid_component_subset(group, results)
     current, proof = fuse_components(group['source_image'], results, root / 'fusion')
     decisions = sorted([d for r in results for d in r['decisions']], key=lambda d: order.index(d['unit_id']))
@@ -246,6 +267,7 @@ def generate_parallel_multi_group(plan, directory, editor_factory, auditor, *, s
                          'audit_policy': audit_policy,
                          'component_semantic_calls': shared_calls+sum(r.get('semantic_calls', 0) for r in results) if component_only else None,
                          'contract_subset_dropped': contract_dropped,
+                         **({'fusion_overlap_dropped': overlap_dropped} if overlap_dropped else {}),
                          'generation_and_step_audit_seconds': time.monotonic() - started,
                          'source_policy': 'original per component; committed previous step within component'}
     return finalize_committed_group(plan, group, kept, decisions, current, root, auditor, component_only=component_only)

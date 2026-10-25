@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 import argparse
 import json
+import math
 import sys
 import signal
 import time
@@ -84,6 +85,21 @@ def main(argv=None, *, services=None):
                     audit_policy=args.audit_policy)
             return generate_committed_multi_group(g, root/'generated'/g['multi_id'], RemoteEditor(editors), auditor,
                                                   save_crop_evidence=args.save_crop_evidence)
+        failures = []
+        # Data-dependent errors of single groups are recorded and the group is left out; an infrastructure
+        # failure (a stopped service worker, a timeout) still stops the run. Too many failures stop it too.
+        data_errors = (ValueError, KeyError, IndexError, AssertionError, ZeroDivisionError)
+        def run_isolated(g):
+            try:
+                return run(g)
+            except data_errors as exc:
+                import traceback
+                record = {'multi_id': g['multi_id'], 'error': repr(exc), 'traceback': traceback.format_exc(),
+                          'time': time.time()}
+                with (root/'failed_groups.jsonl').open('a') as f:
+                    f.write(json.dumps(record) + '\n')
+                print(json.dumps({'group_failed': g['multi_id'], 'error': repr(exc)}), flush=True)
+                return None
         try:
             # Load all independent services together; the first audit should
             # not pay a model cold start while editors wait for its decision.
@@ -92,10 +108,17 @@ def main(argv=None, *, services=None):
             if any(not (root/'generated'/g['multi_id']/'committed.json').is_file() for g in plans):
                 editors.start(); audits.start()
             with ThreadPoolExecutor(max_workers=args.groups_in_flight) as executor:
-                futures = [executor.submit(run, g) for g in plans]
+                futures = [executor.submit(run_isolated, g) for g in plans]
                 try:
                     for future in as_completed(futures):
-                        results.append(future.result())
+                        result = future.result()
+                        if result is None:
+                            failures.append(1)
+                            if len(failures) > max(3, math.ceil(.05 * len(plans))):
+                                raise RuntimeError(f'{len(failures)} multi groups failed with data errors; '
+                                                   f'see {root}/failed_groups.jsonl')
+                            continue
+                        results.append(result)
                         atomic_json(root/'transactional_progress.json', {
                             'completed': len(results), 'planned': len(plans),
                             'automatic_pass': sum(g['joint_audit']['pass'] for g in results),
@@ -103,7 +126,10 @@ def main(argv=None, *, services=None):
                             'seconds': time.monotonic()-started})
                 except BaseException:
                     for future in futures: future.cancel()
-                    editors.close(); audits.close()
+                    import traceback
+                    traceback.print_exc()  # visible even when a concurrent job reports first
+                    if services is None:  # shared services belong to the caller (other jobs use them)
+                        editors.close(); audits.close()
                     raise
         finally:
             if services is None:

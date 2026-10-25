@@ -190,3 +190,21 @@ def test_parallel_planning_views_match_the_serial_path(tmp_path):
         assert names == [Path(v).name for pair in per_mask for v in pair]
         for name in ('original.png', 'U1_crop.png', 'U2_crop.png'):
             assert (tmp_path / 'serial' / digest / name).read_bytes() == (tmp_path / 'parallel' / digest / name).read_bytes()
+
+
+def test_overlapping_component_supports_drop_the_later_component(tmp_path):
+    from sa1b_pipeline.multi_parallel import drop_overlapping_components
+    source = tmp_path / 'source.png'
+    Image.new('RGB', (40, 30)).save(source)
+
+    def unit(uid, x0, x1):
+        m = np.zeros((30, 40), np.uint8)
+        m[5:20, x0:x1] = 255
+        Image.fromarray(m).save(tmp_path / f'{uid}.png')
+        return {'unit_id': uid, 'support_mask': str(tmp_path / f'{uid}.png')}
+    results = [{'kept': [unit('U1', 0, 15)], 'current': 'a.png'}, {'kept': [unit('U2', 10, 25)], 'current': 'b.png'},
+               {'kept': [unit('U3', 30, 38)], 'current': 'c.png'}, {'kept': [], 'current': str(source)}]
+    out, dropped = drop_overlapping_components(str(source), results)
+    assert dropped == ['U2']
+    assert [len(r['kept']) for r in out] == [1, 0, 1, 0] and out[1]['current'] == str(source)
+    assert drop_overlapping_components(str(source), [results[0], results[2]])[1] == []

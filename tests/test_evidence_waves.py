@@ -132,3 +132,17 @@ def test_wave_budget_splits_one_wave_by_remaining_need():
     assert abs(ratio - wanted) < .02
     small = rw.plan_wave({'twins': 3, 'multi': 2}, zero, zero, rw.PRIOR, caps, margin=1.0)
     assert rw.fit_budget(small, 30_000, caps)['twins']['budget']['scale'] == 1.0   # small needs: not scaled
+
+
+def test_unfinished_wave_from_other_code_is_set_aside_and_finished_waves_kept(tmp_path):
+    wave = tmp_path / 'wave03'
+    (wave / 'run').mkdir(parents=True)
+    (wave / 'run/dual_contract.json').write_text(json.dumps({'code': {'sa1b_pipeline/x.py': 'old'}}))
+    kept = rw.supersede_stale_run(wave)
+    assert kept is not None and kept.exists() and not (wave / 'run').exists()
+    (wave / 'run').mkdir()
+    (wave / 'run/dual_contract.json').write_text(json.dumps({'code': rw.code_hashes()}))
+    assert rw.supersede_stale_run(wave) is None and (wave / 'run').exists()        # same code: resume
+    (wave / 'run/dual_contract.json').write_text(json.dumps({'code': {'old': 'x'}}))
+    (wave / 'run/session.json').write_text('{}')
+    assert rw.supersede_stale_run(wave) is None and (wave / 'run').exists()        # finished: never touched
