@@ -88,6 +88,15 @@ python3 scripts/run_evidence_production_4node.py --root "$ROOT" merge --partial 
 - 波次协调器失败后自动重试 3 次，间隔 2 分钟。
 - 上一个 Arnold trial 留下的锁会自动留档后接管。同一 trial 内跨主机残留的锁，确认旧进程已停止后执行 `recover-lock --rank <r> --previous-workers-stopped`。
 - 不要同时提交两个写同一目录的任务。
+- 某个组的数据错误（例如一张图上两个编辑区域在编辑后重叠）只记入该次运行目录下的 `failed_groups.jsonl` 并跳过该组。超过 5% 的组出错才停止这一波。
+- **代码热修复**（已启动的运行，配置和输入不变）：
+  ```bash
+  python3 scripts/run_evidence_production_4node.py --root "$ROOT" bundle --hotfix "原因"
+  ```
+  - 旧代码包留档到 `planning/hotfix_<时间>/`。
+  - 各节点重启后使用新代码。
+  - 用旧代码开始、尚未完成的那一波会被改名为 `run.superseded.<时间>` 并从规划重新跑；已完成的波次不受影响。
+  - 2026-10-25 第一次热修复：rank 3 第 1 波的多目标组在融合时两个编辑区域重叠，旧代码因此报错并关掉了共享服务。
 
 ### 冒烟与时间
 
