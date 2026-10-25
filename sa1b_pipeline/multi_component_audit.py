@@ -540,12 +540,22 @@ def complete_components_together(group, results, auditor, directory):
         if count>=2:packs.append(pending);pending=[];count=0
     if pending:packs.append(pending)
     from concurrent.futures import ThreadPoolExecutor
-    def review(item):
-        index,pack=item;out=directory/f'pack_{index:02d}'
+    from .group_generation import _union_support
+    calls=[0]
+    def audit_pack(pack,out):
         final,_=fuse_components(group['source_image'],pack,out/'provisional')
         ms=[d['member'] for r in pack for d in r['provisional']]
-        report=audit_component(group,ms,final,auditor,out/'joint',aligned=True)
-        return [(r['_component_index'],report,final) for r in pack]
+        calls[0]+=1
+        return [(r['_component_index'],audit_component(group,ms,final,auditor,out/'joint',aligned=True),final) for r in pack]
+    def review(item):
+        index,pack=item;out=directory/f'pack_{index:02d}'
+        supports=[_union_support(group['source_image'],r['kept']) for r in pack]
+        if any((supports[i]&supports[j]).any() for i in range(len(pack)) for j in range(i)):
+            # Supports can grow after planning (a removal also clears its shadow), so components of one pack may
+            # overlap; they cannot share one provisional image. Audit them one by one; the final fusion keeps the
+            # earlier of two overlapping components that pass (multi_parallel.drop_overlapping_components).
+            return [row for j,r in enumerate(pack) for row in audit_pack([r],directory/f'pack_{index:02d}_{j}')]
+        return audit_pack(pack,out)
     with ThreadPoolExecutor(max_workers=len(packs)) as executor:
         reports={key:(report,final) for rows in executor.map(review,enumerate(packs)) for key,report,final in rows}
     output=[]
@@ -553,7 +563,7 @@ def complete_components_together(group, results, auditor, directory):
         report,final=reports.get(i,(None,None))
         output.append(complete_component(group,r['provisional'],r['current'],auditor,directory/f'component_{i:02d}',
                                         joint_report=report,joint_image=final))
-    return output,len(packs)
+    return output,calls[0]
 
 
 def verify_component_fusion(group):
