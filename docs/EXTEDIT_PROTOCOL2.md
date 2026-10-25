@@ -312,7 +312,8 @@ export EXTEDIT_SCALEEDIT=object_surface_text_editing=3750,building_surface_text_
 - **全部成功后：**抽查样本，再用 `publish` 合并到 `datasets/ExtEdit_Protocol2_<日期>/`。只有正式结果进 `datasets/`。
 - **预计：**
   - 每个 worker 约 5–8 小时，外加装环境、拷模型约 15 分钟；
-  - 运行目录约 450 GB（解出的原图约 300 GB，贴回 PNG 约 140 GB）；原图在发布后可以删除。
+  - 运行目录：事先估计约 450 GB。第二批四机实测（约 38 万个原始对）解出的原图 421 GB、贴回 PNG 476 GB，共约 0.9 TB；
+  - 发布后这两部分可以删除（需用户确认），各步记录保留。第一、二批的已于 10-24 删除，删除前的文件清单在各运行目录的 `admin/`。
 - **本机验证（2026-10-21）：**
   - 用同一入口、本地仓库地址、每个 worker 约 38 行的配额，把 4 个 worker 依次模拟了一遍（脚本按 ARNOLD 的方式从标准输入喂给 bash）；
   - 中途向 worker 1 发 SIGTERM：写出 `failure.json`，子进程和服务都被关掉；重启后从中断处续完，行与记录没有重复；
