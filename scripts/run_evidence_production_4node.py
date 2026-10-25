@@ -392,7 +392,15 @@ def rank_status(root: Path, c: dict, rank: int) -> dict:
     finished = sum(COST[k] * done[k] for k in COST)
     first = json.loads((node_dir / 'started.json').read_text())['first_start'] if (node_dir / 'started.json').exists() else None
     elapsed = time.time() - first if first else None
-    eta = elapsed * (work - finished) / finished if elapsed and finished else None
+    # ETA from the finished waves' own run time (+1 min for selection and the pool check), so that setup,
+    # model copying, new shards and restarts do not inflate it: remaining progress / progress per wave x time.
+    eta = None
+    ledger = node_dir / 'waves/ledger.json'
+    if ledger.exists() and finished:
+        walls = [w['seconds'] + 60 for w in json.loads(ledger.read_text())['waves'] if w.get('seconds')]
+        if walls:
+            per_wave = finished / work / len(walls)
+            eta = (1 - finished / work) / per_wave * (sum(walls) / len(walls))
     s.update(waves_finished=prog['waves_finished'], targets=t, exportable=m, multi_groups_accepted=prog['multi_groups_accepted'],
              progress=round(finished / work, 4) if work else None, elapsed_hours=round(elapsed / 3600, 2) if elapsed else None,
              eta_hours=round(eta / 3600, 1) if eta is not None else None, updated=prog['updated'])
