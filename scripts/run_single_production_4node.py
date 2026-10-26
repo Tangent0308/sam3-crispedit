@@ -99,10 +99,15 @@ def avoided_shards(order_path: Path, first: int) -> set:
     return {s for shards in order.values() for s in shards[:first]}
 
 
+def ranks_started(root: Path) -> bool:
+    """A rank has started (warm-pool alone creates nodes/node<r>/pool but starts no rank)."""
+    return any(Path(root).glob('nodes/node*/started.json'))
+
+
 def prepare(args):
     from sa1b_pipeline.production_pool import shard_order, write_tables
     root = args.root
-    if (root / 'nodes').exists() and args.replace_unstarted:
+    if args.replace_unstarted and ranks_started(root):
         raise ValueError('ranks have started in this root; quotas and code stay frozen (use a new root)')
     if args.replace_unstarted:
         kept = root / 'planning' / f'replaced_{time.strftime("%Y%m%dT%H%M%S")}'

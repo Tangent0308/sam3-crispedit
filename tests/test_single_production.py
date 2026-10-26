@@ -187,3 +187,10 @@ def test_warm_pool_feeds_the_first_shards_of_every_rank_once(tmp_path, monkeypat
     (tmp_path / 'config.json').write_text(json.dumps(dict(_config(world=2), gpus_per_node=8)))
     prod.warm_pool(SimpleNamespace(root=tmp_path, ranks=None, shards_per_rank=2, parallel=1, feed_only=True))
     assert sorted(fed) == [(0, [11]), (1, [20]), (1, [21])]
+
+
+def test_warm_pool_alone_does_not_count_as_started(tmp_path):
+    (tmp_path / 'nodes/node0/pool/menus').mkdir(parents=True)
+    assert not prod.ranks_started(tmp_path)
+    (tmp_path / 'nodes/node0/started.json').write_text('{}')
+    assert prod.ranks_started(tmp_path)

@@ -14,7 +14,9 @@
 
 **实验目录**：`A/02_production_runs/sa1b_samtok_single100k_20261026/`（下文 `$ROOT`）。
 - 已执行 `prepare`。`bundle` 在提交 Arnold 前执行（命令见“入口指令”），会打包当时的代码。
-- `warm-pool`（每台前 2 片）在开发机上进行，完成后节点启动即可直接选样。没做也能跑，节点会自己读片和标注。
+- `warm-pool` 已完成：每台前 2 片已读入、标注并算好菜单，每片约 11,000 张可用图。节点启动后直接选样，需要更多分片时自己读片。
+  - 判类别：每台约 12–13 分钟，各约 4.1–4.5 万个新类别；
+  - 菜单：每片约 7 分钟。
 - 单机冒烟在 `$ROOT/planning/smoke1/`。
 
 **代码**
@@ -88,7 +90,7 @@ launcher 依次做这些事（与孪生/多目标生产相同的环境与安装�
 6. 把三个模型复制到 `/opt/tiger/sa1b-evidence-model-cache`；
 7. 启动本 rank。
 
-**准备、预热和打包**（`prepare` 已执行；`warm-pool` 在开发机上进行；`bundle` 在提交前执行）：
+**准备、预热和打包**（`prepare` 和 `warm-pool` 已执行；`bundle` 在提交前执行）：
 
 ```bash
 cd /opt/tiger/tanyue/sa1b-samtok-edit-data
