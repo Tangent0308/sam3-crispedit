@@ -1,5 +1,12 @@
 # 当前 SA-1B 标注管线
 
+> **按链路整理的主文档（2026-10-28）**：本文按时间记录方法细节和对照实验，内容很长。要了解某条数据链路的现状、设计、代码、结果和示例，请先看：
+> - 孪生 ＋ 多目标：[TWINS_MULTI_ZH.md](TWINS_MULTI_ZH.md)（四机生产已完成）
+> - 单目标 v2.1：[SINGLE_TARGET_ZH.md](SINGLE_TARGET_ZH.md)
+> - 单目标 50k：[DATASET_50K_ZH.md](DATASET_50K_ZH.md)
+>
+> 下文“当前计划”“还没有提交”等说法是写作当时的状态。
+
 ## 四机生产实现：孪生 ＋ 多目标（2026-10-25；当前计划孪生约 2.5 万个样本、多目标约 10 万个样本）
 
 报告：`/opt/tiger/tanyue/visualization_tmp/production_4node_20261025/四机生产实现与时间估计.md`。运行方式和入口指令见 [四机指南](FOURNODE_RUN_GUIDE.md#入口指令)。

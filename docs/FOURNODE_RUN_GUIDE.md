@@ -1,11 +1,22 @@
-# 运行指南（单机新入口与四机历史部署）
+# 运行指南（四机生产入口；后半为历史部署）
+
+**当前入口索引（2026-10-28）**
+
+| 链路 | 状态 | 入口 |
+|---|---|---|
+| 孪生 ＋ 多目标（证据管线） | 已完成（2026-10-28），数据和结果见 [TWINS_MULTI_ZH.md](TWINS_MULTI_ZH.md) | 本文下一节的[入口指令](#入口指令) |
+| 单目标 v2.1，暂定 5 万 | 已打包，待提交 Arnold | [SINGLE_TARGET_ZH.md#入口指令](SINGLE_TARGET_ZH.md#入口指令) |
+| 单目标 50k（旧管线） | 已完成 | 本文后半“入口”一节（`scripts/run_production_4node.py`） |
+
+从“迁移后的新任务入口”一节往下都是历史部署记录，不再推荐使用。
 
 ## 孪生约 2.5 万个样本 ＋ 多目标约 10 万个样本：四机生产（证据管线，2026-10-25）
 
 当前推荐的大批量入口。配置与完整出图 5 相同（证据核验、文字核验、编辑收尾、审核核验、优先级调度，40 步），四台各自跑波次，最后合并。代码：`scripts/run_evidence_production_4node.py`，部署脚本在 `scripts/evidence_production/`。
 
 - 实验目录（下文 `$ROOT`，目录名沿用最初的 50k/100k 计划）：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_group_twins50k_multi100k_20261025`
-- 已冻结（2026-10-25）：配置 `config.json`，代码包 `deployment/code.tar.gz`（sha256 `a1e49b9e…`）。还没有提交 Arnold。
+- **已完成（2026-10-28 08:46 UTC）**：孪生 12,511 组（25,022 个样本）、多目标 100,117 个目标，四台共 303 波，自 10-25 20:18 热修复重启起 60.5 小时。结果、路径和示例见 [TWINS_MULTI_ZH.md](TWINS_MULTI_ZH.md#5-生产结果)。
+- 冻结（2026-10-25）：配置 `config.json`，代码包 `deployment/code.tar.gz`。初版 sha256 `a1e49b9e…`，当晚热修复后为 `5a0562eb…`。
 - 配额（`config.json` 的 `quotas`，数量是大致目标）：
   - 孪生约 **25,000 个样本** = 12,500 组：每组两张目标图。每台每种操作 782 组，按自动通过的组数均衡；全部完成时 12,512 组（25,024 个样本）。
   - 多目标约 **100,000 个样本** = 100,000 个目标（每组 2–4 个目标）：每台每种操作 6,250 个目标。
