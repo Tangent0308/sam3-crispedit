@@ -106,13 +106,15 @@
 
 **目标**：5 万个单目标样本，四种操作各 12,500；每台每种操作 3,125 个（`config.json` 的 `quota`）。
 
-**实验目录**：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single100k_20261026/`（下文 `$ROOT`）。
-- **目录名沿用最初的 10 万计划，配额已改为 5 万**。目录里的源图池记录了绝对路径，所以不改名。
-- 2026-10-28 用 `prepare --samples 50000 --replace-unstarted` 改了配额，`config.json` 与原 10 万版本只有 `quota` 不同。原配置和代码包留档在 `$ROOT/planning/replaced_20261028T120953/`。源图池、分片顺序和排除表都没变。
-- 随后重新执行了 `bundle`：
-  - 代码 sha256 `29124ec8…`，与之前相同（代码未变，对应提交 `8e02507`）；
-  - 配置 sha256 `b139e1f0…`。
-  - 已核对：两个校验和都与文件一致，`status` 显示四台为 not_started、配额 5 万。
+**实验目录**：`/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single50k_20261026/`（下文 `$ROOT`）。
+- 2026-10-28 配额由 10 万改为 5 万，目录由 `sa1b_samtok_single100k_20261026` 改名为 `sa1b_samtok_single50k_20261026`：
+  - 目录内 90,578 个文件里的旧绝对路径已改写为新路径；`planning/replaced_*` 留档快照保持原样。抽查四台各 100 条源图记录，路径都能打开。
+  - 用 `prepare --samples 50000 --replace-unstarted` 重新生成配置：与原 10 万配置相比，只有 `quota` 和实验名不同。旧配置和代码包留档在 `$ROOT/planning/replaced_20261028T120953/`（10 万版）和 `replaced_20261028T153032/`（改名前的 5 万版）。
+  - 源图池、分片顺序和排除表都没变。
+- 当前打包：
+  - 代码 sha256 `e9b19ede…`，对应提交 `ef993d2`（与 `8e02507` 相比只把 `--samples` 默认值改为 5 万）；
+  - 配置 sha256 `5169ef8c…`。
+  - 已核对：两个校验和都与文件一致；`status` 显示四台都是 not_started，配额 5 万。
 - `warm-pool` 已完成：每台前 2 片已读入、标注并算好菜单，每片约 11,000 张可用图。节点启动后直接选样，需要更多分片时自己读片。
   - 判类别：每台约 12–13 分钟，各约 4.1–4.5 万个新类别；
   - 菜单：每片约 7 分钟。
@@ -135,7 +137,7 @@
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-exec bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single100k_20261026/deployment/arnold_entry.sh
+exec bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single50k_20261026/deployment/arnold_entry.sh
 ```
 
 `arnold_entry.sh` 的内容如下，也可以直接把这几行填进 Arnold：
@@ -143,7 +145,7 @@ exec bash /mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_p
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-export SINGLE_RUN_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single100k_20261026
+export SINGLE_RUN_ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single50k_20261026
 export SINGLE_RUNTIME_ROOT="${SINGLE_RUNTIME_ROOT:-/opt/tiger/sa1b-evidence-production-runtime}"
 exec bash "$SINGLE_RUN_ROOT/deployment/launch_4node.sh"
 ```
@@ -161,7 +163,7 @@ launcher 依次做这些事（与孪生/多目标生产相同的环境和安装�
 
 ```bash
 cd /opt/tiger/tanyue/sa1b-samtok-edit-data
-ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single100k_20261026
+ROOT=/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single50k_20261026
 python3 scripts/run_single_production_4node.py --root "$ROOT" prepare --samples 50000 --world-size 4   # 已执行（首次加 --replace-unstarted 改配额）
 # 8 卡 + HDFS 挂载的开发机上，用 mllm 环境（标注要用 27B）
 SA1B_LOCAL_MODEL_MAP="$(cat /tmp/sa1b-recovery-model-map.json)" SA1B_FEEDER_LIB=/tmp/sa1b-evidence-smoke-runtime/feeder-lib \

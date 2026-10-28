@@ -77,12 +77,12 @@
 | 多目标 | `…/sa1b_samtok_group_twins50k_multi100k_20261025/final/multi_balanced.jsonl` | 39,814 组（每行一张图，2–4 个目标） |
 | 附带单目标 | `…/sa1b_samtok_group_twins50k_multi100k_20261025/final/singles.jsonl` | 12,363 |
 | 孪生/多目标统计 | `…/sa1b_samtok_group_twins50k_multi100k_20261025/final/summary.json` | — |
-| 单目标 v2.1（生产后） | `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single100k_20261026/final/singles_balanced.jsonl` | 5 万（目录名沿用 100k 计划，配额已改为 5 万） |
+| 单目标 v2.1（生产后） | `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single50k_20261026/final/singles_balanced.jsonl` | 50,000 |
 | 单目标 50k | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014/release/annotations/train.jsonl` | 50,000 |
 
 - 孪生/多目标的图片和 mask 没有复制，记录里是绝对路径，指向生产目录下的 `nodes/node<r>/waves/…`。不要删除或移动这些生产目录。
 - 50k 的媒体用相对路径，根目录是 `release/`。
-- 两个生产目录的名字都沿用最初计划，与实际配额不一致。
+- 孪生/多目标生产目录名沿用最初计划（twins50k_multi100k），实际是孪生 2.5 万条、多目标 10 万个目标。
 
 ## 文档
 
