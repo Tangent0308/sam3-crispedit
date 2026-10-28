@@ -485,7 +485,7 @@ def main():
     p.add_argument('--root', type=Path, required=True)
     sub = p.add_subparsers(dest='command', required=True)
     prep = sub.add_parser('prepare')
-    prep.add_argument('--samples', type=int, default=100_000, help='total singles, the same number per operation')
+    prep.add_argument('--samples', type=int, default=50_000, help='total singles, the same number per operation')
     prep.add_argument('--world-size', type=int, default=4)
     prep.add_argument('--seed', type=int, default=20261027)
     prep.add_argument('--wave-targets', type=float, default=1700, help='planned targets per wave and rank (~1,000 singles)')
