@@ -5,7 +5,7 @@
 | 链路 | 状态 | 入口 |
 |---|---|---|
 | 孪生 ＋ 多目标（证据管线） | 已完成（2026-10-28），数据和结果见 [TWINS_MULTI_ZH.md](TWINS_MULTI_ZH.md) | 本文下一节的[入口指令](#入口指令) |
-| 单目标 v2.1，暂定 5 万 | 已打包，待提交 Arnold | [SINGLE_TARGET_ZH.md#入口指令](SINGLE_TARGET_ZH.md#入口指令) |
+| 单目标 v2.1，5 万 | 已完成（2026-10-29），见 [SINGLE_TARGET_ZH.md#5-生产结果5-万2026-10-29](SINGLE_TARGET_ZH.md#5-生产结果5-万2026-10-29) | [SINGLE_TARGET_ZH.md#入口指令](SINGLE_TARGET_ZH.md#入口指令) |
 | 单目标 50k（旧管线） | 已完成 | 本文后半“入口”一节（`scripts/run_production_4node.py`） |
 
 从“迁移后的新任务入口”一节往下都是历史部署记录，不再推荐使用。

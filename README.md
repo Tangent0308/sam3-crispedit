@@ -9,7 +9,7 @@
 | 孪生（twins） | 同一原图两个目标、同一操作，各自一张结果图 | 12,511 组 = 25,022 条，四种操作各约 3,128 组 | 已完成 | [TWINS_MULTI_ZH.md](docs/TWINS_MULTI_ZH.md) |
 | 多目标（multi） | 一张原图上 2–4 个目标，全部编辑进一张结果图 | 100,117 个目标 / 39,814 张图，四种操作各约 2.5 万 | 已完成 | [TWINS_MULTI_ZH.md](docs/TWINS_MULTI_ZH.md) |
 | 附带单目标（孪生/多目标生产的副产品） | 原图 → 结果图，一个目标 | 12,363 条（不均衡） | 已完成 | [TWINS_MULTI_ZH.md §5](docs/TWINS_MULTI_ZH.md#5-生产结果) |
-| 单目标 v2.1 | 原图 → 结果图，一个目标 | 暂定 5 万，四种操作各 12,500 | 已打包，待提交 Arnold | [SINGLE_TARGET_ZH.md](docs/SINGLE_TARGET_ZH.md) |
+| 单目标 v2.1 | 原图 → 结果图，一个目标 | 50,000 条，四种操作各 12,500 | 已完成（2026-10-29） | [SINGLE_TARGET_ZH.md](docs/SINGLE_TARGET_ZH.md) |
 | 单目标 50k（旧管线） | 原图 → 结果图，一个目标 | 50,000 条，四种操作各 12,500 | 已完成，正式 release | [DATASET_50K_ZH.md](docs/DATASET_50K_ZH.md) |
 
 所有数据都是自动审核通过的版本，没有做独立人工验收。各文档写明了助手盲评和抽查结果，以及由谁判定。
@@ -67,7 +67,9 @@
 - 从 SA-1B 索引中按固定种子随机抽 16,000 张作为候选池，排除 benchmark（`production_sources.prepare_reservoir`）；
 - 最终用到 1,132 张源图，每张平均 44 个 mask 样本。
 
-**交叉核对**（2026-10-28）：孪生/多目标的 52,325 张源图里，有 8 张也是 50k 的源图，81 张在单目标验证池里，编辑的目标不同。原因是孪生/多目标生产当时没有排除这两部分。
+**交叉核对**
+- 2026-10-28：孪生/多目标的 52,325 张源图里，有 8 张也是 50k 的源图，81 张在单目标验证池里，编辑的目标不同。原因是孪生/多目标生产当时没有排除这两部分。
+- 2026-10-29：单目标 v2.1 的 25,108 张源图与孪生/多目标没有重叠，也不在排除表里。
 
 ## 结果路径（已核对）
 
@@ -77,7 +79,7 @@
 | 多目标 | `…/sa1b_samtok_group_twins50k_multi100k_20261025/final/multi_balanced.jsonl` | 39,814 组（每行一张图，2–4 个目标） |
 | 附带单目标 | `…/sa1b_samtok_group_twins50k_multi100k_20261025/final/singles.jsonl` | 12,363 |
 | 孪生/多目标统计 | `…/sa1b_samtok_group_twins50k_multi100k_20261025/final/summary.json` | — |
-| 单目标 v2.1（生产后） | `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single50k_20261026/final/singles_balanced.jsonl` | 50,000 |
+| 单目标 v2.1 | `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single50k_20261026/final/singles_balanced.jsonl` | 50,000 |
 | 单目标 50k | `/mnt/bn/strategy-mllm-train/user/tanyue/datasets/sa1b_samtok_edit_50k_20261014/release/annotations/train.jsonl` | 50,000 |
 
 - 孪生/多目标的图片和 mask 没有复制，记录里是绝对路径，指向生产目录下的 `nodes/node<r>/waves/…`。不要删除或移动这些生产目录。
@@ -89,7 +91,7 @@
 | 文档 | 内容 |
 |---|---|
 | [docs/TWINS_MULTI_ZH.md](docs/TWINS_MULTI_ZH.md) | 孪生 ＋ 多目标：设计、代码、生产结果、数据读取、质量、示例、已知问题 |
-| [docs/SINGLE_TARGET_ZH.md](docs/SINGLE_TARGET_ZH.md) | 单目标 v2.1：设计、代码、四机入口、验证结果、示例、已知问题 |
+| [docs/SINGLE_TARGET_ZH.md](docs/SINGLE_TARGET_ZH.md) | 单目标 v2.1：设计、代码、四机入口、生产结果、验证结果、示例、已知问题 |
 | [docs/DATASET_50K_ZH.md](docs/DATASET_50K_ZH.md) | 50k 正式数据：统计、字段、读取、示例 |
 | [docs/FOURNODE_RUN_GUIDE.md](docs/FOURNODE_RUN_GUIDE.md) | 各次四机运行的入口指令、进度、恢复；后半为历史部署 |
 | [docs/PIPELINE.md](docs/PIPELINE.md) | 按时间记录的方法细节与对照实验（含早期分组数据方案） |
@@ -98,7 +100,7 @@
 
 四机入口：
 - 孪生/多目标：[FOURNODE_RUN_GUIDE.md#入口指令](docs/FOURNODE_RUN_GUIDE.md#入口指令)
-- 单目标 v2.1：[SINGLE_TARGET_ZH.md#入口指令](docs/SINGLE_TARGET_ZH.md#入口指令)（5 万，已打包）
+- 单目标 v2.1：[SINGLE_TARGET_ZH.md#入口指令](docs/SINGLE_TARGET_ZH.md#入口指令)（5 万，已完成）
 - 50k：`scripts/run_production_4node.py`（见四机指南后半部分）
 
 展示用的报告、拼图和 PDF 在 `/opt/tiger/tanyue/visualization_tmp/<实验名_日期>/`。实验目录的总索引在 `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/README.md`：`01_shared_inputs`、`02_production_runs`、`04_current_validation`、`05_history`。

@@ -10,10 +10,10 @@
 |---|---|
 | 定义 | 一条样本 = 原图 → 编辑图，一个 mask、一条指令（含 no-ref）、一种操作 |
 | 管线 | 证据管线 v2.1：孪生/多目标的选样、规划、证据门、收尾、审核做法，每个目标从原图单独生成、单独审核 |
-| 计划规模 | **5 万条**（2026-10-28 由 10 万改为暂定 5 万），四种操作各 12,500，四机生产 |
-| 状态（2026-10-28） | 验证完成；5 万四机生产已准备、预热、打包，**尚未提交 Arnold** |
-| 验证质量 | 助手盲评两轮各 60:60：合格 75% vs 50k 旧版 66%，不合格 2 vs 7（详见第 5 节） |
-| 速度 | 验证时本机 54.3 GPU·秒/样本（GPU 与他人共享），独占节点折算约 45–47；50k 旧版 46.3 |
+| 规模 | **50,000 条**，四种操作各 12,500（2026-10-28 由 10 万计划改为 5 万） |
+| 状态 | **已完成（2026-10-29 14:45 UTC）**，数据在 `…/sa1b_samtok_single50k_20261026/final/singles_balanced.jsonl`（见第 5 节） |
+| 验证质量 | 助手盲评两轮各 60:60：合格 75% vs 50k 旧版 66%，不合格 2 vs 7（详见第 6 节） |
+| 速度 | 生产实测 35.5 GPU·秒/样本（独占 4×8 H100）；验证时本机 54.3（GPU 与他人共享）；50k 旧版 46.3 |
 
 边界：
 - 孪生/多目标的规划、生成、审核代码文件都没有改。单目标只新增模块和入口。
@@ -47,7 +47,7 @@
   - v2.1 导出 319 个，v2 导出 231 个；
   - 生成时间相同（1,729 s : 1,730 s）；
   - 两边都导出的 228 个，输出逐像素相同。
-- 多出来的 91 个：65 个是串联目标；21 个来自 v2 中因多目标审核回归（见第 8 节）被跳过的组；5 个是审核结论不同（反向的有 3 个）。
+- 多出来的 91 个：65 个是串联目标；21 个来自 v2 中因多目标审核回归（见第 9 节）被跳过的组；5 个是审核结论不同（反向的有 3 个）。
 
 ### 2.2 单目标组（只在单目标进程内替换规则）
 
@@ -235,11 +235,79 @@ WAVE=$E5/waveNN NGROUPS=300 PLANNING_CHUNKS=3 bash $E5/reproduce/run_wave_v21.sh
 python $E5/reproduce/analyze_wave_v21.py $E5/waveNN $E5/analysis/waveNN.json
 ```
 
-## 5. 验证结果
+## 5. 生产结果（5 万，2026-10-29）
+
+**数据位置**（`$ROOT/final/`，`$ROOT` = `/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single50k_20261026`）
+
+| 文件 | 行数 | 内容 |
+|---|---|---|
+| `singles_balanced.jsonl` | 50,000 | 每行一个单目标样本：原图 → 编辑图，一个 mask，一条指令（含 no-ref），一种操作 |
+| `surplus.jsonl` | 628 | 超出配额的余量（新增 166、删除 141、替换 180、属性 141），不在正式数据里 |
+| `summary.json` | — | 配额、每台的规划量、导出量、余量 |
+
+图片和 mask 没有复制，记录里是绝对路径，指向 `$ROOT/nodes/node<r>/waves/waveNN/run/…`，不要删除或移动这些目录。
+
+**核对**（2026-10-29，对 `singles_balanced.jsonl` 全量检查，媒体文件抽 2,000 条）
+- 50,000 行，`job_id` 无重复；四种操作各 12,500；每台各 12,500。不需要用余量补缺（`topped_up_from_surplus` 为空）。
+- 来自 25,108 张源图，平均每张约 2 个样本。
+- 指令和 no-ref 指令都不为空；指令协议全部是 2.0。
+- 抽查 2,000 条：原图、编辑图、mask、support mask 都能打开。
+- 源图不在排除表里（benchmark、评测预留、50k 旧版来源、验证池），也和孪生/多目标的源图没有重叠。
+
+**字段**：`job_id`、`case_id`、`unit_id`、`source_id`、`object_id`、`operation`、`instruction`、`instruction_noref`、`instruction_protocol_version`、`instruction_spec`、`ref_phrase`、`scope`、`mask_role`、`bbox`、`point`、`payload`、`source_image`、`edited_image`、`mask`（源区域）、`support_mask`（实际写入区域）、`image_size`、`audit`、`provenance`、`manual_review`、`rank`、`wave`。
+
+```python
+import json
+ROOT = '/mnt/bn/strategy-mllm-train/user/tanyue/experiments2/SAMTokEdit/data_pipeline/02_production_runs/sa1b_samtok_single50k_20261026/final'
+for line in open(f'{ROOT}/singles_balanced.jsonl'):
+    s = json.loads(line)
+    sample = {'source': s['source_image'], 'target': s['edited_image'], 'mask': s['mask'],
+              'instruction': s['instruction'], 'instruction_noref': s['instruction_noref'], 'operation': s['operation']}
+```
+
+**漏斗**（四台合计，48 波）
+
+| | 新增 | 删除 | 替换 | 属性 | 合计 |
+|---|---|---|---|---|---|
+| 规划目标 | 19,031 | 19,764 | 21,413 | 21,420 | 81,628 |
+| 导出（含余量） | 12,666 | 12,641 | 12,680 | 12,641 | 50,628 |
+| 导出率 | 0.67 | 0.64 | 0.59 | 0.59 | 0.62 |
+
+导出率和验证时（0.59）接近。均衡规则会给导出率低的操作多选目标，所以替换和属性规划得多。
+
+**用时**
+- 10-28 15:47 UTC 启动，10-29 14:45 UTC 完成，全程约 23 小时。
+- 其中约 5.6 小时是停机：10-29 00:29 共享盘配额写满，全部节点停下；删掉其他项目的 2.4 TB 数据后，换了一次锁，06:05 续跑。
+- 每台 12 波，波次总用时 61.5 小时，平均每波 77 分钟（中位数 83 分钟）。
+- 约 35.5 GPU·秒/样本，比验证时折算的 45–47 快。原因：独占节点，加上每波更大、固定开销摊得更薄。
+
+**跳过的组**：11 组。
+- 9 组：配额写满时检查点只写了一半，续跑时检测到输入不一致，按设计跳过（`generation input changed`）。
+- 2 组：SAM3 定位文字超过 32 token，与孪生/多目标里的问题相同。
+- 缺口已在后续波次按需求自动补齐。
+
+**示例**（从 `singles_balanced.jsonl` 按固定种子随机抽取，每种操作 2 个，共 8 个，未挑选）
+- 助手目视检查（不是盲评）：7 个合格，1 个小瑕疵（S04：删除手里的小包后，外套下摆边缘略显生硬）。
+- 完整 8 张在 `/opt/tiger/tanyue/visualization_tmp/single_target_50k_20261029/`，脚本 `render_examples.py`。
+- 下面每种操作放 1 张。上排：原图（绿色为目标轮廓）| 结果；下排：对齐放大。放大图里的黑边是裁剪超出图像边界。
+
+**新增**（S01）：在左侧门的铁格栅上挂一个绿色小花环。
+![新增](assets/single_target_50k/add_wreath.jpg)
+
+**删除**（S03）：删除红色立柱楼前的石像。
+![删除](assets/single_target_50k/remove_statue.jpg)
+
+**替换**（S06）：坐着的女人的草帽换成红色贝雷帽。
+![替换](assets/single_target_50k/replace_beret.jpg)
+
+**属性**（S08）：右侧女警的短发改成棕色。
+![属性](assets/single_target_50k/attribute_hair.jpg)
+
+## 6. 验证结果
 
 报告：`/opt/tiger/tanyue/visualization_tmp/single_target_v2_20261026/单目标v2_验证报告.md`；盲评样例（13 页，好坏都有）在同目录的 `单目标v2_盲评样例.pdf`。
 
-### 5.1 质量：助手盲评
+### 6.1 质量：助手盲评
 
 以下是**助手自己的盲评**：随机编号，判定冻结 sha256 后才揭盲；不是独立第三方评审，评审者也是新管线的开发者。
 - 每轮 50k 旧版与新管线各 60 个，每种操作各 15 个。
@@ -258,7 +326,7 @@ python $E5/reproduce/analyze_wave_v21.py $E5/waveNN $E5/analysis/waveNN.json
 - 50k 臂两轮之间合格率差了 12 个百分点，说明评审和抽样本身波动很大，只宜比较同一轮之内的两个臂。
 - 新管线的主要好处：不合格少；add 合格率高（25/30 : 17/30）。replace 合格率没有变高，但没有不合格。
 
-### 5.2 自动通过率（wave02，v2.1）
+### 6.2 自动通过率（wave02，v2.1）
 
 | 层 | add | remove | replace | attribute | 合计 |
 |---|---|---|---|---|---|
@@ -269,12 +337,12 @@ python $E5/reproduce/analyze_wave_v21.py $E5/waveNN $E5/analysis/waveNN.json
 
 两层相交的估计：选中目标中约 46% 既自动通过、又被助手判为合格（58.8% × 78.3%）。
 
-### 5.3 速度
+### 6.3 速度
 
 - 验证时本机每个样本 54.3 GPU·秒（与他人进程共享 GPU），独占节点折算约 45–47。50k 旧版是 46.3。
 - 配对重放：同样的生成时间，v2.1 导出 319 个，v2 导出 231 个（见 2.1）。
 
-## 6. 示例
+## 7. 验证示例
 
 取自第二轮盲评的 v2.1 样本，盲评编号见图下文字。上排是原图（绿色为目标轮廓）和结果，下排是对齐放大。
 
@@ -296,7 +364,7 @@ python $E5/reproduce/analyze_wave_v21.py $E5/waveNN $E5/analysis/waveNN.json
 **删除 · 不合格**（R006）：删除黄色绿篱的右端，却补出一丛新的绿色灌木，没有露出背后的路面和草地。这是新管线两个不合格之一。
 ![删除不合格](assets/single_target/v21_remove_bad.jpg)
 
-## 7. 测试
+## 8. 测试
 
 - `tests/test_single_parallel.py`：
   - 多目标里会串联的两个目标都从原图生成并各自导出，只改动自己的目标；
@@ -323,9 +391,10 @@ python $E5/reproduce/analyze_wave_v21.py $E5/waveNN $E5/analysis/waveNN.json
 
 全量测试：855 通过，1 个失败是改动前就有的。
 
-## 8. 已知问题与下一步
+## 9. 已知问题与下一步
 
-- **5 万生产尚未运行**：提交 Arnold 后，按第 4 节查看进度。完成后在本文补充生产结果（路径、计数、用时、示例）。
+- **数据未经人工验收**：生产数据是自动审核通过的版本，质量参考第 6 节的助手盲评和第 5 节的抽查。
+- **共享盘配额**：图片在共享盘上，生产中途曾因配额写满中断（见第 5 节“用时”）。之后扩量前，先确认配额。
 - **剩余瑕疵主要来自生成器**：
   - 替换或改色后，旧内容在边缘残留（光晕、细条）；
   - 模糊区域里的新内容过于清晰；
